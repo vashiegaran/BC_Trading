@@ -435,11 +435,62 @@ CREATE TABLE IF NOT EXISTS bonding_curve_signals (
     price_15m_multiplier    DOUBLE PRECISION,
     price_1h_multiplier     DOUBLE PRECISION,
     peak_multiplier         DOUBLE PRECISION,
+    graduated               BOOLEAN DEFAULT FALSE,
+    graduated_at            TIMESTAMPTZ,
     created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_bcs_mint ON bonding_curve_signals(mint);
 CREATE INDEX IF NOT EXISTS idx_bcs_created ON bonding_curve_signals(created_at);
+
+
+-- ── bc_paper_trades ──────────────────────────────────────────────
+-- Simulated pre-graduation buys. Entry at BC signal time, outcome tracked through graduation.
+CREATE TABLE IF NOT EXISTS bc_paper_trades (
+    id                      BIGSERIAL PRIMARY KEY,
+    mint                    TEXT NOT NULL,
+    symbol                  TEXT,
+    name                    TEXT,
+    creator_wallet          TEXT,
+    entry_volume_sol        DOUBLE PRECISION,
+    entry_buy_count         INTEGER,
+    entry_sell_count        INTEGER,
+    entry_unique_buyers     INTEGER,
+    entry_buy_sell_ratio    DOUBLE PRECISION,
+    entry_creator_rebuy     BOOLEAN,
+    entry_token_age_secs    DOUBLE PRECISION,
+    entry_signals           JSONB,
+    bc_price_usd            DOUBLE PRECISION,
+    bc_market_cap_usd       DOUBLE PRECISION,
+    bc_progress_pct         DOUBLE PRECISION,
+    bc_virtual_sol_reserves DOUBLE PRECISION,
+    bc_virtual_token_reserves DOUBLE PRECISION,
+    bc_reply_count          INTEGER,
+    bc_last_reply_at        TIMESTAMPTZ,
+    bc_website              TEXT,
+    bc_twitter              TEXT,
+    bc_telegram             TEXT,
+    bc_king_of_hill_at      TIMESTAMPTZ,
+    bc_raw_response         JSONB,
+    sim_buy_sol             DOUBLE PRECISION DEFAULT 0.05,
+    graduated               BOOLEAN DEFAULT FALSE,
+    graduated_at            TIMESTAMPTZ,
+    time_to_graduate_secs   DOUBLE PRECISION,
+    initial_liquidity_sol   DOUBLE PRECISION,
+    price_at_graduation     DOUBLE PRECISION,
+    price_1m                DOUBLE PRECISION,
+    price_5m                DOUBLE PRECISION,
+    price_15m               DOUBLE PRECISION,
+    price_1h                DOUBLE PRECISION,
+    peak_price              DOUBLE PRECISION,
+    peak_multiplier         DOUBLE PRECISION,
+    signal_recorded_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_bcpt_mint ON bc_paper_trades(mint);
+CREATE INDEX IF NOT EXISTS idx_bcpt_graduated ON bc_paper_trades(graduated);
+CREATE INDEX IF NOT EXISTS idx_bcpt_created ON bc_paper_trades(created_at DESC);
 
 
 -- ── bc_gate_backtest ─────────────────────────────────────────────

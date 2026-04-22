@@ -401,7 +401,8 @@ async fn handle_token_trade(
         let signal_payload = build_signal_payload(entry, mint_str);
         let supabase_clone = Arc::clone(supabase);
         tokio::spawn(async move {
-            write_bonding_curve_signal(&supabase_clone, signal_payload).await;
+            write_bonding_curve_signal(&supabase_clone, &signal_payload).await;
+            write_bc_paper_trade(&supabase_clone, &signal_payload).await;
         });
     }
 
@@ -869,18 +870,22 @@ async fn handle_token_complete(
         }
     });
 
-    // ── Mark graduated in bonding_curve_signals (if row exists) ──
+    // ── Mark graduated in bonding_curve_signals + bc_paper_trades ──
     {
         let supabase_grad = Arc::clone(supabase);
         let mint_for_grad = mint_str.to_string();
+        let grad_liquidity = initial_liquidity_sol;
         tokio::spawn(async move {
+            let now_rfc = chrono::Utc::now().to_rfc3339();
+
+            // Update bonding_curve_signals
             let url = format!(
                 "{}/bonding_curve_signals?mint=eq.{}",
                 supabase_grad.base_url, mint_for_grad
             );
             let payload = serde_json::json!({
                 "graduated": true,
-                "graduated_at": chrono::Utc::now().to_rfc3339(),
+                "graduated_at": &now_rfc,
             });
             match supabase_grad.client.patch(&url).json(&payload).send().await {
                 Ok(resp) if resp.status().is_success() => {
@@ -892,6 +897,29 @@ async fn handle_token_complete(
                 }
                 Err(e) => {
                     debug!(mint = %mint_for_grad, "bonding_curve_signals graduation update failed: {}", e);
+                }
+            }
+
+            // Update bc_paper_trades with graduation data
+            let pt_url = format!(
+                "{}/bc_paper_trades?mint=eq.{}",
+                supabase_grad.base_url, mint_for_grad
+            );
+            let pt_payload = serde_json::json!({
+                "graduated": true,
+                "graduated_at": &now_rfc,
+                "initial_liquidity_sol": grad_liquidity,
+            });
+            match supabase_grad.client.patch(&pt_url).json(&pt_payload).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    info!(mint = %mint_for_grad, "🎓 bc_paper_trades: marked graduated");
+                }
+                Ok(resp) => {
+                    let body = resp.text().await.unwrap_or_default();
+                    debug!(mint = %mint_for_grad, "bc_paper_trades graduation update: {}", body);
+                }
+                Err(e) => {
+                    debug!(mint = %mint_for_grad, "bc_paper_trades graduation update failed: {}", e);
                 }
             }
 
@@ -1266,7 +1294,7 @@ fn detect_sell_buy_flip(trade_log: &[(i64, f64, bool, Pubkey)]) -> bool {
 }
 
 /// Fire-and-forget INSERT to bonding_curve_signals.
-async fn write_bonding_curve_signal(supabase: &SupabaseClient, payload: serde_json::Value) {
+async fn write_bonding_curve_signal(supabase: &SupabaseClient, payload: &serde_json::Value) {
     let mint = payload.get("mint").and_then(|m| m.as_str()).unwrap_or("unknown");
     let url = format!("{}/bonding_curve_signals", supabase.base_url);
     match supabase.client.post(&url).json(&payload).send().await {
@@ -1286,6 +1314,154 @@ async fn write_bonding_curve_signal(supabase: &SupabaseClient, payload: serde_js
             warn!(mint = %mint, "bonding_curve_signals INSERT error: {}", e);
         }
     }
+}
+
+/// Fire-and-forget INSERT to bc_paper_trades — simulated pre-graduation buy.
+/// Fetches bonding curve state from pump.fun API for entry price + metadata.
+async fn write_bc_paper_trade(supabase: &SupabaseClient, signal: &serde_json::Value) {
+    let mint = signal.get("mint").and_then(|m| m.as_str()).unwrap_or("unknown");
+
+    let bsr = signal.get("signals")
+        .and_then(|s| s.get("buy_sell_ratio"))
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let creator_rebuy = signal.get("signals")
+        .and_then(|s| s.get("creator_rebuy"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // Fetch bonding curve state from pump.fun API
+    let coin_data = fetch_pumpfun_coin(mint).await;
+
+    let mut payload = serde_json::json!({
+        "mint": mint,
+        "symbol": signal.get("symbol"),
+        "name": signal.get("name"),
+        "creator_wallet": signal.get("creator_wallet"),
+        "entry_volume_sol": signal.get("total_volume_sol"),
+        "entry_buy_count": signal.get("buy_count"),
+        "entry_sell_count": signal.get("sell_count"),
+        "entry_unique_buyers": signal.get("unique_buyers"),
+        "entry_buy_sell_ratio": bsr,
+        "entry_creator_rebuy": creator_rebuy,
+        "entry_token_age_secs": signal.get("token_age_secs"),
+        "entry_signals": signal.get("signals"),
+        "sim_buy_sol": 0.05,
+    });
+
+    // Merge pump.fun coin data into payload
+    if let Some(ref coin) = coin_data {
+        let obj = payload.as_object_mut().unwrap();
+
+        // Price: virtual_sol_reserves / virtual_token_reserves * 1e6 (adjusted for decimals)
+        let v_sol = coin.get("virtual_sol_reserves").and_then(|v| v.as_f64());
+        let v_tok = coin.get("virtual_token_reserves").and_then(|v| v.as_f64());
+        if let (Some(vs), Some(vt)) = (v_sol, v_tok) {
+            if vt > 0.0 {
+                // reserves are in lamports/raw units — convert to SOL price per token
+                let price_sol = vs / vt;
+                // Rough USD estimate: ~150 USD/SOL (will be approximate)
+                obj.insert("bc_price_usd".to_string(), serde_json::json!(price_sol));
+            }
+        }
+
+        // Market cap
+        if let Some(mc) = coin.get("usd_market_cap").and_then(|v| v.as_f64()) {
+            obj.insert("bc_market_cap_usd".to_string(), serde_json::json!(mc));
+        }
+
+        // Bonding curve progress %
+        if let Some(progress) = coin.get("bonding_curve_progress") {
+            if let Some(p) = progress.as_f64() {
+                obj.insert("bc_progress_pct".to_string(), serde_json::json!(p));
+            } else if let Some(s) = progress.as_str() {
+                if let Ok(p) = s.parse::<f64>() {
+                    obj.insert("bc_progress_pct".to_string(), serde_json::json!(p));
+                }
+            }
+        }
+
+        // Virtual reserves
+        if let Some(vs) = v_sol {
+            obj.insert("bc_virtual_sol_reserves".to_string(), serde_json::json!(vs));
+        }
+        if let Some(vt) = v_tok {
+            obj.insert("bc_virtual_token_reserves".to_string(), serde_json::json!(vt));
+        }
+
+        // Social / metadata
+        if let Some(rc) = coin.get("reply_count").and_then(|v| v.as_i64()) {
+            obj.insert("bc_reply_count".to_string(), serde_json::json!(rc));
+        }
+        if let Some(lr) = coin.get("last_reply").and_then(|v| v.as_str()) {
+            obj.insert("bc_last_reply_at".to_string(), serde_json::json!(lr));
+        }
+        if let Some(w) = coin.get("website").and_then(|v| v.as_str()) {
+            if !w.is_empty() {
+                obj.insert("bc_website".to_string(), serde_json::json!(w));
+            }
+        }
+        if let Some(t) = coin.get("twitter").and_then(|v| v.as_str()) {
+            if !t.is_empty() {
+                obj.insert("bc_twitter".to_string(), serde_json::json!(t));
+            }
+        }
+        if let Some(tg) = coin.get("telegram").and_then(|v| v.as_str()) {
+            if !tg.is_empty() {
+                obj.insert("bc_telegram".to_string(), serde_json::json!(tg));
+            }
+        }
+        if let Some(koth) = coin.get("king_of_the_hill_timestamp").and_then(|v| v.as_i64()) {
+            if koth > 0 {
+                let dt = chrono::DateTime::from_timestamp_millis(koth);
+                if let Some(d) = dt {
+                    obj.insert("bc_king_of_hill_at".to_string(), serde_json::json!(d.to_rfc3339()));
+                }
+            }
+        }
+
+        // Store full raw response for future analysis
+        obj.insert("bc_raw_response".to_string(), coin.clone());
+
+        info!(
+            mint = %mint,
+            mc_usd = coin.get("usd_market_cap").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            reply_count = coin.get("reply_count").and_then(|v| v.as_i64()).unwrap_or(0),
+            "📡 pump.fun coin data fetched for BC paper trade"
+        );
+    } else {
+        warn!(mint = %mint, "pump.fun coin fetch failed — recording paper trade without BC state");
+    }
+
+    let url = format!("{}/bc_paper_trades", supabase.base_url);
+    match supabase.client.post(&url).json(&payload).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            info!(mint = %mint, bsr = format!("{:.2}", bsr), "🧪 BC paper trade recorded (pre-grad buy simulated)");
+        }
+        Ok(resp) => {
+            let body = resp.text().await.unwrap_or_default();
+            warn!(mint = %mint, "bc_paper_trades INSERT failed: {}", body);
+        }
+        Err(e) => {
+            warn!(mint = %mint, "bc_paper_trades INSERT error: {}", e);
+        }
+    }
+}
+
+/// Fetch bonding curve coin data from pump.fun REST API.
+/// Returns the parsed JSON response or None on failure.
+async fn fetch_pumpfun_coin(mint: &str) -> Option<serde_json::Value> {
+    let url = format!("https://frontend-api.pump.fun/coins/{}", mint);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .ok()?;
+
+    let resp = client.get(&url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    resp.json().await.ok()
 }
 
 /// Post-graduation price tracker: records price at T+1m, 5m, 15m, 1h
@@ -1317,9 +1493,19 @@ async fn spawn_bc_price_tracker(supabase: Arc<SupabaseClient>, mint: String) {
         return;
     }
 
+    // Write baseline (graduation price) to bc_paper_trades
+    {
+        let pt_url = format!("{}/bc_paper_trades?mint=eq.{}", supabase.base_url, mint);
+        let pt_payload = serde_json::json!({ "price_at_graduation": baseline });
+        let _ = supabase.client.patch(&pt_url).json(&pt_payload).send().await;
+    }
+
     let mut peak_price: f64 = baseline;
 
-    for (delay_secs, column) in intervals {
+    // Map signal column names to bc_paper_trades column names
+    let pt_columns: &[&str] = &["price_1m", "price_5m", "price_15m", "price_1h"];
+
+    for (i, (delay_secs, column)) in intervals.iter().enumerate() {
         tokio::time::sleep(std::time::Duration::from_secs(*delay_secs)).await;
 
         let price = match fetch_bc_price(&mint).await {
@@ -1332,6 +1518,8 @@ async fn spawn_bc_price_tracker(supabase: Arc<SupabaseClient>, mint: String) {
         }
 
         let multiplier = price / baseline;
+
+        // Update bonding_curve_signals
         let url = format!(
             "{}/bonding_curve_signals?mint=eq.{}",
             supabase.base_url, mint
@@ -1341,10 +1529,19 @@ async fn spawn_bc_price_tracker(supabase: Arc<SupabaseClient>, mint: String) {
         payload.insert("peak_multiplier".to_string(), serde_json::json!(peak_price / baseline));
         let _ = supabase.client.patch(&url).json(&serde_json::Value::Object(payload)).send().await;
 
+        // Update bc_paper_trades with actual prices
+        let pt_url = format!("{}/bc_paper_trades?mint=eq.{}", supabase.base_url, mint);
+        let mut pt_payload = serde_json::Map::new();
+        pt_payload.insert(pt_columns[i].to_string(), serde_json::json!(price));
+        pt_payload.insert("peak_price".to_string(), serde_json::json!(peak_price));
+        pt_payload.insert("peak_multiplier".to_string(), serde_json::json!(peak_price / baseline));
+        let _ = supabase.client.patch(&pt_url).json(&serde_json::Value::Object(pt_payload)).send().await;
+
         debug!(
             mint = %mint,
             column = column,
             multiplier = format!("{:.2}x", multiplier),
+            price = format!("{:.8}", price),
             "BC signal price update"
         );
     }
