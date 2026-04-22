@@ -1454,6 +1454,7 @@ async fn fetch_pumpfun_coin(mint: &str) -> Option<serde_json::Value> {
     let url = format!("https://frontend-api.pump.fun/coins/{}", mint);
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36")
         .build()
         .ok()?;
 

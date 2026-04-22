@@ -33,13 +33,6 @@ CREATE TABLE IF NOT EXISTS positions (
     sniper_features         JSONB,
     post_trade_features     JSONB,
     monitoring_snapshot      JSONB,
-    -- Narrative/moonbag columns
-    narrative_state         TEXT,
-    narrative_score         INTEGER,
-    moonbag_promoted        BOOLEAN DEFAULT FALSE,
-    moonbag_exit_reason     TEXT,
-    moonbag_exit_multiplier DOUBLE PRECISION,
-    moonbag_hold_duration_secs BIGINT,
     -- Exit columns (patched on close)
     exit_tx_sig             TEXT,
     exit_price_usd          DOUBLE PRECISION,
@@ -204,68 +197,7 @@ CREATE INDEX IF NOT EXISTS idx_trade_latency_side ON trade_latency(side);
 CREATE INDEX IF NOT EXISTS idx_trade_latency_created_at ON trade_latency(created_at DESC);
 
 
--- ── moonbag_positions ────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS moonbag_positions (
-    id                      BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    position_id             BIGINT NOT NULL,
-    mint                    TEXT NOT NULL,
-    token_name              TEXT,
-    token_symbol            TEXT,
-    narrative_state         TEXT NOT NULL,
-    entry_price_usd         DOUBLE PRECISION NOT NULL DEFAULT 0,
-    token_amount            DOUBLE PRECISION NOT NULL DEFAULT 0,
-    sol_value               DOUBLE PRECISION NOT NULL DEFAULT 0,
-    peak_price_usd          DOUBLE PRECISION NOT NULL DEFAULT 0,
-    peak_multiplier         DOUBLE PRECISION NOT NULL DEFAULT 0,
-    initial_trailing_pct    DOUBLE PRECISION NOT NULL DEFAULT 0,
-    max_hold_secs           BIGINT NOT NULL DEFAULT 0,
-    profit_gate_multiplier  DOUBLE PRECISION NOT NULL DEFAULT 2.0,
-    profit_gate_reached     BOOLEAN NOT NULL DEFAULT FALSE,
-    extension_checked       BOOLEAN NOT NULL DEFAULT FALSE,
-    narrative_recheck_count INTEGER NOT NULL DEFAULT 0,
-    exit_reason             TEXT,
-    exit_price_usd          DOUBLE PRECISION,
-    exit_multiplier         DOUBLE PRECISION,
-    final_trailing_pct      DOUBLE PRECISION,
-    hold_duration_secs      BIGINT,
-    promoted_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    exited_at               TIMESTAMPTZ,
-    is_paper_trade          BOOLEAN NOT NULL DEFAULT TRUE,
-    strategy_version        TEXT
-);
 
-CREATE INDEX IF NOT EXISTS idx_moonbag_positions_mint ON moonbag_positions(mint);
-CREATE INDEX IF NOT EXISTS idx_moonbag_positions_position_id ON moonbag_positions(position_id);
-CREATE INDEX IF NOT EXISTS idx_moonbag_positions_promoted_at ON moonbag_positions(promoted_at);
-
-
--- ── narrative_checks ─────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS narrative_checks (
-    id                      BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    position_id             BIGINT,
-    mint                    TEXT NOT NULL,
-    token_name              TEXT,
-    token_symbol            TEXT,
-    check_phase             TEXT NOT NULL,
-    check_index             INTEGER,
-    narrative_state         TEXT NOT NULL,
-    score                   INTEGER NOT NULL DEFAULT 0,
-    narrative_strength      DOUBLE PRECISION NOT NULL DEFAULT 0,
-    market_strength         DOUBLE PRECISION NOT NULL DEFAULT 0,
-    web_sources_found       INTEGER NOT NULL DEFAULT 0,
-    reasons                 JSONB DEFAULT '[]'::jsonb,
-    risk_flags              JSONB DEFAULT '[]'::jsonb,
-    current_price_usd       DOUBLE PRECISION,
-    entry_price_usd         DOUBLE PRECISION,
-    peak_multiplier         DOUBLE PRECISION,
-    hold_seconds            BIGINT,
-    momentum_ratio          DOUBLE PRECISION,
-    created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_narrative_checks_mint ON narrative_checks(mint);
-CREATE INDEX IF NOT EXISTS idx_narrative_checks_position_id ON narrative_checks(position_id);
-CREATE INDEX IF NOT EXISTS idx_narrative_checks_created_at ON narrative_checks(created_at);
 
 
 -- ── tokens_seen ──────────────────────────────────────────────────
@@ -320,27 +252,7 @@ CREATE INDEX IF NOT EXISTS idx_system_events_type ON system_events(event_type);
 CREATE INDEX IF NOT EXISTS idx_system_events_at ON system_events(occurred_at);
 
 
--- ── shadow_log ───────────────────────────────────────────────────
--- Post-exit price shadow logging for missed-gain analysis.
-CREATE TABLE IF NOT EXISTS shadow_log (
-    id                      BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    position_id             BIGINT,
-    mint                    TEXT NOT NULL,
-    entry_price_usd         DOUBLE PRECISION,
-    snapshots               JSONB,
-    shadow_peak_usd         DOUBLE PRECISION,
-    shadow_peak_multiplier  DOUBLE PRECISION,
-    shadow_low_usd          DOUBLE PRECISION,
-    total_ticks             BIGINT,
-    exit_at_secs            BIGINT,
-    exit_reason             TEXT,
-    duration_secs           BIGINT,
-    completed_at            TIMESTAMPTZ,
-    created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
 
-CREATE INDEX IF NOT EXISTS idx_shadow_log_position ON shadow_log(position_id);
-CREATE INDEX IF NOT EXISTS idx_shadow_log_mint ON shadow_log(mint);
 
 
 -- ── daily_stats ──────────────────────────────────────────────────
@@ -353,59 +265,7 @@ CREATE TABLE IF NOT EXISTS daily_stats (
 );
 
 
--- ── position_enrichment_snapshots ────────────────────────────────
-CREATE TABLE IF NOT EXISTS position_enrichment_snapshots (
-    id                      BIGSERIAL PRIMARY KEY,
-    position_id             BIGINT NOT NULL,
-    mint                    TEXT NOT NULL,
-    snapshot_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    elapsed_secs            INTEGER NOT NULL,
-    trigger                 TEXT NOT NULL,
-    price_usd               DOUBLE PRECISION,
-    pnl_pct                 DOUBLE PRECISION,
-    peak_multiplier         DOUBLE PRECISION,
-    holder_count            INTEGER,
-    holder_delta_from_prev  INTEGER,
-    top10_concentration_pct DOUBLE PRECISION,
-    vol_5m_usd              DOUBLE PRECISION,
-    vol_1h_usd              DOUBLE PRECISION,
-    vol_acceleration        DOUBLE PRECISION,
-    buy_count_5m            INTEGER,
-    sell_count_5m           INTEGER,
-    buy_sell_ratio          DOUBLE PRECISION,
-    unique_traders_5m       INTEGER,
-    social_count            INTEGER,
-    has_twitter             BOOLEAN,
-    has_telegram            BOOLEAN,
-    has_website             BOOLEAN,
-    new_social_links        JSONB,
-    smart_wallet_buy_count  INTEGER,
-    smart_wallet_sell_count INTEGER,
-    smart_wallet_net_sol    DOUBLE PRECISION,
-    smart_wallets           JSONB,
-    whale_buy_count         INTEGER,
-    whale_sell_count        INTEGER,
-    largest_trade_sol       DOUBLE PRECISION,
-    dev_wallet_sol_delta    DOUBLE PRECISION,
-    dev_wallet_token_balance DOUBLE PRECISION,
-    liquidity_usd           DOUBLE PRECISION,
-    liquidity_delta_pct     DOUBLE PRECISION,
-    market_cap_usd          DOUBLE PRECISION,
-    price_impact_1sol_bps   DOUBLE PRECISION,
-    would_have_suppressed_dip_death BOOLEAN,
-    suppression_reason      TEXT,
-    raw_birdeye             JSONB,
-    raw_dexscreener         JSONB,
-    raw_solana_tracker      JSONB,
-    raw_das                 JSONB,
-    apis_called             JSONB,
-    apis_failed             JSONB
-);
 
-CREATE INDEX IF NOT EXISTS idx_pes_position_id ON position_enrichment_snapshots(position_id);
-CREATE INDEX IF NOT EXISTS idx_pes_mint ON position_enrichment_snapshots(mint);
-CREATE INDEX IF NOT EXISTS idx_pes_trigger ON position_enrichment_snapshots(trigger);
-CREATE INDEX IF NOT EXISTS idx_pes_snapshot_at ON position_enrichment_snapshots(snapshot_at DESC);
 
 
 -- ══════════════════════════════════════════════════════════════════
@@ -493,44 +353,7 @@ CREATE INDEX IF NOT EXISTS idx_bcpt_graduated ON bc_paper_trades(graduated);
 CREATE INDEX IF NOT EXISTS idx_bcpt_created ON bc_paper_trades(created_at DESC);
 
 
--- ── bc_gate_backtest ─────────────────────────────────────────────
--- PnL backtest results from scripts/backfill_bc_gate_pnl.py.
-CREATE TABLE IF NOT EXISTS bc_gate_backtest (
-    mint                    TEXT PRIMARY KEY,
-    symbol                  TEXT,
-    signal_recorded_at      TIMESTAMPTZ NOT NULL,
-    matches_gate_v1         BOOLEAN,
-    graduated               BOOLEAN,
-    bsr                     DOUBLE PRECISION,
-    unique_buyers           INTEGER,
-    creator_rebuy           BOOLEAN,
-    total_volume_sol        DOUBLE PRECISION,
-    token_age_secs          DOUBLE PRECISION,
-    price_at_signal         DOUBLE PRECISION,
-    price_peak              DOUBLE PRECISION,
-    peak_multiplier         DOUBLE PRECISION,
-    time_to_peak_mins       DOUBLE PRECISION,
-    max_drawdown_pct        DOUBLE PRECISION,
-    price_24h               DOUBLE PRECISION,
-    sim_tp30_sl20_pnl_pct   DOUBLE PRECISION,
-    sim_tp30_sl20_reason    TEXT,
-    sim_tp50_sl30_pnl_pct   DOUBLE PRECISION,
-    sim_tp50_sl30_reason    TEXT,
-    sim_tp100_sl30_pnl_pct  DOUBLE PRECISION,
-    sim_tp100_sl30_reason   TEXT,
-    sim_tp100_sl50_pnl_pct  DOUBLE PRECISION,
-    sim_tp100_sl50_reason   TEXT,
-    sim_tp200_sl50_pnl_pct  DOUBLE PRECISION,
-    sim_tp200_sl50_reason   TEXT,
-    candles_used            INTEGER,
-    backfill_source         TEXT,
-    backfill_error          TEXT,
-    backfilled_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
 
-CREATE INDEX IF NOT EXISTS idx_bcgb_signal_at ON bc_gate_backtest(signal_recorded_at);
-CREATE INDEX IF NOT EXISTS idx_bcgb_gate ON bc_gate_backtest(matches_gate_v1);
-CREATE INDEX IF NOT EXISTS idx_bcgb_grad ON bc_gate_backtest(graduated);
 
 
 -- ══════════════════════════════════════════════════════════════════
