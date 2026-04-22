@@ -1,0 +1,7 @@
+
+.env
+bot-wallet.json
+bot-wallet-new.json
+target/
+*.db
+scripts/

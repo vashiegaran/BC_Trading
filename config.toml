@@ -1,0 +1,454 @@
+# ============================================================
+# STRATEGY VERSION — stamped into every position row.
+# Bump this when you change filters/exit params, then add a
+# section to VERSION.md describing what changed.
+# ============================================================
+strategy_version = "bc-research-v1"
+
+# ============================================================
+# DETECTION
+# ============================================================
+[detection]
+
+# "pumpfun_ws" = free WebSocket, covers pump.fun launches
+# "geyser"     = paid gRPC stream, covers all Solana launches
+method = "pumpfun_ws"
+
+# Separately poll Raydium for tokens not launched via pump.fun
+poll_raydium = false
+poll_interval_seconds = 5
+
+# ── Bonding curve signal recording (data collection only, no trading) ──
+# Records trade patterns for tokens approaching graduation (~60%+ progress).
+# Data goes to `bonding_curve_signals` Supabase table for backtesting.
+bonding_curve_signals_enabled = true
+bc_signal_volume_threshold = 50.0  # SOL — record when cumulative volume hits this
+
+
+# ============================================================
+# FILTERS
+# All filters run concurrently. Token must pass ALL of them.
+# ============================================================
+[filters]
+
+# Minimum USD value of liquidity in the trading pool at launch
+# v3: lowered from 10000 → 6000 — pump-AMM graduated tokens launch at ~$6-10K.
+# v7: lowered from 6000 → 1500 — sniper hard filter now 5 SOL (~$1.7K double-sided).
+# Aligns with sniper filter change: 5-10 SOL range showed 42.9% moon rate.
+min_liquidity_usd = 1500
+
+# Maximum percentage held by top 10 wallets combined
+# Phase 3: raised from 65→80. Post-buy at 66-74% were false positives;
+# real rugs were all >95%. Hard filter (sniper/filters.rs) still blocks >65% pre-buy.
+max_top_holder_pct = 80.0
+
+# Maximum percentage held by the developer wallet
+max_dev_hold_pct = 5.0
+
+# Maximum token age in seconds from first detection to graduation
+# v5: raised from 600 → 900 — Supabase data showed 10 tokens rejected in 600-900s
+# bucket (20% of age rejects). Architecture doc already specified 900s.
+max_token_age_seconds = 900
+
+# Maximum graduation time in seconds — slow graduation = weak bonding curve demand
+max_graduation_time_seconds = 7200
+
+# Maximum market cap at time of detection (USD)
+max_market_cap_usd = 150000
+
+# Minimum market cap floor (USD) — reject tokens with zero or absurdly low MC
+# (broken price data, malformed tokens)
+min_market_cap_usd = 5000
+
+# Maximum price impact your buy creates (%)
+max_price_impact_pct = 5.0
+
+# RugCheck overall risk score threshold (0 = perfect, higher = riskier)
+# Fresh pump.fun tokens often get inflated scores (10k+) before RugCheck indexes them
+max_rugcheck_score = 3500
+
+# Require liquidity to be locked in a smart contract
+# Set to false — pump.fun graduated tokens never lock LP.
+# Protection is now via Helius WS real-time LP vault monitoring instead.
+require_liquidity_locked = false
+
+# Minimum number of days the liquidity must remain locked
+min_lock_duration_days = 7
+
+# Reject tokens where bundled launch was detected
+reject_bundled = true
+
+# Minimum buy pressure percentage — below this, momentum is too weak
+# v5: lowered 58 → 54 — Supabase showed 10+ tokens rejected at 55-57.9% (marginal).
+# Arch doc says 52; keep 54 as conservative middle.
+min_buy_pressure_pct = 54.0
+
+# Minimum bonding curve volume (SOL) — below this, nobody cared
+min_bonding_volume_sol = 5.0
+
+# Minimum number of unique buyer wallets required
+# v3: lowered from 12 → 8 — tokens with 8-11 unique buyers were being rejected,
+# some went 2-5x. 8 still filters out ultra-thin launches.
+min_unique_buyers = 40
+
+# Maximum percentage any SINGLE non-dev wallet can hold.
+# One whale holding >25% can crash the price alone.
+max_single_holder_pct = 25.0
+
+# Minimum number of distinct token holders (from getTokenLargestAccounts).
+# Fewer than 8 = too thin, easy to manipulate.
+min_holder_count = 8
+
+# Window size in milliseconds for coordinated buy detection
+coordinated_window_ms = 3000
+
+# Maximum buys from new wallets in a single window before flagging
+coordinated_buy_threshold = 10
+
+# ── Bonding Curve Pattern Filters (data-driven from 1249 BC signals) ──
+
+# Reject tokens where the creator wallet bought back during bonding curve.
+# Data: creator_rebuy tokens graduate at 1.1% vs 6.0% without — manipulation signal.
+reject_creator_rebuy = true
+
+# Minimum buy/sell ratio on the bonding curve.
+# Data: ratio > 2.3 graduates at 10.9% vs < 1.1 at 3.2%. Using 1.2 to avoid over-filtering.
+min_buy_sell_ratio = 2.0
+
+# Maximum sell transactions on bonding curve. High sells = dump pressure.
+# Data: graduated tokens median 20 sells vs non-graduated 28. Using 40 as generous upper bound.
+max_bc_sell_count = 40
+
+# Minimum sniper score to pass.
+# v9 set at 60 (data-driven from corrupted post-bug data).
+# v10 kept at 60: historical pre-bug data (53 trades, +2.63 SOL, 65% WR) had NO
+# score gate at all. Current 60-70 "losing" band is an artifact of the momentum-kill
+# bug, not a true signal. Will re-tune once tick monitoring is fixed (v10 pool-owner fix).
+min_sniper_score = 60.0
+
+
+# ============================================================
+# EXECUTION
+# ============================================================
+[execution]
+
+# Amount of SOL to spend per trade (max for dynamic sizing)
+buy_amount_sol = 0.05
+
+# Dynamic position sizing: scale buy size based on pool liquidity.
+# Low-liq tokens get smaller positions to limit risk.
+# Range: min_buy_sol (at 30 SOL liq) → max_buy_sol (at 80+ SOL liq)
+min_buy_sol = 0.04
+max_buy_sol = 0.05
+
+# Liquidity threshold: below this = "low-liq" (tighter exits + smaller sizing)
+low_liq_threshold_sol = 50.0
+
+# Slippage tolerance in basis points (100 bps = 1%)
+# 15% for graduation rush = high slippage
+# v8: reduced from 1500 → 1000 — 15% entry cost caused -45% losses on weak tokens.
+slippage_bps = 1000
+
+# Maximum number of open positions at any time
+# v2: raised from 5 → 8; 74% of passed tokens never traded due to full slots
+max_open_positions = 8
+
+# Transaction confirmation timeout in seconds
+tx_confirm_timeout_secs = 25
+
+# Transaction confirmation poll interval in milliseconds
+tx_confirm_poll_ms = 200
+
+# API request timeout in seconds (Jupiter, etc.)
+api_request_timeout_secs = 3
+
+# Maximum retries for API requests
+max_retries = 3
+
+# Priority fee: maximum lamports to pay (0.0005 SOL = 500,000 lamports)
+priority_fee_max_lamports = 500000
+
+# Priority level sent to Jupiter: "medium", "high", "veryHigh"
+priority_level = "veryHigh"
+
+# Maximum allowed price move (%) between detection and execution.
+# First minute is volatile — allow wider moves for sniping.
+# 0 = disabled.
+max_entry_price_move_pct = 50.0
+
+# Simulated slippage for paper trades (basis points). 100 bps = 1%.
+# Penalizes entry (pay more) and exit (receive less) to model real conditions.
+# Typical PumpFun graduation slippage: 200-500 bps (2-5%).
+paper_slippage_bps = 250
+# Simulated execution delay for paper exits (ms).
+# After sleeping, re-fetches price to capture real drift.
+# Real exits take 3-8s. 2000 = tighter simulation.
+paper_exit_delay_ms = 2000
+
+
+# ============================================================
+# JITO
+# ============================================================
+[jito]
+
+# Multiplier on current tip floor price (sniper: speed matters more)
+tip_multiplier = 3.0
+
+
+# ============================================================
+# EXIT RULES
+# ============================================================
+[exit]
+
+# Sniped tokens that don't move in 15 min are dead
+max_hold_seconds = 900
+
+# TP1: sell 25% at 1.8x — small insurance, keep 75% for potential moonbag
+tp1_multiplier = 1.8
+tp1_sell_pct = 25
+
+# TP2: sell 50% of remaining at 4x (300% gain)
+tp2_multiplier = 4.0
+tp2_sell_pct = 50
+
+# TP3: moonshot sell remainder at 8x
+tp3_multiplier = 8.0
+
+# Hard stop — accept losses quickly for sniping
+stop_loss_pct = 35.0
+
+# Two-tier stop: if position has NEVER been profitable — tighter for sniper
+# v2: tightened from 25% → 20% to cut losses faster on dead tokens
+never_profitable_stop_loss_pct = 20.0
+never_profitable_grace_secs = 20
+
+# Minimum seconds before any stop can fire (give initial chop room)
+min_hold_before_stop_loss = 5
+
+# Low-liquidity exit overrides (applied when initial_liquidity < low_liq_threshold_sol)
+# These override the normal values for positions in shallow pools.
+# 0 = use normal value (no override).
+low_liq_trailing_stop_pct = 22.0
+low_liq_max_hold_seconds = 600
+low_liq_stop_loss_pct = 30.0
+
+# Trailing stop — wider to let runners breathe
+trailing_stop_pct = 30.0
+# v5: lowered 1.3 → 1.15 — Supabase showed 5 stop-losses where peak hit 1.2-1.5x but
+# trailing never engaged due to 1.3 floor. Let trailing protect small winners.
+trailing_stop_min_multiplier = 1.15
+
+# Adaptive trailing: tighten above 3x to lock gains (but not too tight)
+trailing_stop_adaptive_multiplier = 3.0
+trailing_stop_adaptive_pct = 18.0
+
+# Post-TP1 trailing stop — give room after first profit take
+trailing_stop_post_tp1_pct = 22.0
+trailing_stop_post_tp1_floor = true
+
+# Post-TP2 moonbag trailing — wider to let remaining ride
+trailing_stop_post_tp2_pct = 30.0
+
+# Volume drop (not implemented)
+volume_drop_threshold_pct = 75.0
+
+# Short delay to confirm price isn't already in free-fall post-graduation
+entry_confirmation_delay_secs = 2
+entry_confirmation_checks = 2
+
+# Safety cap on realized loss (sniper: tighter)
+max_realized_loss_pct = 40.0
+
+# Early Momentum Kill Gate: exit if price hasn't reached min multiplier
+# after this many seconds. Catches tokens with no traction before they
+# bleed into dip_death or stop_loss.
+# v5.1: widened 40s → 90s — 40s was firing on post-graduation chop
+# (e.g. 4p4j exited at t+40s / -9% before any real sell signal).
+# Code also enforces a hard 60s floor regardless of this value.
+momentum_kill_secs = 90
+momentum_kill_min_multiplier = 1.3
+
+
+# ============================================================
+# RISK LIMITS
+# ============================================================
+[risk]
+
+# Daily loss limit in SOL — stop new buys if exceeded
+daily_loss_limit_sol = 1.0
+
+# Maximum SOL deployed across all open positions
+max_portfolio_exposure_sol = 0.6
+
+# Minimum SOL balance to keep for gas fees
+min_sol_balance = 0.2
+
+
+# ============================================================
+# MONITORING
+# ============================================================
+[monitoring]
+
+# Price check interval per position (milliseconds) — sniper: 2s intervals
+monitor_interval_ms = 2000
+
+# How often to check the dev wallet balance (seconds)
+dev_wallet_check_interval_secs = 10
+
+# RPC timeout for dev wallet balance checks (seconds)
+dev_wallet_rpc_timeout_secs = 5
+
+# Dev wallet dump threshold percentage — tighter for sniping (15% not 20%)
+dev_dump_threshold_pct = 15.0
+
+# Maximum sane price in USD — prices above this are rejected as invalid
+max_sane_price_usd = 1000000.0
+
+# Maximum allowed single-tick price change ratio (e.g., 10.0 = 1000%)
+max_price_change_ratio = 10.0
+
+# Price fetch timeout in seconds (Birdeye API)
+price_timeout_secs = 3
+
+# LP vault drop threshold — tighter for sniping (15% not 20%)
+lp_drop_threshold_pct = 15.0
+
+# ── Tick stream & dip state machine ──
+
+# Rolling window for momentum calculation (seconds) — sniper: wider window
+tick_window_secs = 60.0
+
+# Drawdown % from peak to enter DIP_WATCH — sniper: tighter (15% not 28%)
+dip_threshold_pct = 15.0
+
+# Grace period (seconds) — give dips time to recover
+dip_grace_period_secs = 25.0
+
+# Buy volume ratio above which recovery is detected (0.55 = 55% buys)
+dip_recovery_buy_ratio = 0.55
+
+# Minimum SOL volume in tick window to trust momentum signals
+dip_min_volume_sol = 0.05
+
+# Single sell larger than this × average trade size = whale dump (death signal)
+dip_whale_sell_multiplier = 3.0
+
+# Minimum position age (seconds) before dip_death can fire — sniper: 30s
+min_hold_before_dip_death = 30
+
+# No trades for this many seconds during a dip = token dead — sniper: 30s
+dip_no_trades_timeout_secs = 30.0
+
+# Shadow-log price for this many seconds after a position is closed.
+# Data goes to the `shadow_log` Supabase table for post-mortem analysis.
+# 0 = disabled.
+shadow_log_duration_secs = 3600
+
+# Force-close any position still in TradingState after this many seconds.
+# Safety net — should be longer than max_hold_seconds so TimeStop fires first.
+stale_position_timeout_secs = 1200
+
+# ── Helius WS price stream (PR-C) ──
+# Subscribe to pump.fun bonding curve accounts via Helius Enhanced WS and
+# serve cached prices instead of polling Jupiter for every monitor tick.
+# Falls back to Jupiter automatically for graduated / Raydium tokens.
+# Set false to revert to v5 polling-only behavior without recompiling.
+enable_helius_price_ws = true
+
+# ── Enrichment sampler (passive data collection for v6) ──
+# Writes JSONB snapshots to `position_enrichment_snapshots` on schedule
+# (30s/2m/5m/10m/20m/30m/60m) plus pre_dip_death events. Pure logging.
+enrichment_sampler_enabled = true
+# Tier 3: at T+1h post-exit, check if token pumped ≥3× entry and log the
+# enrichment snapshot so we can quantify missed moonbags.
+enrichment_post_exit_check_enabled = true
+
+# ── Narrative moonbag system ──
+# Enable OpenAI-powered narrative detection for moonbag promotion.
+# Requires OPENAI_API_KEY in .env. Disabled if false or key missing.
+narrative_check_enabled = false
+
+# Seconds after entry to run each narrative check (decaying schedule).
+# v4: reduced from 3 → 2 checks. Most positions exit by T+4m. Third check
+# at T+6m rarely fires and the on-chain data (DexScreener, Birdeye) already
+# captures the same signals as Twitter. Two checks is enough for promotion.
+# [120, 300] = check at T+2m, T+5m.
+narrative_check_intervals_secs = [120, 300]
+
+# Maximum concurrent moonbag positions (effectively unlimited).
+moonbag_max_concurrent = 20
+
+# Max hold hours per narrative state:
+# EARLY_ATTENTION: short leash — prove yourself
+moonbag_max_hold_early_hours = 12
+# EXPANDING_ATTENTION: earned more time
+moonbag_max_hold_expanding_hours = 24
+# RUNNER_CONFIRMED: cult tokens get the full window
+moonbag_max_hold_confirmed_hours = 48
+
+# Floor: moonbag never exits below this × entry price.
+moonbag_floor_multiplier = 1.2
+
+# Initial trailing stops per narrative state (used in first 30 min):
+moonbag_trailing_early = 45.0
+moonbag_trailing_expanding = 55.0
+moonbag_trailing_confirmed = 55.0
+
+# Profit gate: age-based trail decay only kicks in once peak >= this × entry.
+# Below this multiplier, keep the initial wide trail.
+moonbag_profit_gate_multiplier = 2.0
+
+# Combined promotion score: on-chain strength (0-70) + narrative bonus (0-30).
+# Token needs >= this score at TP1 to be promoted to moonbag.
+# Pure on-chain runner (strong momentum, volume, buyers) can qualify without narrative.
+# Weak on-chain token needs strong narrative to compensate.
+# v2: lowered from 60 → 50; two 8x+ tokens scored 52 and 55 and would have qualified
+# v5.2 (2026-04-18): lowered 50 → 40. Audit showed narrative scores cluster 45-55
+# (mostly "weak"/"moderate"), so only 8/206 v5 positions cleared the 50 gate.
+# At 40, ~30-40% of strong on-chain runners that currently miss promotion will qualify.
+moonbag_promotion_min_score = 40.0
+
+# Narrative downgrade: allow state to step DOWN after N consecutive weak re-checks.
+# 0 = never downgrade (old behavior). 2 = need 2 consecutive below-threshold checks.
+# Downgrade tightens trailing stop and shortens max hold.
+moonbag_downgrade_consecutive = 2
+
+# Fast runner auto-promote: if a token hits TP2 in under this many seconds
+# AND has no narrative result yet, auto-promote to moonbag.
+# A background narrative check fires immediately for data collection.
+fast_runner_threshold_secs = 60
+
+# ── CTO (Community Takeover) detection ──
+# When dev sells 100% of tokens (balance → 0), treat as bullish CTO signal
+# ONLY if the dev held a meaningful % of circulating supply.
+
+# Minimum dev holding (% of supply) to qualify for CTO path.
+# Dev holding <3% and selling to 0 is noise, not a real CTO event.
+cto_min_dev_hold_pct = 3.0
+
+# Staged evaluation checkpoints (seconds after CTO detected).
+# CTOs are slow plays — community needs time to rally:
+#   2min = immediate absorption check
+#   5min = sustained recovery or continued bleed (early kill if dead)
+#   10min = final verdict with momentum + price
+cto_stage_secs = [120, 300, 600]
+
+# Hard collapse: if price drops below 20% of pre-CTO at any tick → instant exit.
+# This catches true dead tokens without killing normal CTO dips.
+cto_collapse_pct = 20.0
+
+# Early kill at stage 2 (5min): exit if momentum below this AND lower lows.
+cto_early_kill_momentum = 0.3
+
+# Final stage (10min) grading thresholds:
+#
+# Strong CTO: price >= 70% of pre-CTO AND momentum >= 0.5 (clear absorption, higher lows)
+#   → moonbag promotion: 24-48h hold, 55% trail, narrative → RunnerConfirmed
+# Moderate CTO: price >= 30% AND momentum >= 0.4 (stabilizing, decent buy flow)
+#   → moonbag promotion: 12-24h hold, 45% trail, narrative → ExpandingAttention
+# Failed CTO: below moderate thresholds
+#   → exit position
+cto_strong_recovery_pct = 70.0
+cto_strong_momentum = 0.5
+cto_moderate_recovery_pct = 30.0
+cto_moderate_momentum = 0.4

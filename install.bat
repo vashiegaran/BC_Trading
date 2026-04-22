@@ -1,0 +1,445 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+########################################
+# Logging Functions
+########################################
+log_info() {
+    printf "[INFO] %s\n" "$1"
+}
+
+log_error() {
+    printf "[ERROR] %s\n" "$1" >&2
+}
+
+########################################
+# Helper function to compare installed versions
+########################################
+version_lt() {
+    local ver1="${1#v}"
+    local ver2="${2#v}"
+
+    if [[ -z "$ver1" ]]; then
+        ver1="0"
+    fi
+    if [[ -z "$ver2" ]]; then
+        ver2="0"
+    fi
+
+    local IFS='.'
+    read -r -a v1 <<< "$ver1"
+    read -r -a v2 <<< "$ver2"
+
+    local len="${#v1[@]}"
+    if (( ${#v2[@]} > len )); then
+        len="${#v2[@]}"
+    fi
+
+    local i
+    for ((i = 0; i < len; i++)); do
+        local num1="${v1[i]:-0}"
+        local num2="${v2[i]:-0}"
+        if ((10#$num1 < 10#$num2)); then
+            return 0
+        elif ((10#$num1 > 10#$num2)); then
+            return 1
+        fi
+    done
+
+    return 1
+}
+
+
+########################################
+# OS Detection
+########################################
+detect_os() {
+    local os
+    os="$(uname)"
+    if [[ "$os" == "Linux" ]]; then
+        echo "Linux"
+    elif [[ "$os" == "Darwin" ]]; then
+        echo "Darwin"
+    else
+        echo "$os"
+    fi
+}
+
+########################################
+# Install OS-Specific Dependencies
+########################################
+install_dependencies() {
+    local os="$1"
+    if [[ "$os" == "Linux" ]]; then
+        SUDO=""
+        if command -v sudo >/dev/null 2>&1; then
+            SUDO="sudo"
+        fi
+
+        if command -v apt-get >/dev/null 2>&1; then
+            log_info "Detected apt (Debian/Ubuntu)."
+            $SUDO apt-get update
+            $SUDO apt-get install -y \
+                build-essential \
+                pkg-config \
+                libudev-dev \
+                llvm \
+                libclang-dev \
+                protobuf-compiler \
+                libssl-dev
+        elif command -v dnf >/dev/null 2>&1; then
+            log_info "Detected dnf (Fedora/RHEL)."
+            $SUDO dnf install -y \
+                gcc \
+                gcc-c++ \
+                make \
+                pkgconf-pkg-config \
+                systemd-devel \
+                llvm \
+                clang-devel \
+                protobuf-compiler \
+                openssl-devel
+        elif command -v pacman >/dev/null 2>&1; then
+            log_info "Detected pacman (Arch)."
+            $SUDO pacman -Sy --noconfirm \
+                base-devel \
+                pkgconf \
+                systemd \
+                llvm \
+                clang \
+                protobuf \
+                openssl
+        else
+            log_info "No supported package manager found (apt/dnf/pacman)."
+        fi
+    elif [[ "$os" == "Darwin" ]]; then
+        log_info "Detected macOS."
+    else
+        log_info "Detected $os."
+    fi
+
+    echo ""
+}
+
+########################################
+# Install Rust via rustup
+########################################
+install_rust() {
+    if command -v rustc >/dev/null 2>&1; then
+        log_info "Rust is already installed. Updating..."
+        rustup update
+    else
+        log_info "Installing Rust..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        log_info "Rust installation complete."
+    fi
+
+    # Source the Rust environment
+    if [[ -f "$HOME/.cargo/env" ]]; then
+        . "$HOME/.cargo/env"
+    elif [[ -f "$HOME/.cargo/env.fish" ]]; then
+        log_info "Sourcing Rust environment for Fish shell..."
+        source "$HOME/.cargo/env.fish"
+    else
+        log_error "Rust environment configuration file not found."
+    fi
+
+    if command -v rustc >/dev/null 2>&1; then
+        rustc --version
+    else
+        log_error "Rust installation failed."
+    fi
+
+    echo ""
+}
+
+########################################
+# Install Solana CLI
+########################################
+install_solana_cli() {
+    local os="$1"
+    local install_cmd='sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"'
+
+    if command -v solana >/dev/null 2>&1; then
+        log_info "Solana CLI is already installed. Checking for updates..."
+        if command -v agave-install >/dev/null 2>&1; then
+            if agave-install info -l 2>/dev/null | grep -q "Release channel: stable"; then
+                log_info "Release channel is stable. Running agave-install update..."
+                agave-install update
+            else
+                log_info "Updating to latest stable release..."
+                eval "$install_cmd"
+            fi
+        elif command -v solana-install >/dev/null 2>&1; then
+            eval "$install_cmd"
+        fi
+        log_info "Solana CLI update complete."
+    else
+        log_info "Installing Solana CLI..."
+        eval "$install_cmd"
+        log_info "Solana CLI installation complete."
+    fi
+
+    if [[ "$os" == "Linux" ]]; then
+        export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+    elif [[ "$os" == "Darwin" ]]; then
+        export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+        echo 'export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"' >> ~/.zshrc
+    fi
+
+    if command -v solana >/dev/null 2>&1; then
+        solana --version
+    else
+        log_error "Solana CLI installation failed."
+    fi
+
+    echo ""
+}
+
+########################################
+# Install Anchor CLI
+########################################
+install_anchor_cli() {
+    local ANCHOR_VERSION="0.32.1"
+    local ANCHOR_TAG="v${ANCHOR_VERSION}"
+
+    if command -v anchor >/dev/null 2>&1; then
+        local current_anchor
+        current_anchor=$(anchor --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+
+        if [ "$current_anchor" = "$ANCHOR_VERSION" ]; then
+            log_info "Anchor CLI version $ANCHOR_VERSION is already installed."
+        elif version_lt "$current_anchor" "$ANCHOR_VERSION"; then
+            log_info "Anchor CLI is installed (version $current_anchor). Updating to $ANCHOR_VERSION"
+            if ! command -v avm >/dev/null 2>&1; then
+                log_info "AVM is not installed. Installing AVM..."
+                cargo install --force --git https://github.com/solana-foundation/anchor --tag $ANCHOR_TAG avm
+            fi
+            avm install $ANCHOR_VERSION
+            avm use $ANCHOR_VERSION
+        else
+            log_info "Anchor CLI version $current_anchor already installed."
+        fi
+    else
+        log_info "Installing Anchor CLI..."
+        cargo install --git https://github.com/solana-foundation/anchor --tag $ANCHOR_TAG avm
+        avm install $ANCHOR_VERSION
+        avm use $ANCHOR_VERSION
+        log_info "Anchor CLI installation complete."
+    fi
+
+    if command -v anchor >/dev/null 2>&1; then
+        anchor --version
+    else
+        log_error "Anchor CLI installation failed."
+    fi
+
+    echo ""
+}
+
+########################################
+# Install nvm and Node.js
+########################################
+install_nvm_and_node() {
+    if [ -s "$HOME/.nvm/nvm.sh" ]; then
+        log_info "NVM is already installed."
+    else
+        log_info "Installing NVM..."
+        curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
+    fi
+
+    export NVM_DIR="$HOME/.nvm"
+    # Immediately source nvm and bash_completion for the current session
+    if [ -s "$NVM_DIR/nvm.sh" ]; then
+        . "$NVM_DIR/nvm.sh"
+    else
+        log_error "nvm not found. Ensure it is installed correctly."
+    fi
+
+    if [ -s "$NVM_DIR/bash_completion" ]; then
+        . "$NVM_DIR/bash_completion"
+    fi
+
+    # Install specific Node.js version
+    local node_version="24.10.0"
+    local target_node="v${node_version}"
+
+    if command -v node >/dev/null 2>&1; then
+        local current_node
+        current_node=$(node --version)
+        if version_lt "$current_node" "$target_node"; then
+            log_info "Installing Node.js ${node_version}: Currently installed ($current_node)."
+            nvm install "$node_version"
+            nvm alias default "$node_version"
+            nvm use default
+        else
+            log_info "Node.js ${current_node} is already installed."
+        fi
+    else
+        log_info "Installing Node.js ${node_version} via NVM..."
+        nvm install "$node_version"
+        nvm alias default "$node_version"
+        nvm use default
+    fi
+
+    echo ""
+}
+
+
+########################################
+# Install Yarn
+########################################
+install_yarn() {
+    if command -v yarn >/dev/null 2>&1; then
+        log_info "Yarn is already installed."
+    else
+        log_info "Installing Yarn..."
+        npm install --global yarn
+    fi
+
+    if command -v yarn >/dev/null 2>&1; then
+        yarn --version
+    else
+        log_error "Yarn installation failed."
+    fi
+
+    echo ""
+}
+
+########################################
+# Install Surfpool
+########################################
+install_surfpool() {
+    local SURFPOOL_VERSION="1.0.0"
+    local target_version="${SURFPOOL_VERSION#v}"
+
+    local current_version=""
+    if command -v surfpool >/dev/null 2>&1; then
+        current_version=$(surfpool --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+)+' | head -n1 || true)
+        current_version="${current_version#v}"
+
+        if [[ -z "$current_version" ]]; then
+            log_info "Unable to determine current Surfpool version; reinstalling to ensure $target_version."
+        elif version_lt "$current_version" "$target_version"; then
+            log_info "Updating Surfpool from $current_version to $target_version..."
+        elif [[ "$current_version" != "$target_version" ]]; then
+            log_info "Surfpool version $current_version is newer than requested $target_version. Skipping installation."
+            echo ""
+            return 0
+        else
+            log_info "Surfpool version $current_version already installed."
+            echo ""
+            return 0
+        fi
+    else
+        log_info "Surfpool not found. Installing version $target_version..."
+    fi
+
+    log_info "Installing Surfpool ($target_version)..."
+
+    # Create a temporary directory for installer artifacts to remove after installation
+    local installer_tmp_dir
+    installer_tmp_dir=$(mktemp -d 2>/dev/null || true)
+    if [[ -z "$installer_tmp_dir" ]]; then
+        log_error "Failed to create temporary directory for Surfpool installation."
+        return 1
+    fi
+
+    (
+        set -e
+        cd "$installer_tmp_dir"
+        curl -sL https://run.surfpool.run/ | bash
+    )
+    local install_status=$?
+
+    rm -rf "$installer_tmp_dir"
+
+    if [[ $install_status -ne 0 ]]; then
+        log_error "Surfpool installation failed."
+        return $install_status
+    fi
+
+    if command -v surfpool >/dev/null 2>&1; then
+        local new_version
+        new_version=$(surfpool --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+)+' | head -n1 || true)
+        new_version="${new_version#v}"
+        if [[ "$new_version" != "$target_version" ]]; then
+            log_error "Surfpool version $new_version installed, but $target_version was requested."
+            return 1
+        fi
+        log_info "Surfpool installation complete."
+    else
+        log_error "Surfpool installation failed."
+        return 1
+    fi
+
+    echo ""
+}
+
+########################################
+# Print Installed Versions
+########################################
+print_versions() {
+    echo ""
+    echo "Installed Versions:"
+    echo "Rust: $(rustc --version 2>/dev/null || echo 'Not installed')"
+    echo "Solana CLI: $(solana --version 2>/dev/null || echo 'Not installed')"
+    echo "Anchor CLI: $(anchor --version 2>/dev/null || echo 'Not installed')"
+    echo "Surfpool CLI: $(surfpool --version 2>/dev/null || echo 'Not installed')"
+    echo "Node.js: $(node --version 2>/dev/null || echo 'Not installed')"
+    echo "Yarn: $(yarn --version 2>/dev/null || echo 'Not installed')"
+    echo ""
+}
+
+########################################
+# Append nvm Initialization to the Correct Shell RC File
+########################################
+ensure_nvm_in_shell() {
+    local shell_rc=""
+    if [[ "$SHELL" == *"zsh"* ]]; then
+        shell_rc="$HOME/.zshrc"
+    elif [[ "$SHELL" == *"bash"* ]]; then
+        shell_rc="$HOME/.bashrc"
+    else
+        shell_rc="$HOME/.profile"
+    fi
+
+    if [ -f "$shell_rc" ]; then
+        if ! grep -q 'export NVM_DIR="$HOME/.nvm"' "$shell_rc"; then
+            log_info "Appending nvm initialization to $shell_rc"
+            {
+                echo ''
+                echo 'export NVM_DIR="$HOME/.nvm"'
+                echo '[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm'
+            } >> "$shell_rc"
+        fi
+    else
+        log_info "$shell_rc does not exist, creating it with nvm initialization."
+        echo 'export NVM_DIR="$HOME/.nvm"' > "$shell_rc"
+        echo '[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm' >> "$shell_rc"
+    fi
+}
+
+########################################
+# Main Execution Flow
+########################################
+main() {
+    local os
+    os=$(detect_os)
+
+    install_dependencies "$os" || log_error "Failed to install dependencies."
+    install_rust || log_error "Failed to install Rust."
+    install_solana_cli "$os" || log_error "Failed to install Solana CLI."
+    install_anchor_cli || log_error "Failed to install Anchor CLI."
+    install_nvm_and_node || log_error "Failed to install NVM/Node.js."
+    install_yarn || log_error "Failed to install Yarn."
+    install_surfpool || log_error "Failed to install Surfpool."
+
+    ensure_nvm_in_shell
+
+    print_versions
+
+    echo "Installation complete. Please restart your terminal to apply all changes."
+}
+
+main "$@"

@@ -1,0 +1,39 @@
+[package]
+name = "solana-memecoin-bot"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+solana-client = "1.18"
+solana-sdk = "1.18"
+solana-transaction-status = "1.18"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dotenv = "0.15"
+toml = "0.8"
+base64 = "0.21"
+bs58 = "0.5"
+bincode = "1"
+tokio-tungstenite = { version = "0.20", features = ["native-tls"] }
+futures-util = "0.3"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+rand = "0.8"
+
+# PR-F1: Chainstack Yellowstone gRPC Geyser client.
+# Pinned to 1.15 to stay compatible with solana-sdk 1.18 already in the tree.
+yellowstone-grpc-client = "1.15"
+yellowstone-grpc-proto = "1.14"
+tonic = { version = "0.10", features = ["tls", "tls-roots"] }
+
+# Replace the upstream `protobuf-src` build-dep (which compiles libprotobuf
+# from C source via autotools — broken on Windows) with a local no-op stub.
+# The real protoc is provided via the PROTOC env var.
+[patch.crates-io]
+protobuf-src = { path = "vendor/protobuf-src-stub" }
