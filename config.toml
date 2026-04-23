@@ -22,7 +22,7 @@ poll_interval_seconds = 5
 # Records trade patterns for tokens approaching graduation (~60%+ progress).
 # Data goes to `bonding_curve_signals` Supabase table for backtesting.
 bonding_curve_signals_enabled = true
-bc_signal_volume_threshold = 50.0  # SOL — record when cumulative volume hits this
+bc_signal_volume_threshold = 30.0  # SOL — record when cumulative volume hits this
 
 
 # ============================================================
