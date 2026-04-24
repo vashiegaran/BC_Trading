@@ -330,6 +330,194 @@ pub fn apply_hard_filters(
     }
 }
 
+/// Fast-track filters: minimal safety checks for BC-validated tokens.
+/// Only checks filters 1 (mint_auth), 2 (freeze_auth), 5 (honeypot), 7 (GoPlus critical).
+/// Skips bundlers, liquidity, top10, dev holding, holders — those run in deferred verification.
+pub fn apply_fast_track_filters(enrichment: &EnrichmentResult) -> HardFilterResult {
+    // ── Filter 1: mint_authority must be revoked ──
+    match check_mint_authority_active(enrichment) {
+        Some(true) => {
+            warn!("FAST-TRACK FILTER: mint_authority not revoked");
+            return HardFilterResult {
+                passed: false,
+                rejection_reason: Some("mint_authority_not_revoked".to_string()),
+                filter_name: Some("ft_mint_authority".to_string()),
+            };
+        }
+        None => {
+            warn!("FAST-TRACK FILTER: no data for mint_authority check");
+            return HardFilterResult {
+                passed: false,
+                rejection_reason: Some("mint_authority_no_data".to_string()),
+                filter_name: Some("ft_mint_authority".to_string()),
+            };
+        }
+        Some(false) => { /* revoked — pass */ }
+    }
+
+    // ── Filter 2: freeze_authority must be revoked ──
+    match check_freeze_authority_active(enrichment) {
+        Some(true) => {
+            warn!("FAST-TRACK FILTER: freeze_authority not revoked");
+            return HardFilterResult {
+                passed: false,
+                rejection_reason: Some("freeze_authority_not_revoked".to_string()),
+                filter_name: Some("ft_freeze_authority".to_string()),
+            };
+        }
+        None => {
+            warn!("FAST-TRACK FILTER: no data for freeze_authority check");
+            return HardFilterResult {
+                passed: false,
+                rejection_reason: Some("freeze_authority_no_data".to_string()),
+                filter_name: Some("ft_freeze_authority".to_string()),
+            };
+        }
+        Some(false) => { /* revoked — pass */ }
+    }
+
+    // ── Filter 5: GoPlus honeypot ──
+    if let Some(gp) = &enrichment.goplus {
+        if GoPlusResult::is_flag_set(&gp.is_honeypot) {
+            warn!("FAST-TRACK FILTER: GoPlus detected honeypot");
+            return HardFilterResult {
+                passed: false,
+                rejection_reason: Some("goplus_honeypot_detected".to_string()),
+                filter_name: Some("ft_honeypot".to_string()),
+            };
+        }
+
+        // ── Filter 7: GoPlus critical flags ──
+        if GoPlusResult::is_flag_set(&gp.is_mintable) {
+            warn!("FAST-TRACK FILTER: GoPlus detected mintable token");
+            return HardFilterResult {
+                passed: false,
+                rejection_reason: Some("goplus_mintable".to_string()),
+                filter_name: Some("ft_goplus_mintable".to_string()),
+            };
+        }
+        if GoPlusResult::is_flag_set(&gp.transfer_pausable) {
+            warn!("FAST-TRACK FILTER: GoPlus detected transfer_pausable");
+            return HardFilterResult {
+                passed: false,
+                rejection_reason: Some("goplus_transfer_pausable".to_string()),
+                filter_name: Some("ft_goplus_transfer_pausable".to_string()),
+            };
+        }
+        if GoPlusResult::is_flag_set(&gp.is_blacklisted) {
+            warn!("FAST-TRACK FILTER: GoPlus detected blacklist functionality");
+            return HardFilterResult {
+                passed: false,
+                rejection_reason: Some("goplus_blacklisted".to_string()),
+                filter_name: Some("ft_goplus_blacklisted".to_string()),
+            };
+        }
+        if GoPlusResult::is_flag_set(&gp.can_take_back_ownership) {
+            warn!("FAST-TRACK FILTER: GoPlus detected reclaimable ownership");
+            return HardFilterResult {
+                passed: false,
+                rejection_reason: Some("goplus_reclaim_ownership".to_string()),
+                filter_name: Some("ft_goplus_reclaim_ownership".to_string()),
+            };
+        }
+    }
+
+    info!("All fast-track filters passed");
+    HardFilterResult {
+        passed: true,
+        rejection_reason: None,
+        filter_name: None,
+    }
+}
+
+/// Apply deferred verification filters post-buy for fast-track tokens.
+/// Checks the filters that were skipped during fast-track entry:
+/// bundlers, liquidity, top10, dev holding, holders.
+/// Returns HardFilterResult — if failed, caller should trigger emergency exit.
+pub fn apply_deferred_filters(
+    enrichment: &EnrichmentResult,
+    initial_liquidity_sol: f64,
+) -> HardFilterResult {
+    // ── Filter 3: bundlers > 90% ──
+    if let Some(st) = &enrichment.solana_tracker {
+        if let Some(bundlers_pct) = st.bundlers_pct {
+            if bundlers_pct <= 100.0 && bundlers_pct > 90.0 {
+                warn!(bundlers_pct = bundlers_pct, "DEFERRED FILTER: bundlers > 90%");
+                return HardFilterResult {
+                    passed: false,
+                    rejection_reason: Some(format!("deferred_bundlers_pct={:.1}% > 90%", bundlers_pct)),
+                    filter_name: Some("deferred_bundlers".to_string()),
+                };
+            }
+        }
+    }
+
+    // ── Filter 6: top10 > 95% ──
+    {
+        let st_top10 = enrichment.solana_tracker.as_ref().and_then(|st| st.top10_pct);
+        let be_top10 = enrichment.birdeye_security.as_ref().and_then(|bs| bs.top10_holder_percent);
+        let top10_pct = match (st_top10, be_top10) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+        if let Some(pct) = top10_pct {
+            if pct > 95.0 {
+                warn!(top10_pct = pct, "DEFERRED FILTER: top-10 holders > 95%");
+                return HardFilterResult {
+                    passed: false,
+                    rejection_reason: Some(format!("deferred_top10={:.1}% > 95%", pct)),
+                    filter_name: Some("deferred_top10".to_string()),
+                };
+            }
+        }
+    }
+
+    // ── Filter 8: dev holding > 50% ──
+    if let Some(st) = &enrichment.solana_tracker {
+        if let Some(pct) = st.dev_pct {
+            if pct > 50.0 {
+                warn!(dev_pct = pct, "DEFERRED FILTER: dev holding > 50%");
+                return HardFilterResult {
+                    passed: false,
+                    rejection_reason: Some(format!("deferred_dev_pct={:.1}% > 50%", pct)),
+                    filter_name: Some("deferred_dev_holding".to_string()),
+                };
+            }
+        }
+    }
+
+    // ── Filter 9: holders < 25 ──
+    {
+        let st_holders = enrichment.solana_tracker.as_ref().and_then(|st| st.holders);
+        let gp_holders = enrichment.goplus.as_ref().and_then(|gp| gp.holder_count);
+        let holders = match (st_holders, gp_holders) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+        if let Some(h) = holders {
+            if h < 25 {
+                warn!(holders = h, "DEFERRED FILTER: holder count < 25");
+                return HardFilterResult {
+                    passed: false,
+                    rejection_reason: Some(format!("deferred_holders={} < 25", h)),
+                    filter_name: Some("deferred_min_holders".to_string()),
+                };
+            }
+        }
+    }
+
+    info!("All deferred filters passed — fast-track position validated");
+    HardFilterResult {
+        passed: true,
+        rejection_reason: None,
+        filter_name: None,
+    }
+}
+
 /// Cross-source mint authority check.
 /// If ANY source reports active mint authority, return true (= blocked).
 /// Returns None if no source had data (caller must handle).

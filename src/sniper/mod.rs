@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn, error};
 
 use crate::config::AppConfig;
-use crate::detection::types::GraduatedToken;
+use crate::detection::types::{GraduatedToken, BcScoreCache};
 use crate::execution::jupiter::{JupiterClient, SOL_MINT};
 use crate::logger::SupabaseClient;
 
@@ -40,6 +40,7 @@ pub fn start(
     cfg: Arc<AppConfig>,
     mut detection_rx: mpsc::Receiver<GraduatedToken>,
     supabase: Arc<SupabaseClient>,
+    bc_cache: BcScoreCache,
 ) -> mpsc::Receiver<GraduatedToken> {
     let (tx, rx) = mpsc::channel::<GraduatedToken>(SNIPER_CHANNEL_CAPACITY);
 
@@ -128,6 +129,133 @@ pub fn start(
                         let _ = supabase_clone.client.post(&url).json(&timing_json).send().await;
                     });
                     continue;
+                }
+            }
+
+            // ── BC Fast-Track: check cache for pre-computed BC score ──
+            if cfg.strategy.filters.bc_fast_track_enabled
+                && token.source == crate::detection::types::DetectionSource::PumpFun
+            {
+                let bc_entry = {
+                    let map = bc_cache.lock().await;
+                    map.get(&mint_str).cloned()
+                };
+
+                if let Some(bc_entry) = bc_entry {
+                    if bc_entry.score >= cfg.strategy.filters.bc_fast_track_min_score {
+                        info!(
+                            mint = %mint_str,
+                            bc_score = format!("{:.1}", bc_entry.score),
+                            threshold = cfg.strategy.filters.bc_fast_track_min_score,
+                            "⚡ BC FAST-TRACK — score qualifies, running minimal enrichment"
+                        );
+
+                        let ft_start = std::time::Instant::now();
+
+                        // Record detection → sniper latency
+                        let detection_to_sniper_ms = {
+                            let now_ms = chrono::Utc::now().timestamp_millis();
+                            now_ms - detected_at
+                        };
+                        token.pipeline_timing.detection_to_sniper_ms = Some(detection_to_sniper_ms);
+
+                        // Fast enrichment: only mint + GoPlus (~250ms)
+                        let ft_enrichment = enrichment::enrich_token_fast(&rpc, &mint_str).await;
+                        token.pipeline_timing.enrichment_total_ms = Some(ft_enrichment.enrichment_duration_ms);
+                        token.pipeline_timing.enrichment_per_source = ft_enrichment.per_source_ms.clone();
+
+                        // Fast-track filters: mint_auth, freeze_auth, honeypot, GoPlus critical
+                        let ft_filter = filters::apply_fast_track_filters(&ft_enrichment);
+                        let ft_elapsed = ft_start.elapsed();
+
+                        // Build minimal sniper_features for logging
+                        let ft_features = serde_json::json!({
+                            "entry_tier": "fast_track",
+                            "bc_score": bc_entry.score,
+                            "bc_unique_buyers": bc_entry.unique_buyers,
+                            "bc_buy_sell_ratio": bc_entry.buy_sell_ratio,
+                            "bc_creator_rebuy": bc_entry.creator_rebuy,
+                            "bc_whale_buy": bc_entry.whale_buy,
+                            "bc_buy_count": bc_entry.buy_count,
+                            "bc_sell_count": bc_entry.sell_count,
+                            "bc_total_volume_sol": bc_entry.total_volume_sol,
+                            "fast_track_enrichment_ms": ft_enrichment.enrichment_duration_ms,
+                            "mint_authority_revoked": ft_enrichment.on_chain_mint.as_ref().map(|m| m.mint_authority_revoked),
+                            "freeze_authority_revoked": ft_enrichment.on_chain_mint.as_ref().map(|m| m.freeze_authority_revoked),
+                            "goplus_honeypot": ft_enrichment.goplus.as_ref().and_then(|g| g.is_honeypot.clone()),
+                            "initial_liquidity_sol": initial_liquidity_sol,
+                        });
+
+                        let candidate_id = log_sniper_candidate(
+                            &supabase,
+                            &mint_str,
+                            &token.name,
+                            &token.symbol,
+                            token.pool_address.as_ref().map(|p| p.to_string()).as_deref(),
+                            &creator_str,
+                            initial_liquidity_sol,
+                            if ft_filter.passed { "fast_track_passed" } else { "rejected" },
+                            ft_filter.rejection_reason.as_deref(),
+                            ft_filter.filter_name.as_deref(),
+                            bc_entry.score,
+                            &ft_features,
+                        ).await;
+
+                        if ft_filter.passed {
+                            info!(
+                                mint = %mint_str,
+                                bc_score = format!("{:.1}", bc_entry.score),
+                                elapsed_ms = ft_elapsed.as_millis() as u64,
+                                "⚡ FAST-TRACK PASS — forwarding to filter engine (deferred verification will run post-buy)"
+                            );
+
+                            token.candidate_id = candidate_id;
+                            token.sniper_features = Some(ft_features);
+                            token.sniper_score = Some(bc_entry.score);
+
+                            // Spawn deferred verification (runs full enrichment post-buy)
+                            let deferred_supabase = Arc::clone(&supabase);
+                            let deferred_cfg = Arc::clone(&cfg);
+                            let deferred_mint = mint_str.clone();
+                            let deferred_creator = creator_str.clone();
+                            let deferred_liq = initial_liquidity_sol;
+                            let deferred_detected_at = detected_at;
+                            let deferred_candidate_id = candidate_id;
+                            tokio::spawn(async move {
+                                run_deferred_verification(
+                                    deferred_cfg,
+                                    deferred_supabase,
+                                    deferred_mint,
+                                    deferred_creator,
+                                    deferred_liq,
+                                    deferred_detected_at,
+                                    deferred_candidate_id,
+                                ).await;
+                            });
+
+                            if tx.send(token).await.is_err() {
+                                warn!("Sniper → filter channel closed");
+                                break;
+                            }
+                        } else {
+                            warn!(
+                                mint = %mint_str,
+                                reason = ft_filter.rejection_reason.as_deref().unwrap_or("unknown"),
+                                bc_score = format!("{:.1}", bc_entry.score),
+                                "❌ FAST-TRACK REJECT — safety filter blocked"
+                            );
+
+                            token.pipeline_timing.outcome = Some("rejected_fast_track_filter".to_string());
+                            token.pipeline_timing.rejection_stage = Some("fast_track_filter".to_string());
+                            token.pipeline_timing.rejection_reason = ft_filter.rejection_reason;
+                            let timing_payload = token.pipeline_timing.to_json(&mint_str);
+                            let supabase_bg = Arc::clone(&supabase);
+                            tokio::spawn(async move {
+                                log_pipeline_latency(&supabase_bg, &timing_payload).await;
+                            });
+                        }
+                        continue; // Skip normal pipeline — fast-track handled it
+                    }
                 }
             }
 
@@ -391,6 +519,92 @@ pub async fn log_pipeline_latency(supabase: &SupabaseClient, payload: &serde_jso
         }
         Err(e) => {
             warn!("pipeline_latency write error: {}", e);
+        }
+    }
+}
+
+/// Deferred verification for fast-track tokens.
+/// Runs 3 seconds after the buy to let on-chain state settle, then performs
+/// full SolanaTracker enrichment and checks the filters that were skipped
+/// during fast-track entry (bundlers, top10, dev holding, holders).
+/// If any deferred filter fails, updates sniper_candidates with the failure
+/// reason. The monitoring system should check for `deferred_rejected` status
+/// and trigger an emergency exit.
+async fn run_deferred_verification(
+    cfg: Arc<AppConfig>,
+    supabase: Arc<SupabaseClient>,
+    mint: String,
+    creator_wallet: String,
+    initial_liquidity_sol: f64,
+    detected_at: i64,
+    candidate_id: Option<i64>,
+) {
+    // Wait 3 seconds for on-chain state to settle
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    info!(
+        mint = %mint,
+        "🔍 Deferred verification starting for fast-track token"
+    );
+
+    let rpc = RpcClient::new(cfg.env.solana_rpc_url.clone());
+
+    // Run full enrichment (same as normal pipeline)
+    let enrichment = enrichment::enrich_token(
+        &cfg,
+        &rpc,
+        &mint,
+        &creator_wallet,
+        initial_liquidity_sol,
+        detected_at,
+    ).await;
+
+    // Apply deferred filters
+    let filter_result = filters::apply_deferred_filters(&enrichment, initial_liquidity_sol);
+
+    if filter_result.passed {
+        info!(
+            mint = %mint,
+            sources = enrichment.sources_completed.len(),
+            "✅ Deferred verification PASSED — fast-track position validated"
+        );
+
+        // Update sniper_candidates with deferred result
+        if let Some(cid) = candidate_id {
+            let url = format!(
+                "{}/sniper_candidates?id=eq.{}",
+                supabase.base_url, cid
+            );
+            let payload = serde_json::json!({
+                "sniper_features": {
+                    "deferred_verification": "passed",
+                    "deferred_sources_completed": enrichment.sources_completed,
+                    "deferred_enrichment_ms": enrichment.enrichment_duration_ms,
+                }
+            });
+            // Merge deferred features into existing sniper_features
+            let _ = supabase.client.patch(&url).json(&payload).send().await;
+        }
+    } else {
+        let reason = filter_result.rejection_reason.as_deref().unwrap_or("unknown");
+        warn!(
+            mint = %mint,
+            reason = reason,
+            "🚨 Deferred verification FAILED — fast-track position should be exited"
+        );
+
+        // Update sniper_candidates to signal deferred rejection
+        if let Some(cid) = candidate_id {
+            let url = format!(
+                "{}/sniper_candidates?id=eq.{}",
+                supabase.base_url, cid
+            );
+            let payload = serde_json::json!({
+                "action": "deferred_rejected",
+                "rejection_reason": format!("deferred: {}", reason),
+                "filter_name": filter_result.filter_name,
+            });
+            let _ = supabase.client.patch(&url).json(&payload).send().await;
         }
     }
 }

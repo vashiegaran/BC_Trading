@@ -1,8 +1,111 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use solana_sdk::pubkey::Pubkey;
+use tokio::sync::Mutex;
+
+// ─── BC Score Cache (shared between detection + sniper) ─────
+
+/// A cached bonding curve score entry, stored when a BC signal is recorded
+/// (at ~30-50 SOL volume). Consumed by the sniper pipeline at graduation
+/// to decide fast-track eligibility.
+#[derive(Debug, Clone)]
+pub struct BcScoreEntry {
+    /// Composite score (0-100) from BC trading pattern analysis.
+    pub score: f64,
+    pub unique_buyers: usize,
+    pub buy_sell_ratio: f64,
+    pub creator_rebuy: bool,
+    pub whale_buy: bool,
+    pub buy_count: u64,
+    pub sell_count: u64,
+    pub total_volume_sol: f64,
+    /// When this entry was recorded (epoch ms).
+    pub recorded_at: i64,
+}
+
+/// Thread-safe cache: mint (base58 string) → BcScoreEntry.
+pub type BcScoreCache = Arc<Mutex<HashMap<String, BcScoreEntry>>>;
+
+/// Create a new empty BC score cache.
+pub fn new_bc_score_cache() -> BcScoreCache {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+/// Maximum entries in the BC score cache before pruning.
+const MAX_BC_CACHE_SIZE: usize = 5_000;
+
+/// Prune the BC score cache by removing the oldest half of entries.
+pub async fn prune_bc_score_cache(cache: &BcScoreCache) {
+    let mut map = cache.lock().await;
+    if map.len() < MAX_BC_CACHE_SIZE {
+        return;
+    }
+    let mut entries: Vec<(String, i64)> = map
+        .iter()
+        .map(|(k, v)| (k.clone(), v.recorded_at))
+        .collect();
+    entries.sort_by_key(|(_, ts)| *ts);
+    let to_remove = entries.len() / 2;
+    for (key, _) in entries.into_iter().take(to_remove) {
+        map.remove(&key);
+    }
+}
+
+/// Compute a BC score from trading pattern signals.
+/// Score is 0-100, with higher = more likely to perform well post-graduation.
+pub fn compute_bc_score(
+    unique_buyers: usize,
+    buy_sell_ratio: f64,
+    creator_rebuy: bool,
+    whale_buy: bool,
+    buy_count: u64,
+    sell_count: u64,
+    total_volume_sol: f64,
+) -> f64 {
+    let mut score: f64 = 50.0;
+
+    // Creator rebuy is strongly negative (1.1% grad rate vs 6.0%)
+    if creator_rebuy {
+        score -= 30.0;
+    }
+
+    // Buy/sell ratio — Q4 (>2.3) graduates at 10.9% vs Q1 (<1.1) at 3.2%
+    if buy_sell_ratio >= 3.0 {
+        score += 20.0;
+    } else if buy_sell_ratio >= 2.0 {
+        score += 12.0;
+    } else if buy_sell_ratio >= 1.5 {
+        score += 5.0;
+    } else if buy_sell_ratio < 1.0 {
+        score -= 15.0;
+    }
+
+    // Unique buyers — more organic interest = better
+    if unique_buyers >= 40 {
+        score += 15.0;
+    } else if unique_buyers >= 25 {
+        score += 8.0;
+    } else if unique_buyers >= 15 {
+        score += 3.0;
+    } else {
+        score -= 10.0;
+    }
+
+    // Whale buy — conviction signal
+    if whale_buy {
+        score += 10.0;
+    }
+
+    // Volume momentum
+    if total_volume_sol >= 60.0 {
+        score += 5.0;
+    }
+
+    score.clamp(0.0, 100.0)
+}
 
 // ─── Pipeline-wide latency accumulator ──────────────────────
 

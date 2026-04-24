@@ -3,7 +3,7 @@
 # Bump this when you change filters/exit params, then add a
 # section to VERSION.md describing what changed.
 # ============================================================
-strategy_version = "bc-research-v1"
+strategy_version = "v12-fast-track"
 
 # ============================================================
 # DETECTION
@@ -118,6 +118,13 @@ min_buy_sell_ratio = 2.0
 # Maximum sell transactions on bonding curve. High sells = dump pressure.
 # Data: graduated tokens median 20 sells vs non-graduated 28. Using 40 as generous upper bound.
 max_bc_sell_count = 40
+
+# ── BC Fast-Track Pipeline ──
+# Tokens with strong bonding curve scores skip full 2s enrichment and buy
+# with only mint+GoPlus safety checks (~250ms). Deferred verification runs
+# post-buy and triggers emergency exit if critical filters fail.
+bc_fast_track_enabled = true
+bc_fast_track_min_score = 65.0
 
 # Minimum sniper score to pass.
 # v9 set at 60 (data-driven from corrupted post-bug data).

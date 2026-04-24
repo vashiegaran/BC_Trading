@@ -78,6 +78,14 @@ pub struct FiltersConfig {
     /// Data: score >= 65 → +0.056 SOL, < 65 → -0.500 SOL over 92 trades.
     #[serde(default = "default_min_sniper_score")]
     pub min_sniper_score: f64,
+    /// Enable the BC Fast-Track pipeline: tokens with high BC scores skip
+    /// full enrichment and buy with only mint+GoPlus checks (~250ms vs 2s).
+    #[serde(default)]
+    pub bc_fast_track_enabled: bool,
+    /// Minimum BC score (from bonding curve signal analysis) to qualify for
+    /// the fast-track pipeline. Data: score >= 65 → median peak 1.97x, 49% hit 2x+.
+    #[serde(default = "default_bc_fast_track_min_score")]
+    pub bc_fast_track_min_score: f64,
 }
 
 fn default_max_single_holder_pct() -> f64 { 25.0 }
@@ -85,6 +93,7 @@ fn default_min_holder_count() -> usize { 8 }
 fn default_min_buy_sell_ratio() -> f64 { 1.2 }
 fn default_max_bc_sell_count() -> u64 { 40 }
 fn default_min_sniper_score() -> f64 { 60.0 }
+fn default_bc_fast_track_min_score() -> f64 { 65.0 }
 
 #[derive(Debug, Deserialize)]
 pub struct ExecutionConfig {

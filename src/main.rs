@@ -214,7 +214,7 @@ async fn main() {
     sniper::tracker::recover_pending_trackers(Arc::clone(&supabase_arc)).await;
 
     // ── 7. Start detection engine ───────────────────────
-    let detection_rx = detection::start(Arc::clone(&cfg_arc), Arc::clone(&supabase_arc));
+    let (detection_rx, bc_cache) = detection::start(Arc::clone(&cfg_arc), Arc::clone(&supabase_arc));
     info!("Detection engine started — listening for new tokens");
 
     // ── 7b. Start sniper enrichment pipeline ────────────
@@ -222,6 +222,7 @@ async fn main() {
         Arc::clone(&cfg_arc),
         detection_rx,
         Arc::clone(&supabase_arc),
+        bc_cache,
     );
     info!("Sniper enrichment pipeline started — enriching & hard-filtering tokens");
 

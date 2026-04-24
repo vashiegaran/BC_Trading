@@ -10,29 +10,25 @@ use tracing::info;
 
 use crate::config::AppConfig;
 use crate::logger::SupabaseClient;
-use types::GraduatedToken;
+use types::{GraduatedToken, BcScoreCache, new_bc_score_cache};
 
 /// Channel capacity for the detection → downstream pipeline.
 const CHANNEL_CAPACITY: usize = 100;
 
-/// Starts the detection engine and returns a receiver for [`GraduatedToken`]s.
-///
-/// Internally this function:
-/// 1. Creates an MPSC channel.
-/// 2. Spawns the PumpFun WebSocket listener task.
-/// 3. If `poll_raydium` is enabled in config, spawns the Raydium polling task.
-/// 4. Returns the receiving half of the channel so that `main.rs` (or the
-///    filter engine in later phases) can consume events.
-pub fn start(cfg: Arc<AppConfig>, supabase: Arc<SupabaseClient>) -> mpsc::Receiver<GraduatedToken> {
+/// Starts the detection engine and returns a receiver for [`GraduatedToken`]s
+/// plus the shared BC score cache (for the sniper fast-track pipeline).
+pub fn start(cfg: Arc<AppConfig>, supabase: Arc<SupabaseClient>) -> (mpsc::Receiver<GraduatedToken>, BcScoreCache) {
     let (tx, rx) = mpsc::channel::<GraduatedToken>(CHANNEL_CAPACITY);
+    let bc_cache = new_bc_score_cache();
 
     // ── PumpFun WebSocket (primary, free) ────────────────
     let pumpfun_tx = tx.clone();
     let pumpfun_supabase = Arc::clone(&supabase);
     let rpc_url = cfg.env.solana_rpc_url.clone();
     let pumpfun_cfg = Arc::clone(&cfg);
+    let pumpfun_cache = bc_cache.clone();
     tokio::spawn(async move {
-        pumpfun_ws::run(pumpfun_tx, pumpfun_supabase, rpc_url, pumpfun_cfg).await;
+        pumpfun_ws::run(pumpfun_tx, pumpfun_supabase, rpc_url, pumpfun_cfg, pumpfun_cache).await;
     });
     info!("Detection: PumpFun WebSocket task spawned");
 
@@ -69,5 +65,5 @@ pub fn start(cfg: Arc<AppConfig>, supabase: Arc<SupabaseClient>) -> mpsc::Receiv
     // return `None`, signalling the consumer loop to stop.
     drop(tx);
 
-    rx
+    (rx, bc_cache)
 }

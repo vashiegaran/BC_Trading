@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
-use super::types::{DetectionSource, GraduatedToken, PipelineTiming, WatchlistEntry};
+use super::types::{DetectionSource, GraduatedToken, PipelineTiming, WatchlistEntry, BcScoreCache, BcScoreEntry, compute_bc_score, prune_bc_score_cache};
 use crate::config::AppConfig;
 use crate::logger::SupabaseClient;
 
@@ -44,13 +44,13 @@ const MAX_WATCHLIST_SIZE: usize = 5_000;
 ///
 /// On any connection or read error the function reconnects with
 /// exponential back-off (1 s → 2 s → 4 s … capped at 30 s).
-pub async fn run(tx: mpsc::Sender<GraduatedToken>, supabase: Arc<SupabaseClient>, rpc_url: String, cfg: Arc<AppConfig>) {
+pub async fn run(tx: mpsc::Sender<GraduatedToken>, supabase: Arc<SupabaseClient>, rpc_url: String, cfg: Arc<AppConfig>, bc_cache: BcScoreCache) {
     let mut backoff_secs = INITIAL_BACKOFF_SECS;
 
     loop {
         info!("Connecting to PumpFun WebSocket \u{2026}");
 
-        match connect_and_listen(&tx, &supabase, &rpc_url, &cfg).await {
+        match connect_and_listen(&tx, &supabase, &rpc_url, &cfg, &bc_cache).await {
             Ok(()) => {
                 // Clean close (shouldn't normally happen); reset back-off.
                 warn!("PumpFun WebSocket closed cleanly — reconnecting");
@@ -69,7 +69,7 @@ pub async fn run(tx: mpsc::Sender<GraduatedToken>, supabase: Arc<SupabaseClient>
 }
 
 /// Inner helper: connect once, subscribe, and read messages until error.
-async fn connect_and_listen(tx: &mpsc::Sender<GraduatedToken>, supabase: &Arc<SupabaseClient>, rpc_url: &str, cfg: &Arc<AppConfig>) -> Result<()> {
+async fn connect_and_listen(tx: &mpsc::Sender<GraduatedToken>, supabase: &Arc<SupabaseClient>, rpc_url: &str, cfg: &Arc<AppConfig>, bc_cache: &BcScoreCache) -> Result<()> {
     let (ws_stream, _response) = connect_async(PUMPFUN_WS_URL)
         .await
         .context("Failed to connect to PumpFun WebSocket")?;
@@ -123,7 +123,7 @@ async fn connect_and_listen(tx: &mpsc::Sender<GraduatedToken>, supabase: &Arc<Su
 
         match msg {
             Message::Text(text) => {
-                if let Err(e) = handle_text_message(&text, tx, &mut watchlist, supabase, &ws_write_tx, rpc_url, cfg).await {
+                if let Err(e) = handle_text_message(&text, tx, &mut watchlist, supabase, &ws_write_tx, rpc_url, cfg, bc_cache).await {
                     // Log parse errors but keep the connection alive.
                     warn!("Failed to process PumpFun message: {:#}", e);
                 }
@@ -184,6 +184,7 @@ async fn handle_text_message(
     ws_write_tx: &mpsc::Sender<Message>,
     rpc_url: &str,
     cfg: &Arc<AppConfig>,
+    bc_cache: &BcScoreCache,
 ) -> Result<()> {
     let v: serde_json::Value =
         serde_json::from_str(text).context("Message is not valid JSON")?;
@@ -197,7 +198,7 @@ async fn handle_text_message(
 
     match kind {
         EventKind::NewToken => handle_new_token(&v, watchlist, ws_write_tx).await?,
-        EventKind::TokenTrade => handle_token_trade(&v, watchlist, cfg, supabase).await?,
+        EventKind::TokenTrade => handle_token_trade(&v, watchlist, cfg, supabase, bc_cache).await?,
         EventKind::TokenComplete => handle_token_complete(&v, tx, watchlist, supabase, rpc_url).await?,
         EventKind::Unknown => {
             // Subscription acks have no txType — only log events that have one
@@ -311,6 +312,7 @@ async fn handle_token_trade(
     watchlist: &mut HashMap<String, WatchlistEntry>,
     cfg: &Arc<AppConfig>,
     supabase: &Arc<SupabaseClient>,
+    bc_cache: &BcScoreCache,
 ) -> Result<()> {
     let mint_str = v
         .get("mint")
@@ -398,6 +400,58 @@ async fn handle_token_trade(
         && entry.total_volume_sol >= cfg.strategy.detection.bc_signal_volume_threshold
     {
         entry.signal_recorded = true;
+
+        // ── Compute and cache BC score for fast-track pipeline ──
+        let whale_buy = entry.trade_log.iter().any(|&(_, sol, is_buy, _)| is_buy && sol >= 3.0);
+        let cr = entry.trade_log.iter().any(|&(_, _, is_buy, wallet)| {
+            is_buy && wallet == entry.creator_wallet
+        }) && entry.trade_log.len() > 1;
+        let bsr = if entry.sell_count > 0 {
+            entry.buy_count as f64 / entry.sell_count as f64
+        } else if entry.buy_count > 0 {
+            entry.buy_count as f64
+        } else {
+            0.0
+        };
+        let bc_score = compute_bc_score(
+            entry.unique_buyers.len(),
+            bsr,
+            cr,
+            whale_buy,
+            entry.buy_count,
+            entry.sell_count,
+            entry.total_volume_sol,
+        );
+
+        let cache_entry = BcScoreEntry {
+            score: bc_score,
+            unique_buyers: entry.unique_buyers.len(),
+            buy_sell_ratio: bsr,
+            creator_rebuy: cr,
+            whale_buy,
+            buy_count: entry.buy_count,
+            sell_count: entry.sell_count,
+            total_volume_sol: entry.total_volume_sol,
+            recorded_at: chrono::Utc::now().timestamp_millis(),
+        };
+
+        {
+            let bc_cache = bc_cache.clone();
+            let mint_key = mint_str.to_string();
+            let score_val = bc_score;
+            // Insert into cache (non-blocking — lock is fast)
+            let mut map = bc_cache.lock().await;
+            map.insert(mint_key, cache_entry);
+            drop(map);
+            debug!(
+                mint = mint_str,
+                bc_score = format!("{:.1}", score_val),
+                "📊 BC score cached for fast-track pipeline"
+            );
+        }
+        // Prune cache periodically
+        prune_bc_score_cache(bc_cache).await;
+
         let signal_payload = build_signal_payload(entry, mint_str);
         let supabase_clone = Arc::clone(supabase);
         tokio::spawn(async move {

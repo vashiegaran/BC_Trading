@@ -310,6 +310,70 @@ pub async fn enrich_token(
     }
 }
 
+/// Minimal enrichment for BC fast-track pipeline: only on-chain mint + GoPlus.
+/// Runs 2 calls in parallel with a 1.5s timeout (~250-500ms typical).
+/// Returns an EnrichmentResult with only mint + goplus populated.
+pub async fn enrich_token_fast(
+    rpc: &RpcClient,
+    mint: &str,
+) -> EnrichmentResult {
+    let start = Instant::now();
+    let timeout = Duration::from_millis(1500);
+    let mint_str = mint.to_string();
+
+    let (mint_timed, gp_timed) = tokio::join!(
+        async {
+            let t = Instant::now();
+            let r = match tokio::time::timeout(timeout, fetch_mint_data(rpc, &mint_str)).await {
+                Ok(r) => r,
+                Err(_) => { warn!(mint = %mint_str, "Fast-track: mint data timed out"); None }
+            };
+            (r, t.elapsed().as_millis() as u64)
+        },
+        async {
+            let t = Instant::now();
+            let r = match tokio::time::timeout(timeout, fetch_goplus(&mint_str)).await {
+                Ok(r) => r,
+                Err(_) => { warn!(mint = %mint_str, "Fast-track: GoPlus timed out"); None }
+            };
+            (r, t.elapsed().as_millis() as u64)
+        },
+    );
+
+    let (mint_result, mint_ms) = mint_timed;
+    let (gp_result, gp_ms) = gp_timed;
+
+    let mut per_source_ms = std::collections::HashMap::new();
+    per_source_ms.insert("on_chain_mint".to_string(), mint_ms);
+    per_source_ms.insert("goplus".to_string(), gp_ms);
+
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+
+    let mut completed = Vec::new();
+    let mut timed_out_sources = Vec::new();
+    if mint_result.is_some() { completed.push("on_chain_mint".to_string()); }
+    else { timed_out_sources.push("on_chain_mint".to_string()); }
+    if gp_result.is_some() { completed.push("goplus".to_string()); }
+    else { timed_out_sources.push("goplus".to_string()); }
+
+    info!(
+        mint = %mint_str,
+        elapsed_ms,
+        completed = completed.len(),
+        "⚡ Fast-track enrichment complete"
+    );
+
+    EnrichmentResult {
+        on_chain_mint: mint_result,
+        goplus: gp_result,
+        enrichment_duration_ms: elapsed_ms,
+        sources_completed: completed,
+        sources_timed_out: timed_out_sources,
+        per_source_ms,
+        ..Default::default()
+    }
+}
+
 // ─── Individual enrichment functions ─────────────────────────
 
 /// Fetch on-chain mint data: authority revocation status, supply, decimals.

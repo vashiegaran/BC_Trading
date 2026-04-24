@@ -4,8 +4,104 @@ Each version is stamped into every `positions` and `moonbag_positions` row via t
 `strategy_version` column. Set the active version in `config.toml`:
 
 ```toml
-strategy_version = "v10"
+strategy_version = "v12-fast-track"
 ```
+
+---
+
+## v12 — BC Fast-Track Pipeline (2026-04-24)
+
+**Cargo version**: 0.3.0 | **strategy_version**: `v12-fast-track`
+
+Adds a fast-track entry pipeline for tokens that scored highly during their
+bonding curve phase. Instead of waiting 2s for full enrichment, pre-validated
+tokens buy with only mint+GoPlus safety checks (~250ms), then run deferred
+verification post-buy. Goal: buy as early as possible after graduation.
+
+### Architecture: Dual-Pipeline Entry
+
+The sniper pipeline now has two entry paths:
+
+```
+Token graduates → BC pattern gate → Cache lookup
+  ├─ BC score ≥ 65: ⚡ FAST-TRACK (~250ms → safety filters → BUY → deferred verification 3s later)
+  └─ BC score < 65 or no cache: Normal pipeline (2s enrichment → all 9 filters → sniper score → BUY)
+```
+
+### BC Score Cache ([src/detection/types.rs](src/detection/types.rs), [src/detection/pumpfun_ws.rs](src/detection/pumpfun_ws.rs))
+
+- New `BcScoreEntry` struct cached in-memory when BC signals are recorded
+  (at 30+ SOL cumulative volume, ~60% to graduation)
+- `compute_bc_score()` function (0-100) based on:
+  - Creator rebuy (-30 — strong manipulation signal)
+  - Buy/sell ratio (+5 to +20 — demand pressure)
+  - Unique buyers (+3 to +15 — organic interest)
+  - Whale buys (+10 — conviction signal)
+  - Volume momentum (+5)
+- Thread-safe `Arc<Mutex<HashMap>>` shared between detection and sniper
+- Auto-prune at 5,000 entries (oldest half evicted)
+- Data basis: score ≥ 65 tokens that graduate → median peak 1.97x, 49% hit 2x+.
+  Score < 35 → median peak 1.00x, 18% hit 2x+.
+
+### Fast-Track Enrichment ([src/sniper/enrichment.rs](src/sniper/enrichment.rs))
+
+- New `enrich_token_fast()` — only 2 parallel calls: on-chain mint data + GoPlus
+- 1.5s timeout (typical ~250-500ms vs normal 2s budget with 11 calls)
+- Returns minimal `EnrichmentResult` with only `on_chain_mint` + `goplus` populated
+
+### Fast-Track Filters ([src/sniper/filters.rs](src/sniper/filters.rs))
+
+- New `apply_fast_track_filters()` — checks 4 critical safety filters:
+  1. Mint authority revoked (filter 1)
+  2. Freeze authority revoked (filter 2)
+  3. GoPlus honeypot (filter 5)
+  4. GoPlus critical flags: mintable, transfer_pausable, blacklist, reclaim (filter 7)
+- Skips: bundlers, liquidity, top10, dev holding, min holders (deferred)
+
+### Deferred Verification ([src/sniper/mod.rs](src/sniper/mod.rs), [src/sniper/filters.rs](src/sniper/filters.rs))
+
+- `run_deferred_verification()` — spawns 3s after fast-track buy
+- Runs full enrichment (all 11 API calls with 2s budget)
+- `apply_deferred_filters()` checks the skipped filters:
+  - Bundlers > 90% → reject
+  - Top-10 holders > 95% → reject
+  - Dev holding > 50% → reject
+  - Holders < 25 → reject
+- On failure: updates `sniper_candidates` row with `action = "deferred_rejected"`
+  and rejection reason for monitoring to trigger emergency exit
+
+### Pipeline Modification ([src/sniper/mod.rs](src/sniper/mod.rs))
+
+- `start()` now accepts `BcScoreCache` parameter
+- After BC pattern gate, looks up mint in cache
+- Fast-track tokens tagged with `entry_tier = "fast_track"` in sniper_features
+- Logged to `sniper_candidates` with `action = "fast_track_passed"`
+- Normal pipeline unchanged for tokens without cache entries or low BC scores
+
+### Config ([src/config.rs](src/config.rs), [config.toml](config.toml))
+
+- `bc_fast_track_enabled = true` — toggle the fast-track pipeline
+- `bc_fast_track_min_score = 65.0` — minimum BC score for fast-track eligibility
+
+### Detection Plumbing ([src/detection/mod.rs](src/detection/mod.rs), [src/main.rs](src/main.rs))
+
+- `detection::start()` now returns `(Receiver<GraduatedToken>, BcScoreCache)`
+- Cache threaded through `pumpfun_ws::run()` → `handle_token_trade()` → signal recording
+
+### Time Savings
+
+| Path | Enrichment | Filters | Total (typ) |
+|---|---|---|---|
+| Normal | 11 calls, 2s budget | 9 hard filters | 600-1000ms |
+| Fast-track | 2 calls, 1.5s budget | 4 safety filters | 250-500ms |
+| **Saved** | | | **~0.4-0.8s** |
+
+### Unchanged from v11
+- All exit params: TP1=1.8x/25%, TP2=4.0x/50%, trailing=30%
+- Stop loss = 35%, never_profitable = 20%
+- Normal pipeline filters and scoring (unchanged for non-fast-track tokens)
+- Pool owner verification (v10), price cache safety (v11)
+- Paper trade mode active, 0.05 SOL per trade
 
 ---
 
