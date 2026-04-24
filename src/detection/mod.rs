@@ -49,16 +49,23 @@ pub fn start(cfg: Arc<AppConfig>, supabase: Arc<SupabaseClient>) -> (mpsc::Recei
     }
 
     // ── Solana Tracker /search polling (backup detection) ────
-    if cfg.env.solana_tracker_api_key.is_some() {
-        let search_tx = tx.clone();
-        let st_api_key = cfg.env.solana_tracker_api_key.clone();
-        tokio::spawn(async move {
-            st_search_poller::run(search_tx, st_api_key).await;
-        });
-        info!("Detection: SolanaTracker search poller spawned (2-min interval)");
-    } else {
-        info!("Detection: ST search poller disabled (no API key)");
-    }
+    // DISABLED 2026-04-24: contributed 0/141 bought positions over 7 days while
+    // burning ~4,320 ST calls/day (~58% of remaining monthly budget). PumpFun WS
+    // is the sole detection source in practice. Re-enable by uncommenting below
+    // AND restoring the 20s interval only if WS coverage gaps are observed.
+    //
+    // if cfg.env.solana_tracker_api_key.is_some() {
+    //     let search_tx = tx.clone();
+    //     let st_api_key = cfg.env.solana_tracker_api_key.clone();
+    //     tokio::spawn(async move {
+    //         st_search_poller::run(search_tx, st_api_key).await;
+    //     });
+    //     info!("Detection: SolanaTracker search poller spawned");
+    // } else {
+    //     info!("Detection: ST search poller disabled (no API key)");
+    // }
+    info!("Detection: ST search poller disabled (see comment in detection/mod.rs)");
+    let _ = &tx; // silence unused-clone lints if any future edit re-enables the block
 
     // `tx` is dropped here — only the cloned senders inside spawned tasks
     // keep the channel open. When all senders are gone the receiver will
