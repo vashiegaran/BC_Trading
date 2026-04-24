@@ -463,7 +463,7 @@ cto_moderate_momentum = 0.4
 
 # --- Re-entry shadow-mode tracking -----------------------------
 # When a position closes (moonbag sold to zero), watch the mint for up to
-# window_seconds and log every would-be re-entry to eentry_candidates.
+# window_seconds and log every would-be re-entry to reentry_candidates.
 # SHADOW MODE ONLY: no trades are executed. Used to validate gate + narrative
 # correlation before enabling live re-entry.
 [reentry]
