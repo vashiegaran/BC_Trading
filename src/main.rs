@@ -6,6 +6,7 @@ mod filters;
 mod logger;
 mod monitoring;
 mod narrative;
+mod reentry;
 mod sniper;
 
 /// Captures a build timestamp at compile time via env vars set by Cargo.
@@ -288,6 +289,9 @@ async fn main() {
         Arc::clone(&trading_state),
     );
     info!("Exit engine started — ready to process exit signals");
+
+    // ── 11a. Start re-entry shadow watcher (post-moonbag exit) ──
+    reentry::start(Arc::clone(&cfg_arc), Arc::clone(&supabase_arc));
 
     // ── 11b. Recover stuck positions from previous runs ─
     recover_stuck_positions(

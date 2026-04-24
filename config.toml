@@ -459,3 +459,19 @@ cto_strong_recovery_pct = 70.0
 cto_strong_momentum = 0.5
 cto_moderate_recovery_pct = 30.0
 cto_moderate_momentum = 0.4
+
+
+# --- Re-entry shadow-mode tracking -----------------------------
+# When a position closes (moonbag sold to zero), watch the mint for up to
+# window_seconds and log every would-be re-entry to eentry_candidates.
+# SHADOW MODE ONLY: no trades are executed. Used to validate gate + narrative
+# correlation before enabling live re-entry.
+[reentry]
+enabled = true
+shadow_mode = true
+window_seconds = 21600              # 6h watch window after exit
+min_dip_pct = 0.15                  # require =15% dip from exit price
+min_narrative_score = 60            # 0..100 scale (matches NarrativeResult.score)
+check_interval_seconds = 90         # re-evaluate all tracked mints every 90s
+outcome_interval_seconds = 300      # backfill +30m/+2h/+6h prices every 5m
+enqueue_lookback_seconds = 300      # scan newly-closed positions over last 5m

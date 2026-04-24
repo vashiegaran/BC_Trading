@@ -17,7 +17,64 @@ pub struct TomlConfig {
     pub exit: ExitConfig,
     pub risk: RiskConfig,
     pub monitoring: MonitoringConfig,
+    /// Re-entry shadow-mode tracking (post-moonbag exit).
+    #[serde(default)]
+    pub reentry: ReentryConfig,
 }
+
+#[derive(Debug, Deserialize)]
+pub struct ReentryConfig {
+    /// Enable post-moonbag re-entry watcher. Requires OPENAI_API_KEY + X_API_BEARER_TOKEN
+    /// for narrative scoring. If false, the watcher task does not start.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Shadow mode: log every would-be re-entry to `reentry_candidates` but never
+    /// execute a paper/real buy. MUST remain true until data supports flipping it.
+    #[serde(default = "default_true")]
+    pub shadow_mode: bool,
+    /// Window (seconds) after moonbag exit during which re-entries are evaluated.
+    #[serde(default = "default_reentry_window_seconds")]
+    pub window_seconds: u64,
+    /// Minimum dip % from exit price (or previous attempt price) before a
+    /// re-entry is considered. e.g. 0.15 = must be ≥ 15% below exit price.
+    #[serde(default = "default_reentry_min_dip_pct")]
+    pub min_dip_pct: f64,
+    /// Minimum narrative score (0..100) for the "permissive" would-enter flag.
+    #[serde(default = "default_reentry_min_narrative_score")]
+    pub min_narrative_score: u8,
+    /// Interval (seconds) between evaluation passes of all tracked exited mints.
+    #[serde(default = "default_reentry_check_interval_seconds")]
+    pub check_interval_seconds: u64,
+    /// Interval (seconds) between outcome-backfill passes.
+    #[serde(default = "default_reentry_outcome_interval_seconds")]
+    pub outcome_interval_seconds: u64,
+    /// Enqueue-poll lookback window (seconds) for finding newly-closed positions.
+    /// Should be ≥ 2 × check_interval_seconds.
+    #[serde(default = "default_reentry_enqueue_lookback_seconds")]
+    pub enqueue_lookback_seconds: u64,
+}
+
+impl Default for ReentryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            shadow_mode: true,
+            window_seconds: default_reentry_window_seconds(),
+            min_dip_pct: default_reentry_min_dip_pct(),
+            min_narrative_score: default_reentry_min_narrative_score(),
+            check_interval_seconds: default_reentry_check_interval_seconds(),
+            outcome_interval_seconds: default_reentry_outcome_interval_seconds(),
+            enqueue_lookback_seconds: default_reentry_enqueue_lookback_seconds(),
+        }
+    }
+}
+
+fn default_reentry_window_seconds() -> u64 { 21_600 }            // 6h
+fn default_reentry_min_dip_pct() -> f64 { 0.15 }                 // 15%
+fn default_reentry_min_narrative_score() -> u8 { 60 }            // 0..100 scale
+fn default_reentry_check_interval_seconds() -> u64 { 90 }
+fn default_reentry_outcome_interval_seconds() -> u64 { 300 }     // 5m
+fn default_reentry_enqueue_lookback_seconds() -> u64 { 300 }     // 5m
 
 #[derive(Debug, Deserialize)]
 pub struct DetectionConfig {
