@@ -54,7 +54,9 @@ struct ClosedPositionRow {
     id: i64,
     mint: String,
     #[serde(default)]
-    token_symbol: Option<String>,
+    symbol: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
     #[serde(default)]
     exit_price_usd: Option<f64>,
     #[serde(default)]
@@ -245,7 +247,7 @@ async fn enqueue_new_closed(
         .to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
 
     let url = format!(
-        "{}/positions?status=eq.closed&closed_at=gte.{}&select=id,mint,token_symbol,exit_price_usd,pnl_pct,exit_reason,exit_time,closed_at&order=closed_at.desc&limit=100",
+        "{}/positions?status=eq.closed&closed_at=gte.{}&select=id,mint,symbol,name,exit_price_usd,pnl_pct,exit_reason,exit_time,closed_at&order=closed_at.desc&limit=100",
         supabase.base_url, cutoff
     );
 
@@ -284,8 +286,8 @@ async fn enqueue_new_closed(
             row.mint.clone(),
             TrackedExit {
                 mint: row.mint.clone(),
-                symbol: row.token_symbol.clone().unwrap_or_default(),
-                token_name: row.token_symbol.unwrap_or_default(),
+                symbol: row.symbol.unwrap_or_default(),
+                token_name: row.name.unwrap_or_default(),
                 position_id: row.id,
                 exit_price_usd: exit_price,
                 exit_time,
