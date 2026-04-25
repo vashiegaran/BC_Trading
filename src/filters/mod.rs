@@ -42,8 +42,9 @@ pub fn start(
     mut detection_rx: mpsc::Receiver<GraduatedToken>,
     supabase: Arc<SupabaseClient>,
     wallet: Arc<BotWallet>,
-) -> mpsc::Receiver<FilteredToken> {
+) -> (mpsc::Sender<FilteredToken>, mpsc::Receiver<FilteredToken>) {
     let (tx, rx) = mpsc::channel::<FilteredToken>(FILTER_CHANNEL_CAPACITY);
+    let external_tx = tx.clone();
 
     let pumpfun_count = Arc::new(AtomicU64::new(0));
     let raydium_count = Arc::new(AtomicU64::new(0));
@@ -310,7 +311,7 @@ pub fn start(
         info!("Filter engine shutting down (detection channel closed)");
     });
 
-    rx
+    (external_tx, rx)
 }
 
 // ─── Supabase logging helper ─────────────────────────────────

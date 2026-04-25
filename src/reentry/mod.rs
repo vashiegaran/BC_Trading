@@ -20,9 +20,14 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use crate::config::AppConfig;
+use crate::detection::types::{DetectionSource, GraduatedToken, PipelineTiming};
 use crate::execution::jupiter::JupiterClient;
+use crate::filters::types::{FilteredToken, FilterSummary};
 use crate::logger::SupabaseClient;
 use crate::narrative::{self, NarrativeContext, NarrativeResult};
+use solana_sdk::pubkey::Pubkey;
+use std::str::FromStr;
+use tokio::sync::mpsc;
 
 // ── In-memory tracked exit state ─────────────────────────────
 
@@ -111,7 +116,16 @@ impl Gates {
 
 /// Spawn the re-entry watcher. Takes ownership of the config + supabase clone.
 /// Does nothing if `reentry.enabled = false` or required API keys are missing.
-pub fn start(cfg: Arc<AppConfig>, supabase: Arc<SupabaseClient>) {
+///
+/// `filter_tx` is the same channel the filter engine pushes `FilteredToken`s
+/// into. When `shadow_mode=false` and gates pass, the watcher injects a
+/// synthetic `FilteredToken` so the execution engine treats it like any other
+/// buy. With `PAPER_TRADE=true`, the result is a paper-trade re-entry.
+pub fn start(
+    cfg: Arc<AppConfig>,
+    supabase: Arc<SupabaseClient>,
+    filter_tx: mpsc::Sender<FilteredToken>,
+) {
     if !cfg.strategy.reentry.enabled {
         info!("Re-entry watcher disabled (reentry.enabled = false)");
         return;
@@ -142,8 +156,9 @@ pub fn start(cfg: Arc<AppConfig>, supabase: Arc<SupabaseClient>) {
     // Evaluation loop — enqueue newly-closed positions + evaluate tracked set.
     let eval_cfg = Arc::clone(&cfg);
     let eval_supa = Arc::clone(&supabase);
+    let eval_tx = filter_tx.clone();
     tokio::spawn(async move {
-        run_evaluator(eval_cfg, eval_supa).await;
+        run_evaluator(eval_cfg, eval_supa, eval_tx).await;
     });
 
     // Outcome backfill loop — separate cadence.
@@ -156,7 +171,11 @@ pub fn start(cfg: Arc<AppConfig>, supabase: Arc<SupabaseClient>) {
 
 // ── Evaluator loop ───────────────────────────────────────────
 
-async fn run_evaluator(cfg: Arc<AppConfig>, supabase: Arc<SupabaseClient>) {
+async fn run_evaluator(
+    cfg: Arc<AppConfig>,
+    supabase: Arc<SupabaseClient>,
+    filter_tx: mpsc::Sender<FilteredToken>,
+) {
     let jupiter = Arc::new(JupiterClient::new(
         cfg.strategy.execution.api_request_timeout_secs,
         cfg.strategy.execution.max_retries,
@@ -196,7 +215,7 @@ async fn run_evaluator(cfg: Arc<AppConfig>, supabase: Arc<SupabaseClient>) {
                 continue;
             }
 
-            match evaluate_candidate(&cfg, &supabase, &jupiter, &http, exit).await {
+            match evaluate_candidate(&cfg, &supabase, &jupiter, &http, &filter_tx, exit).await {
                 Ok(Some(score)) => exit.previous_score = Some(score),
                 Ok(None) => {}
                 Err(e) => warn!(mint = %mint, "Re-entry evaluation failed: {}", e),
@@ -296,6 +315,7 @@ async fn evaluate_candidate(
     supabase: &SupabaseClient,
     jupiter: &JupiterClient,
     http: &reqwest::Client,
+    filter_tx: &mpsc::Sender<FilteredToken>,
     exit: &mut TrackedExit,
 ) -> Result<Option<u8>> {
     let now = Utc::now();
@@ -440,10 +460,94 @@ async fn evaluate_candidate(
         would_enter_strict,
         would_enter_permissive,
         shadow = cfg.strategy.reentry.shadow_mode,
-        "🔁 Re-entry candidate evaluated (shadow)"
+        "🔁 Re-entry candidate evaluated"
     );
 
+    // ── Inject paper-trade re-entry into execution pipeline ──
+    // When shadow_mode=false and gates pass, build a synthetic FilteredToken
+    // and push it onto the filter→execution channel. With PAPER_TRADE=true
+    // this becomes a paper-trade re-entry; with PAPER_TRADE=false a real one.
+    if !cfg.strategy.reentry.shadow_mode && would_enter_permissive {
+        match build_synthetic_filtered_token(exit, current_price) {
+            Ok(ft) => match filter_tx.try_send(ft) {
+                Ok(()) => info!(
+                    mint = %exit.mint,
+                    attempt = attempt_num,
+                    "🔁⚡ Re-entry injected into execution pipeline"
+                ),
+                Err(e) => warn!(mint = %exit.mint, "Re-entry inject failed: {}", e),
+            },
+            Err(e) => warn!(mint = %exit.mint, "Synthetic FilteredToken build failed: {}", e),
+        }
+    }
+
     Ok(narrative_score.map(|s| s as u8))
+}
+
+// ── Synthetic FilteredToken builder (re-entry injection) ─────────────────
+
+fn build_synthetic_filtered_token(
+    exit: &TrackedExit,
+    current_price_usd: f64,
+) -> Result<FilteredToken> {
+    let mint = Pubkey::from_str(&exit.mint).context("parse mint pubkey")?;
+    let creator = Pubkey::default();
+
+    let mut sniper_features = serde_json::Map::new();
+    sniper_features.insert(
+        "entry_tier".to_string(),
+        serde_json::Value::String("reentry".to_string()),
+    );
+    sniper_features.insert(
+        "reentry_attempt".to_string(),
+        serde_json::Value::from(exit.attempts as i64),
+    );
+    sniper_features.insert(
+        "reentry_origin_position_id".to_string(),
+        serde_json::Value::from(exit.position_id),
+    );
+    sniper_features.insert(
+        "reentry_origin_exit_pnl_pct".to_string(),
+        serde_json::Value::from(exit.exit_pnl_pct),
+    );
+
+    let event = GraduatedToken {
+        mint,
+        pool_address: None,
+        creator_wallet: creator,
+        bonding_curve_volume_sol: 0.0,
+        buy_pressure_pct: 0.0,
+        time_to_graduate_seconds: 0.0,
+        detected_at: chrono::Utc::now().timestamp_millis(),
+        source: DetectionSource::PumpFun,
+        unique_buyer_count: 0,
+        buy_count: 0,
+        sell_count: 0,
+        trade_timestamps: vec![],
+        name: exit.token_name.clone(),
+        symbol: exit.symbol.clone(),
+        // High enough that compute_dynamic_buy_amount returns full buy size.
+        initial_liquidity_sol: 1_000.0,
+        creator_rebuy: false,
+        buy_sell_ratio: 0.0,
+        candidate_id: None,
+        sniper_features: Some(serde_json::Value::Object(sniper_features)),
+        sniper_score: None,
+        pipeline_timing: PipelineTiming::default(),
+    };
+
+    Ok(FilteredToken {
+        event,
+        filter_summary: FilterSummary::from_results(vec![]),
+        market_cap_usd: None,
+        liquidity_usd: None,
+        rugcheck_score: None,
+        // Setting filter_price = current_price means the anti-chase check sees
+        // 0% move at execution time — re-entries are intentionally entered at
+        // the dipped price, not chasing.
+        filter_price_usd: Some(current_price_usd),
+        pipeline_timing: PipelineTiming::default(),
+    })
 }
 
 // ── Outcome backfill loop ────────────────────────────────────

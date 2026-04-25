@@ -228,7 +228,7 @@ async fn main() {
     info!("Sniper enrichment pipeline started — enriching & hard-filtering tokens");
 
     // ── 8. Start filter engine ──────────────────────────
-    let filter_rx = filters::start(
+    let (filter_tx, filter_rx) = filters::start(
         Arc::clone(&cfg_arc),
         enriched_rx,
         Arc::clone(&supabase_arc),
@@ -291,7 +291,7 @@ async fn main() {
     info!("Exit engine started — ready to process exit signals");
 
     // ── 11a. Start re-entry shadow watcher (post-moonbag exit) ──
-    reentry::start(Arc::clone(&cfg_arc), Arc::clone(&supabase_arc));
+    reentry::start(Arc::clone(&cfg_arc), Arc::clone(&supabase_arc), filter_tx.clone());
 
     // ── 11b. Recover stuck positions from previous runs ─
     recover_stuck_positions(

@@ -373,7 +373,7 @@ enrichment_post_exit_check_enabled = true
 # ── Narrative moonbag system ──
 # Enable OpenAI-powered narrative detection for moonbag promotion.
 # Requires OPENAI_API_KEY in .env. Disabled if false or key missing.
-narrative_check_enabled = false
+narrative_check_enabled = true
 
 # Seconds after entry to run each narrative check (decaying schedule).
 # v4: reduced from 3 → 2 checks. Most positions exit by T+4m. Third check
@@ -468,7 +468,7 @@ cto_moderate_momentum = 0.4
 # correlation before enabling live re-entry.
 [reentry]
 enabled = true
-shadow_mode = true
+shadow_mode = false                 # paper-trade re-entries active (PAPER_TRADE=true in .env keeps them simulated)
 window_seconds = 21600              # 6h watch window after exit
 min_dip_pct = 0.15                  # require =15% dip from exit price
 min_narrative_score = 60            # 0..100 scale (matches NarrativeResult.score)
