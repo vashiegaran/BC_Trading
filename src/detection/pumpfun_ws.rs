@@ -199,7 +199,7 @@ async fn handle_text_message(
     match kind {
         EventKind::NewToken => handle_new_token(&v, watchlist, ws_write_tx).await?,
         EventKind::TokenTrade => handle_token_trade(&v, watchlist, cfg, supabase, bc_cache).await?,
-        EventKind::TokenComplete => handle_token_complete(&v, tx, watchlist, supabase, rpc_url).await?,
+        EventKind::TokenComplete => handle_token_complete(&v, tx, watchlist, supabase, rpc_url, cfg).await?,
         EventKind::Unknown => {
             // Subscription acks have no txType — only log events that have one
             if let Some(tx_type) = v.get("txType").and_then(|t| t.as_str()) {
@@ -483,16 +483,18 @@ async fn handle_token_trade(
         });
     }
 
-    // ── Lane-B: bc_progress_pct >= 90% trigger (one-shot per token) ──
-    // Captures the same signal payload + computed bc_score at high BC progress
-    // so we can backtest "score-filter at 90% → buy on BC → ride graduation".
-    // Independent of the 50-SOL signal so a single token can produce both rows.
+    // ── Lane-B trigger: bc_progress_pct >= 75% (one-shot per token) ──
+    // Lowered from 90% — at 90% the BC is too steep and most tokens jump
+    // straight to graduation between tokenTrade events, missing the trigger.
+    // The retroactive fire in handle_token_complete catches anything that
+    // still slipped through. We keep entry_trigger='progress_90pct' so the
+    // bucket stays comparable across the threshold change.
     if !entry.progress_signal_recorded
         && entry.last_v_sol_reserves > 0.0
     {
         let bc_progress_pct = (((entry.last_v_sol_reserves - 30.0) / 85.0) * 100.0)
             .clamp(0.0, 100.0);
-        if bc_progress_pct >= 90.0 {
+        if bc_progress_pct >= 75.0 {
             entry.progress_signal_recorded = true;
 
             // Compute the same score we use for the 50-SOL signal so the two
@@ -594,6 +596,7 @@ async fn handle_token_complete(
     watchlist: &mut HashMap<String, WatchlistEntry>,
     supabase: &Arc<SupabaseClient>,
     rpc_url: &str,
+    cfg: &Arc<AppConfig>,
 ) -> Result<()> {
     let mint_str = v
         .get("mint")
@@ -829,6 +832,66 @@ async fn handle_token_complete(
     } else {
         warn!(mint = %mint_str, "📊 Token NOT in watchlist at graduation time");
     }
+
+    // ── Retroactive Lane-B fire ──
+    // If the token graduated without ever crossing the 75% trigger in WS data
+    // (jumped straight from <75% to graduation in a single trade between
+    // events), fire Lane-B now using last-seen state. Same bucket name as
+    // the in-flight trigger so analytics stay unified. One-shot guard via
+    // progress_signal_recorded.
+    if let Some(entry) = watchlist.get_mut(mint_str) {
+        if !entry.progress_signal_recorded && entry.last_v_sol_reserves > 0.0 {
+            entry.progress_signal_recorded = true;
+
+            let bc_progress_pct = (((entry.last_v_sol_reserves - 30.0) / 85.0) * 100.0)
+                .clamp(0.0, 100.0);
+
+            let whale_buy_b = entry.trade_log.iter().any(|&(_, sol, is_buy, _)| is_buy && sol >= 3.0);
+            let cr_b = entry.trade_log.iter().any(|&(_, _, is_buy, wallet)| {
+                is_buy && wallet == entry.creator_wallet
+            }) && entry.trade_log.len() > 1;
+            let bsr_b = if entry.sell_count > 0 {
+                entry.buy_count as f64 / entry.sell_count as f64
+            } else if entry.buy_count > 0 {
+                entry.buy_count as f64
+            } else {
+                0.0
+            };
+            let lane_b_score = compute_bc_score(
+                entry.unique_buyers.len(),
+                bsr_b,
+                cr_b,
+                whale_buy_b,
+                entry.buy_count,
+                entry.sell_count,
+                entry.total_volume_sol,
+            );
+
+            let signal_payload_b = build_signal_payload(entry, mint_str);
+            let supabase_b = Arc::clone(supabase);
+            let cfg_b = Arc::clone(cfg);
+            let mint_for_b = mint_str.to_string();
+            let progress_pct_logged = bc_progress_pct;
+            tokio::spawn(async move {
+                info!(
+                    mint = %mint_for_b,
+                    progress = format!("{:.1}%", progress_pct_logged),
+                    score = format!("{:.1}", lane_b_score),
+                    "🎯 LANE-B RETROACTIVE — graduation w/o prior trigger, recording paper trade"
+                );
+                let row_id = write_bc_paper_trade(
+                    &supabase_b,
+                    &signal_payload_b,
+                    "progress_90pct",
+                    lane_b_score,
+                ).await;
+                if let Some(id) = row_id {
+                    run_lane_b_api_check(&supabase_b, &cfg_b, id, &mint_for_b).await;
+                }
+            });
+        }
+    }
+
     let (creator_wallet, bonding_curve_volume_sol, buy_pressure_pct, detected_at, time_to_graduate_seconds, unique_buyer_count, buy_count, sell_count, trade_timestamps, token_name, token_symbol, initial_buy_sol, creator_rebuy, buy_sell_ratio) =
         match watchlist.remove(mint_str) {
             Some(entry) => {
