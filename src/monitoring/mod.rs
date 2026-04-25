@@ -2383,6 +2383,7 @@ async fn shadow_log_loop(
     let mut shadow_low = f64::MAX;
     let mut tick_count: u64 = 0;
     let mut exit_elapsed_secs: Option<u64> = None;
+    let mut last_flush_secs: u64 = 0;
     let mut snapshots: Vec<serde_json::Value> = Vec::new();
 
     // INSERT the initial shadow_log row for this position
@@ -2415,10 +2416,18 @@ async fn shadow_log_loop(
         supabase.base_url, position_id
     );
 
-    // Poll every 5 seconds
-    let poll_interval = Duration::from_secs(5);
+    // Active phase: 5s ticks (matches monitoring cadence).
+    // Post-exit phase: 30s ticks (we only need a price curve, not tick precision)
+    // — keeps Jupiter RPS bounded when many positions tail in parallel.
+    let active_interval = Duration::from_secs(5);
+    let post_exit_interval = Duration::from_secs(30);
 
     loop {
+        let poll_interval = if exit_elapsed_secs.is_some() {
+            post_exit_interval
+        } else {
+            active_interval
+        };
         tokio::time::sleep(poll_interval).await;
 
         let elapsed_secs = started.elapsed().as_secs();
@@ -2493,8 +2502,14 @@ async fn shadow_log_loop(
             "phase": phase,
         }));
 
-        // Flush to Supabase every 30 seconds (or first tick)
-        if tick_count == 1 || elapsed_secs % 30 < 5 {
+        // Flush cadence: every 30s during active phase, every 5min post-exit.
+        // Each PATCH re-sends the full (growing) snapshot array, so we throttle
+        // post-exit to keep network/Supabase write amplification bounded over 24h.
+        let flush_period_secs: u64 = if exit_elapsed_secs.is_some() { 300 } else { 30 };
+        let should_flush = tick_count == 1
+            || elapsed_secs.saturating_sub(last_flush_secs) >= flush_period_secs;
+        if should_flush {
+            last_flush_secs = elapsed_secs;
             let payload = serde_json::json!({
                 "snapshots": snapshots,
                 "shadow_peak_usd": shadow_peak,

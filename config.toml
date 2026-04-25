@@ -349,7 +349,8 @@ dip_no_trades_timeout_secs = 30.0
 # Shadow-log price for this many seconds after a position is closed.
 # Data goes to the `shadow_log` Supabase table for post-mortem analysis.
 # 0 = disabled.
-shadow_log_duration_secs = 3600
+# 86400 = 24h (active phase polled every 5s, post-exit every 30s)
+shadow_log_duration_secs = 86400
 
 # Force-close any position still in TradingState after this many seconds.
 # Safety net — should be longer than max_hold_seconds so TimeStop fires first.
@@ -373,7 +374,7 @@ enrichment_post_exit_check_enabled = true
 # ── Narrative moonbag system ──
 # Enable OpenAI-powered narrative detection for moonbag promotion.
 # Requires OPENAI_API_KEY in .env. Disabled if false or key missing.
-narrative_check_enabled = true
+narrative_check_enabled = false
 
 # Seconds after entry to run each narrative check (decaying schedule).
 # v4: reduced from 3 → 2 checks. Most positions exit by T+4m. Third check
@@ -467,8 +468,8 @@ cto_moderate_momentum = 0.4
 # SHADOW MODE ONLY: no trades are executed. Used to validate gate + narrative
 # correlation before enabling live re-entry.
 [reentry]
-enabled = true
-shadow_mode = false                 # paper-trade re-entries active (PAPER_TRADE=true in .env keeps them simulated)
+enabled = false                     # narrative-based reentry disabled (Option B backtest showed no signal)
+shadow_mode = true                  # if re-enabled later, start in shadow
 window_seconds = 21600              # 6h watch window after exit
 min_dip_pct = 0.15                  # require =15% dip from exit price
 min_narrative_score = 60            # 0..100 scale (matches NarrativeResult.score)
