@@ -231,6 +231,21 @@ pub struct WatchlistEntry {
     pub trade_log: Vec<(i64, f64, bool, Pubkey)>,
     /// Whether a bonding_curve_signals row has already been written.
     pub signal_recorded: bool,
+
+    /// Whether the Lane-B (bc_progress_pct >= 90) signal has been written.
+    /// Independent of `signal_recorded` so a single token writes both rows.
+    pub progress_signal_recorded: bool,
+
+    // ── Bonding curve state, updated from each tokenTrade WS event ──
+    // PumpPortal includes vSolInBondingCurve, vTokensInBondingCurve and
+    // marketCapSol on every trade. Snapshotting them here lets us compute
+    // bc_progress_pct without the unreliable pump.fun REST API.
+    /// Most recent virtual SOL reserves observed on the BC (units: SOL).
+    pub last_v_sol_reserves: f64,
+    /// Most recent virtual token reserves observed on the BC.
+    pub last_v_token_reserves: f64,
+    /// Most recent market cap in SOL reported by PumpPortal.
+    pub last_market_cap_sol: f64,
 }
 
 /// Maximum trade log entries per token to bound memory.

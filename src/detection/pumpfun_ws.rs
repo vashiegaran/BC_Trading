@@ -286,6 +286,10 @@ async fn handle_new_token(
         trade_timestamps: vec![],
         trade_log: vec![],
         signal_recorded: false,
+        progress_signal_recorded: false,
+        last_v_sol_reserves: 0.0,
+        last_v_token_reserves: 0.0,
+        last_market_cap_sol: 0.0,
     };
 
 
@@ -362,6 +366,24 @@ async fn handle_token_trade(
     }
 
     entry.total_volume_sol += sol_amount;
+
+    // Snapshot live BC reserves from this trade event (PumpPortal payload).
+    // These are how we compute bc_progress_pct without calling pump.fun REST.
+    if let Some(v) = v.get("vSolInBondingCurve").and_then(|x| x.as_f64()) {
+        if v > 0.0 {
+            entry.last_v_sol_reserves = v;
+        }
+    }
+    if let Some(v) = v.get("vTokensInBondingCurve").and_then(|x| x.as_f64()) {
+        if v > 0.0 {
+            entry.last_v_token_reserves = v;
+        }
+    }
+    if let Some(v) = v.get("marketCapSol").and_then(|x| x.as_f64()) {
+        if v > 0.0 {
+            entry.last_market_cap_sol = v;
+        }
+    }
 
     let is_buy = tx_type == "buy";
 
@@ -454,13 +476,112 @@ async fn handle_token_trade(
 
         let signal_payload = build_signal_payload(entry, mint_str);
         let supabase_clone = Arc::clone(supabase);
+        let score_for_paper = bc_score;
         tokio::spawn(async move {
             write_bonding_curve_signal(&supabase_clone, &signal_payload).await;
-            write_bc_paper_trade(&supabase_clone, &signal_payload).await;
+            write_bc_paper_trade(&supabase_clone, &signal_payload, "volume_50sol", score_for_paper).await;
         });
     }
 
+    // ── Lane-B: bc_progress_pct >= 90% trigger (one-shot per token) ──
+    // Captures the same signal payload + computed bc_score at high BC progress
+    // so we can backtest "score-filter at 90% → buy on BC → ride graduation".
+    // Independent of the 50-SOL signal so a single token can produce both rows.
+    if !entry.progress_signal_recorded
+        && entry.last_v_sol_reserves > 0.0
+    {
+        let bc_progress_pct = (((entry.last_v_sol_reserves - 30.0) / 85.0) * 100.0)
+            .clamp(0.0, 100.0);
+        if bc_progress_pct >= 90.0 {
+            entry.progress_signal_recorded = true;
+
+            // Compute the same score we use for the 50-SOL signal so the two
+            // rows are directly comparable.
+            let whale_buy_b = entry.trade_log.iter().any(|&(_, sol, is_buy, _)| is_buy && sol >= 3.0);
+            let cr_b = entry.trade_log.iter().any(|&(_, _, is_buy, wallet)| {
+                is_buy && wallet == entry.creator_wallet
+            }) && entry.trade_log.len() > 1;
+            let bsr_b = if entry.sell_count > 0 {
+                entry.buy_count as f64 / entry.sell_count as f64
+            } else if entry.buy_count > 0 {
+                entry.buy_count as f64
+            } else {
+                0.0
+            };
+            let lane_b_score = compute_bc_score(
+                entry.unique_buyers.len(),
+                bsr_b,
+                cr_b,
+                whale_buy_b,
+                entry.buy_count,
+                entry.sell_count,
+                entry.total_volume_sol,
+            );
+
+            let signal_payload_b = build_signal_payload(entry, mint_str);
+            let supabase_b = Arc::clone(supabase);
+            let cfg_b = Arc::clone(cfg);
+            let mint_for_b = mint_str.to_string();
+            let progress_pct_logged = bc_progress_pct;
+            tokio::spawn(async move {
+                info!(
+                    mint = %mint_for_b,
+                    progress = format!("{:.1}%", progress_pct_logged),
+                    score = format!("{:.1}", lane_b_score),
+                    "🎯 LANE-B TRIGGER — bc_progress >= 90%, recording paper trade"
+                );
+
+                let row_id = write_bc_paper_trade(
+                    &supabase_b,
+                    &signal_payload_b,
+                    "progress_90pct",
+                    lane_b_score,
+                ).await;
+
+                // Async API check — runs AFTER the row is written so it doesn't
+                // delay the trigger. Result PATCHed onto entry_api_checks.
+                if let Some(id) = row_id {
+                    run_lane_b_api_check(&supabase_b, &cfg_b, id, &mint_for_b).await;
+                }
+            });
+        }
+    }
+
     Ok(())
+}
+
+/// Run a fast safety-check on a Lane-B candidate and PATCH the result onto
+/// `bc_paper_trades.entry_api_checks`. Used to test the hypothesis:
+///   "filter at 90% with score + API checks → does it beat 50-SOL baseline?"
+///
+/// Currently calls GoPlus only (fastest single check, ~250-500ms). Stays
+/// best-effort: failures just write a `succeeded=false` marker.
+async fn run_lane_b_api_check(
+    supabase: &Arc<SupabaseClient>,
+    cfg: &Arc<AppConfig>,
+    row_id: i64,
+    mint: &str,
+) {
+    use crate::filters::goplus::GoPlusFilter;
+    let started = std::time::Instant::now();
+    let gp = GoPlusFilter::new();
+    let result = gp.check(mint, cfg).await;
+
+    let payload = serde_json::json!({
+        "succeeded": true,
+        "goplus_passed": result.passed,
+        "goplus_rejection_reason": result.fail_reason,
+        "ms_total": started.elapsed().as_millis() as u64,
+    });
+    patch_lane_b_api_checks(supabase, row_id, &payload).await;
+}
+
+async fn patch_lane_b_api_checks(supabase: &Arc<SupabaseClient>, row_id: i64, value: &serde_json::Value) {
+    let url = format!("{}/bc_paper_trades?id=eq.{}", supabase.base_url, row_id);
+    let body = serde_json::json!({ "entry_api_checks": value });
+    if let Err(e) = supabase.client.patch(&url).json(&body).send().await {
+        warn!(row_id, "Lane-B api_checks PATCH error: {}", e);
+    }
 }
 
 // ─── 3. tokenComplete (GRADUATION) ──────────────────────────────────────────
@@ -1288,6 +1409,20 @@ fn build_signal_payload(entry: &WatchlistEntry, mint_str: &str) -> serde_json::V
         })
     }).collect();
 
+    // Compute bonding-curve progress from live WS reserves.
+    // Pump.fun starts with ~30 SOL virtual reserves and graduates when
+    // ~85 SOL of real SOL has entered → virtual_sol ≈ 115 at graduation.
+    // progress_pct = ((v_sol - 30) / 85) * 100, clamped to [0, 100].
+    let v_sol = entry.last_v_sol_reserves;
+    let v_tok = entry.last_v_token_reserves;
+    let bc_progress_pct = if v_sol > 0.0 {
+        (((v_sol - 30.0) / 85.0) * 100.0).clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
+    // Spot price in SOL/token from the live curve (unitless ratio of reserves).
+    let bc_price_sol_per_token = if v_tok > 0.0 { v_sol / v_tok } else { 0.0 };
+
     serde_json::json!({
         "mint": mint_str,
         "name": entry.name,
@@ -1303,6 +1438,12 @@ fn build_signal_payload(entry: &WatchlistEntry, mint_str: &str) -> serde_json::V
         "initial_buy_sol": entry.initial_buy_sol,
         "trades": trades_json,
         "signals": signals,
+        // Live bonding-curve state at signal time (from WS, not REST).
+        "bc_progress_pct": bc_progress_pct,
+        "bc_virtual_sol_reserves": v_sol,
+        "bc_virtual_token_reserves": v_tok,
+        "bc_market_cap_sol": entry.last_market_cap_sol,
+        "bc_price_sol_per_token": bc_price_sol_per_token,
     })
 }
 
@@ -1371,8 +1512,21 @@ async fn write_bonding_curve_signal(supabase: &SupabaseClient, payload: &serde_j
 }
 
 /// Fire-and-forget INSERT to bc_paper_trades — simulated pre-graduation buy.
-/// Fetches bonding curve state from pump.fun API for entry price + metadata.
-async fn write_bc_paper_trade(supabase: &SupabaseClient, signal: &serde_json::Value) {
+/// Records BC reserves from the live WS stream (always populated when reserves
+/// have been observed) plus an optional pump.fun REST enrichment.
+///
+/// `trigger` distinguishes which signal fired this row:
+///   - "volume_50sol"   : default 50 SOL volume threshold (≈23% progress)
+///   - "progress_90pct" : Lane-B trigger when bc_progress_pct crosses 90%
+///
+/// Returns the inserted row id when available, so callers can PATCH async
+/// API-check results onto the row (used by Lane B for entry_api_checks).
+async fn write_bc_paper_trade(
+    supabase: &SupabaseClient,
+    signal: &serde_json::Value,
+    trigger: &str,
+    entry_score: f64,
+) -> Option<i64> {
     let mint = signal.get("mint").and_then(|m| m.as_str()).unwrap_or("unknown");
 
     let bsr = signal.get("signals")
@@ -1386,6 +1540,16 @@ async fn write_bc_paper_trade(supabase: &SupabaseClient, signal: &serde_json::Va
 
     // Fetch bonding curve state from pump.fun API
     let coin_data = fetch_pumpfun_coin(mint).await;
+
+    // ── WS-derived BC state (always populated when we have any trade data) ──
+    // These are computed in build_signal_payload from the live WS reserves
+    // and are reliable; the pump.fun REST API is Cloudflare-protected and
+    // often returns nothing, so prefer WS values as the source of truth.
+    let ws_bc_progress = signal.get("bc_progress_pct").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let ws_v_sol = signal.get("bc_virtual_sol_reserves").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let ws_v_tok = signal.get("bc_virtual_token_reserves").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let ws_mc_sol = signal.get("bc_market_cap_sol").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let ws_price_sol_per_tok = signal.get("bc_price_sol_per_token").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
     let mut payload = serde_json::json!({
         "mint": mint,
@@ -1401,6 +1565,16 @@ async fn write_bc_paper_trade(supabase: &SupabaseClient, signal: &serde_json::Va
         "entry_token_age_secs": signal.get("token_age_secs"),
         "entry_signals": signal.get("signals"),
         "sim_buy_sol": 0.05,
+        // Migration 021: Lane-B distinguishing fields
+        "entry_trigger": trigger,
+        "entry_score": entry_score,
+        // BC state from WS (primary source — always written if reserves seen)
+        "bc_progress_pct": if ws_bc_progress > 0.0 { Some(ws_bc_progress) } else { None },
+        "bc_virtual_sol_reserves": if ws_v_sol > 0.0 { Some(ws_v_sol) } else { None },
+        "bc_virtual_token_reserves": if ws_v_tok > 0.0 { Some(ws_v_tok) } else { None },
+        "bc_price_usd": if ws_price_sol_per_tok > 0.0 { Some(ws_price_sol_per_tok) } else { None },
+        // bc_market_cap_usd: convert SOL→USD with rough $150/SOL fallback
+        "bc_market_cap_usd": if ws_mc_sol > 0.0 { Some(ws_mc_sol * 150.0) } else { None },
     });
 
     // Merge pump.fun coin data into payload
@@ -1488,16 +1662,36 @@ async fn write_bc_paper_trade(supabase: &SupabaseClient, signal: &serde_json::Va
     }
 
     let url = format!("{}/bc_paper_trades", supabase.base_url);
-    match supabase.client.post(&url).json(&payload).send().await {
+    // Use Prefer: return=representation so we get the inserted row back
+    // (we need its id to PATCH async API-check results onto Lane-B rows).
+    match supabase.client
+        .post(&url)
+        .header("Prefer", "return=representation")
+        .json(&payload)
+        .send()
+        .await
+    {
         Ok(resp) if resp.status().is_success() => {
-            info!(mint = %mint, bsr = format!("{:.2}", bsr), "🧪 BC paper trade recorded (pre-grad buy simulated)");
+            let rows: Vec<serde_json::Value> = resp.json().await.unwrap_or_default();
+            let id = rows.first().and_then(|r| r.get("id")).and_then(|v| v.as_i64());
+            info!(
+                mint = %mint,
+                trigger,
+                bsr = format!("{:.2}", bsr),
+                score = format!("{:.1}", entry_score),
+                row_id = ?id,
+                "🧪 BC paper trade recorded (pre-grad buy simulated)"
+            );
+            id
         }
         Ok(resp) => {
             let body = resp.text().await.unwrap_or_default();
             warn!(mint = %mint, "bc_paper_trades INSERT failed: {}", body);
+            None
         }
         Err(e) => {
             warn!(mint = %mint, "bc_paper_trades INSERT error: {}", e);
+            None
         }
     }
 }

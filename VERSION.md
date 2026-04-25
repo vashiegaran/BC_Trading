@@ -9,6 +9,132 @@ strategy_version = "v12-fast-track"
 
 ---
 
+## v13 — Lane-B BC Trigger + 24h Shadow Log (2026-04-25)
+
+**Cargo version**: 0.3.1 | **strategy_version**: `v12-fast-track` (unchanged — paper-only data collection, no exit-logic changes)
+
+Adds **observability + experimentation infrastructure** to answer two open
+questions before any live trade:
+
+1. *"What is each token's TRUE 24h peak — independent of the bot's own
+   exit decisions?"* → enables data-driven moonbag promotion design.
+2. *"Does buying late on the bonding curve (at 90% progress) with a
+   score+API filter beat the existing post-graduation entry?"* → enables
+   A/B comparison of entry timing.
+
+No live trading behavior changes. Bot still exits on the v12 ladder, paper
+mode still on. This release is **purely about generating the data we lack**.
+
+### 1. 24h Shadow-Log Window ([src/monitoring/mod.rs](src/monitoring/mod.rs), [config.toml](config.toml))
+
+Extended price logging horizon from 1h to 24h with per-phase poll cadence:
+
+- `shadow_log_duration_secs` raised from 3600 → **86400** (24h)
+- Active phase (position still open): poll every **5s** (unchanged)
+- Post-exit phase (after the bot closes): poll every **30s** (was 5s)
+- Flush cadence: every 30s active, **every 5min post-exit** (avoids
+  re-sending the growing snapshot array thousands of times over 24h)
+- New `last_flush_secs` tracker replaces the brittle
+  `elapsed_secs % 30 < 5` window check
+- Jupiter load: ~1.6 RPS sustained across 50 concurrent post-exit tails
+
+### 2. shadow_log Table ([migrations/020_shadow_log.sql](migrations/020_shadow_log.sql))
+
+The `shadow_log` table the code already writes to was **never in any
+migration** — it had been silently failing for the entire history of the
+project. Migration 020 creates it:
+
+- One row per `position_id`
+- `snapshots` JSONB (compact `{ t, p, m, phase }` per tick)
+- `shadow_peak_multiplier`, `shadow_low_usd`, `total_ticks`
+- `exit_at_secs`, `exit_reason`, `duration_secs`, `completed_at`
+- Indexed on `position_id`, `mint`, `completed_at`, `shadow_peak_multiplier`
+
+Once populated, this is the ground-truth needed to backtest the 25/75 +
+48h trailing moonbag strategy without depending on the bot's premature
+exit decisions.
+
+### 3. Live BC-Progress Capture ([src/detection/types.rs](src/detection/types.rs), [src/detection/pumpfun_ws.rs](src/detection/pumpfun_ws.rs))
+
+Pre-v13: `bc_progress_pct` came from `https://frontend-api.pump.fun/coins/{mint}`
+which is Cloudflare-protected. **All 743 historical `bc_paper_trades` rows
+had `bc_progress_pct = NULL`.**
+
+v13: extract reserves directly from every `tokenTrade` WS event:
+
+- `WatchlistEntry` gains `last_v_sol_reserves`, `last_v_token_reserves`,
+  `last_market_cap_sol`
+- `handle_token_trade()` snapshots `vSolInBondingCurve`,
+  `vTokensInBondingCurve`, `marketCapSol` on each trade
+- `build_signal_payload()` computes
+  `bc_progress_pct = ((vSol − 30) / 85) × 100` (clamped 0-100)
+- WS values are now the **primary** source in `write_bc_paper_trade`;
+  the pump.fun REST call is best-effort enrichment only
+
+### 4. Lane-B Trigger ([src/detection/pumpfun_ws.rs](src/detection/pumpfun_ws.rs), [migrations/021_lane_b_progress_trigger.sql](migrations/021_lane_b_progress_trigger.sql))
+
+A second BC signal trigger — independent of the existing 50-SOL volume
+signal (Lane-A) — fires once per token when `bc_progress_pct ≥ 90%`.
+
+- New `progress_signal_recorded` flag on `WatchlistEntry` (independent
+  of `signal_recorded`, so a single mint can produce both rows)
+- `bc_paper_trades` gains `entry_trigger`, `entry_score`, `entry_api_checks`
+- Lane-A rows: `entry_trigger = 'volume_50sol'` (≈23% progress)
+- Lane-B rows: `entry_trigger = 'progress_90pct'` (≈90% progress)
+- Same `compute_bc_score(...)` recorded as `entry_score` on both rows
+  for direct A/B filter-threshold comparison
+- Both rows get auto-updated on graduation (peak prices, multipliers, etc.)
+
+### 5. Async API-Check on Lane-B ([src/detection/pumpfun_ws.rs](src/detection/pumpfun_ws.rs))
+
+Tests the hypothesis: *"filter at 90% with score + safety API checks → does
+it beat Lane-A's profitability?"*
+
+- New `run_lane_b_api_check()` runs **after** the row is written so it
+  doesn't delay the trigger
+- Currently calls `GoPlusFilter::check()` (~250-500ms; honeypot,
+  mintable, transfer-pausable, blacklist, reclaim flags)
+- PATCHes result to `entry_api_checks` JSONB column:
+  `{ succeeded, goplus_passed, goplus_rejection_reason, ms_total }`
+- `write_bc_paper_trade()` refactored to return `Option<i64>` row id
+  (uses `Prefer: return=representation`) so the API result can be
+  PATCHed onto the same row
+- Easy to extend with mint-authority / freeze-authority RPC checks later
+
+### 6. Migrations to Run on Supabase
+
+Both must be applied manually in the Supabase SQL Editor before the bot
+restart picks up the new binary:
+
+1. [migrations/020_shadow_log.sql](migrations/020_shadow_log.sql) —
+   creates `shadow_log` table (was missing entirely)
+2. [migrations/021_lane_b_progress_trigger.sql](migrations/021_lane_b_progress_trigger.sql)
+   — adds `entry_trigger`, `entry_score`, `entry_api_checks` to
+   `bc_paper_trades`
+
+### Unchanged from v12
+
+- BC fast-track pipeline (score ≥ 65 → 250ms entry, deferred verification)
+- All entry filters and scoring thresholds (`min_sniper_score = 60.0`)
+- Exit ladder: TP1=1.8x/25%, TP2=4.0x/50%, post-TP1 trailing=22%,
+  post-TP2 moonbag trailing=45-55%
+- Stop loss = 35%, never_profitable = 20%, max open = 8
+- Narrative path remains disabled (Option B backtest: r=−0.13, no signal)
+- Reentry watcher remains disabled (`shadow_mode = true`)
+- Paper trade mode active, 0.05 SOL per trade
+
+### Expected Data After 7 Days
+
+- ~150-300 closed positions with full 24h shadow tails
+- ~200-500 Lane-B (`progress_90pct`) rows alongside their Lane-A
+  counterparts for the same mints
+- Enough sample to:
+  - Backtest the 25/75 + 48h moonbag strategy on real 24h peaks
+  - Compare Lane-A vs Lane-B grad-rate, peak, and PnL by score band
+  - Test whether GoPlus-pass at 90% improves Lane-B PnL
+
+---
+
 ## v12 — BC Fast-Track Pipeline (2026-04-24)
 
 **Cargo version**: 0.3.0 | **strategy_version**: `v12-fast-track`
