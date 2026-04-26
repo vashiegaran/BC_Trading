@@ -30,6 +30,28 @@ const INITIAL_BACKOFF_SECS: u64 = 1;
 /// entries are pruned to prevent unbounded memory growth.
 const MAX_WATCHLIST_SIZE: usize = 5_000;
 
+/// Rough fallback used when we only have SOL-denominated BC state.
+const DEFAULT_SOL_USD: f64 = 150.0;
+
+/// Pump.fun tokens launch with a fixed 1B token supply.
+const PUMPFUN_TOTAL_SUPPLY_TOKENS: f64 = 1_000_000_000.0;
+
+fn bc_price_usd_from_market_cap(market_cap_usd: f64) -> f64 {
+    if market_cap_usd > 0.0 {
+        market_cap_usd / PUMPFUN_TOTAL_SUPPLY_TOKENS
+    } else {
+        0.0
+    }
+}
+
+fn bc_price_usd_from_sol(price_sol_per_token: f64, sol_usd: f64) -> f64 {
+    if price_sol_per_token > 0.0 && sol_usd > 0.0 {
+        price_sol_per_token * sol_usd
+    } else {
+        0.0
+    }
+}
+
 /// Run the pump.fun WebSocket listener.
 ///
 /// Connects to the PumpPortal WebSocket, subscribes to `newToken`,
@@ -287,6 +309,9 @@ async fn handle_new_token(
         trade_log: vec![],
         signal_recorded: false,
         progress_signal_recorded: false,
+        progress_60_recorded: false,
+        progress_90_recorded: false,
+        graduation_recorded: false,
         last_v_sol_reserves: 0.0,
         last_v_token_reserves: 0.0,
         last_market_cap_sol: 0.0,
@@ -483,73 +508,88 @@ async fn handle_token_trade(
         });
     }
 
-    // ── Lane-B trigger: bc_progress_pct >= 75% (one-shot per token) ──
-    // Lowered from 90% — at 90% the BC is too steep and most tokens jump
-    // straight to graduation between tokenTrade events, missing the trigger.
-    // The retroactive fire in handle_token_complete catches anything that
-    // still slipped through. We keep entry_trigger='progress_90pct' so the
-    // bucket stays comparable across the threshold change.
-    if !entry.progress_signal_recorded
-        && entry.last_v_sol_reserves > 0.0
-    {
+    // ── v14 multi-lane progress triggers (60% / 75% / 90%) ──
+    // Each band fires once per token via its own one-shot flag. Lower bands
+    // skip the GoPlus check (no API), 90% adds GoPlus async after the row
+    // is written. The retroactive fire in handle_token_complete still covers
+    // tokens that jumped straight to graduation between trade events.
+    if entry.last_v_sol_reserves > 0.0 {
         let bc_progress_pct = (((entry.last_v_sol_reserves - 30.0) / 85.0) * 100.0)
             .clamp(0.0, 100.0);
-        if bc_progress_pct >= 75.0 {
+
+        if !entry.progress_60_recorded && bc_progress_pct >= 60.0 {
+            entry.progress_60_recorded = true;
+            fire_bc_lane(entry, mint_str, supabase, cfg, "progress_60pct", false, bc_progress_pct);
+        }
+        if !entry.progress_signal_recorded && bc_progress_pct >= 75.0 {
             entry.progress_signal_recorded = true;
-
-            // Compute the same score we use for the 50-SOL signal so the two
-            // rows are directly comparable.
-            let whale_buy_b = entry.trade_log.iter().any(|&(_, sol, is_buy, _)| is_buy && sol >= 3.0);
-            let cr_b = entry.trade_log.iter().any(|&(_, _, is_buy, wallet)| {
-                is_buy && wallet == entry.creator_wallet
-            }) && entry.trade_log.len() > 1;
-            let bsr_b = if entry.sell_count > 0 {
-                entry.buy_count as f64 / entry.sell_count as f64
-            } else if entry.buy_count > 0 {
-                entry.buy_count as f64
-            } else {
-                0.0
-            };
-            let lane_b_score = compute_bc_score(
-                entry.unique_buyers.len(),
-                bsr_b,
-                cr_b,
-                whale_buy_b,
-                entry.buy_count,
-                entry.sell_count,
-                entry.total_volume_sol,
-            );
-
-            let signal_payload_b = build_signal_payload(entry, mint_str);
-            let supabase_b = Arc::clone(supabase);
-            let cfg_b = Arc::clone(cfg);
-            let mint_for_b = mint_str.to_string();
-            let progress_pct_logged = bc_progress_pct;
-            tokio::spawn(async move {
-                info!(
-                    mint = %mint_for_b,
-                    progress = format!("{:.1}%", progress_pct_logged),
-                    score = format!("{:.1}", lane_b_score),
-                    "🎯 LANE-B TRIGGER — bc_progress >= 90%, recording paper trade"
-                );
-
-                let row_id = write_bc_paper_trade(
-                    &supabase_b,
-                    &signal_payload_b,
-                    "progress_90pct",
-                    lane_b_score,
-                ).await;
-
-                // Async API check — runs AFTER the row is written so it doesn't
-                // delay the trigger. Result PATCHed onto entry_api_checks.
-                if let Some(id) = row_id {
-                    run_lane_b_api_check(&supabase_b, &cfg_b, id, &mint_for_b).await;
-                }
-            });
+            fire_bc_lane(entry, mint_str, supabase, cfg, "progress_75pct", false, bc_progress_pct);
+        }
+        if !entry.progress_90_recorded && bc_progress_pct >= 90.0 {
+            entry.progress_90_recorded = true;
+            fire_bc_lane(entry, mint_str, supabase, cfg, "progress_90pct", true, bc_progress_pct);
         }
     }
 
     Ok(())
+}
+
+/// Fire one v14 paper-trade lane: compute score, build signal payload, INSERT
+/// to bc_paper_trades, and optionally run a GoPlus check that PATCHes
+/// entry_api_checks. Spawned to avoid blocking the WS event loop.
+fn fire_bc_lane(
+    entry: &WatchlistEntry,
+    mint_str: &str,
+    supabase: &Arc<SupabaseClient>,
+    cfg: &Arc<AppConfig>,
+    lane: &'static str,
+    run_goplus: bool,
+    bc_progress_pct: f64,
+) {
+    let whale_buy = entry.trade_log.iter().any(|&(_, sol, is_buy, _)| is_buy && sol >= 3.0);
+    let cr = entry.trade_log.iter().any(|&(_, _, is_buy, wallet)| {
+        is_buy && wallet == entry.creator_wallet
+    }) && entry.trade_log.len() > 1;
+    let bsr = if entry.sell_count > 0 {
+        entry.buy_count as f64 / entry.sell_count as f64
+    } else if entry.buy_count > 0 {
+        entry.buy_count as f64
+    } else {
+        0.0
+    };
+    let lane_score = compute_bc_score(
+        entry.unique_buyers.len(),
+        bsr,
+        cr,
+        whale_buy,
+        entry.buy_count,
+        entry.sell_count,
+        entry.total_volume_sol,
+    );
+    let signal_payload = build_signal_payload(entry, mint_str);
+    let supabase_c = Arc::clone(supabase);
+    let cfg_c = Arc::clone(cfg);
+    let mint_for = mint_str.to_string();
+    tokio::spawn(async move {
+        info!(
+            mint = %mint_for,
+            lane = lane,
+            progress = format!("{:.1}%", bc_progress_pct),
+            score = format!("{:.1}", lane_score),
+            "🎯 v14 LANE FIRE — recording paper trade"
+        );
+        let row_id = write_bc_paper_trade(
+            &supabase_c,
+            &signal_payload,
+            lane,
+            lane_score,
+        ).await;
+        if run_goplus {
+            if let Some(id) = row_id {
+                run_lane_b_api_check(&supabase_c, &cfg_c, id, &mint_for).await;
+            }
+        }
+    });
 }
 
 /// Run a fast safety-check on a Lane-B candidate and PATCH the result onto
@@ -833,62 +873,36 @@ async fn handle_token_complete(
         warn!(mint = %mint_str, "📊 Token NOT in watchlist at graduation time");
     }
 
-    // ── Retroactive Lane-B fire ──
-    // If the token graduated without ever crossing the 75% trigger in WS data
-    // (jumped straight from <75% to graduation in a single trade between
-    // events), fire Lane-B now using last-seen state. Same bucket name as
-    // the in-flight trigger so analytics stay unified. One-shot guard via
-    // progress_signal_recorded.
+    // ── v14 graduation lanes + retroactive progress fires ──
+    // At graduation we always write two paper-trade rows:
+    //   - graduation_raw     : no API checks (latency baseline)
+    //   - graduation_goplus  : GoPlus check PATCHed onto entry_api_checks
+    // Plus retroactive fires for any progress band the token skipped past
+    // between WS events (rare, but keeps the buckets comparable).
     if let Some(entry) = watchlist.get_mut(mint_str) {
+        let bc_progress_pct = if entry.last_v_sol_reserves > 0.0 {
+            (((entry.last_v_sol_reserves - 30.0) / 85.0) * 100.0).clamp(0.0, 100.0)
+        } else {
+            100.0 // already graduated → treat as 100%
+        };
+
+        if !entry.progress_60_recorded && entry.last_v_sol_reserves > 0.0 {
+            entry.progress_60_recorded = true;
+            fire_bc_lane(entry, mint_str, supabase, cfg, "progress_60pct", false, bc_progress_pct);
+        }
         if !entry.progress_signal_recorded && entry.last_v_sol_reserves > 0.0 {
             entry.progress_signal_recorded = true;
+            fire_bc_lane(entry, mint_str, supabase, cfg, "progress_75pct", false, bc_progress_pct);
+        }
+        if !entry.progress_90_recorded && entry.last_v_sol_reserves > 0.0 {
+            entry.progress_90_recorded = true;
+            fire_bc_lane(entry, mint_str, supabase, cfg, "progress_90pct", true, bc_progress_pct);
+        }
 
-            let bc_progress_pct = (((entry.last_v_sol_reserves - 30.0) / 85.0) * 100.0)
-                .clamp(0.0, 100.0);
-
-            let whale_buy_b = entry.trade_log.iter().any(|&(_, sol, is_buy, _)| is_buy && sol >= 3.0);
-            let cr_b = entry.trade_log.iter().any(|&(_, _, is_buy, wallet)| {
-                is_buy && wallet == entry.creator_wallet
-            }) && entry.trade_log.len() > 1;
-            let bsr_b = if entry.sell_count > 0 {
-                entry.buy_count as f64 / entry.sell_count as f64
-            } else if entry.buy_count > 0 {
-                entry.buy_count as f64
-            } else {
-                0.0
-            };
-            let lane_b_score = compute_bc_score(
-                entry.unique_buyers.len(),
-                bsr_b,
-                cr_b,
-                whale_buy_b,
-                entry.buy_count,
-                entry.sell_count,
-                entry.total_volume_sol,
-            );
-
-            let signal_payload_b = build_signal_payload(entry, mint_str);
-            let supabase_b = Arc::clone(supabase);
-            let cfg_b = Arc::clone(cfg);
-            let mint_for_b = mint_str.to_string();
-            let progress_pct_logged = bc_progress_pct;
-            tokio::spawn(async move {
-                info!(
-                    mint = %mint_for_b,
-                    progress = format!("{:.1}%", progress_pct_logged),
-                    score = format!("{:.1}", lane_b_score),
-                    "🎯 LANE-B RETROACTIVE — graduation w/o prior trigger, recording paper trade"
-                );
-                let row_id = write_bc_paper_trade(
-                    &supabase_b,
-                    &signal_payload_b,
-                    "progress_90pct",
-                    lane_b_score,
-                ).await;
-                if let Some(id) = row_id {
-                    run_lane_b_api_check(&supabase_b, &cfg_b, id, &mint_for_b).await;
-                }
-            });
+        if !entry.graduation_recorded {
+            entry.graduation_recorded = true;
+            fire_bc_lane(entry, mint_str, supabase, cfg, "graduation_raw", false, bc_progress_pct);
+            fire_bc_lane(entry, mint_str, supabase, cfg, "graduation_goplus", true, bc_progress_pct);
         }
     }
 
@@ -1398,6 +1412,7 @@ fn build_signal_payload(entry: &WatchlistEntry, mint_str: &str) -> serde_json::V
     let mut total_buy_sol: f64 = 0.0;
     let mut total_sell_sol: f64 = 0.0;
     let mut creator_rebuy = false;
+    let mut creator_sold_during_bc = false;
 
     for &(_, sol, is_buy, wallet) in &entry.trade_log {
         if sol > max_single_trade_sol {
@@ -1417,6 +1432,9 @@ fn build_signal_payload(entry: &WatchlistEntry, mint_str: &str) -> serde_json::V
             }
         } else {
             total_sell_sol += sol;
+            if wallet == entry.creator_wallet {
+                creator_sold_during_bc = true;
+            }
         }
     }
 
@@ -1507,6 +1525,9 @@ fn build_signal_payload(entry: &WatchlistEntry, mint_str: &str) -> serde_json::V
         "bc_virtual_token_reserves": v_tok,
         "bc_market_cap_sol": entry.last_market_cap_sol,
         "bc_price_sol_per_token": bc_price_sol_per_token,
+        // v14 feature columns (consumed by write_bc_paper_trade).
+        "creator_sold_during_bc": creator_sold_during_bc,
+        "buy_pressure_at_entry_pct": entry.buy_pressure_pct(),
     })
 }
 
@@ -1613,6 +1634,12 @@ async fn write_bc_paper_trade(
     let ws_v_tok = signal.get("bc_virtual_token_reserves").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let ws_mc_sol = signal.get("bc_market_cap_sol").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let ws_price_sol_per_tok = signal.get("bc_price_sol_per_token").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let ws_market_cap_usd = if ws_mc_sol > 0.0 {
+        ws_mc_sol * DEFAULT_SOL_USD
+    } else {
+        0.0
+    };
+    let ws_price_usd = bc_price_usd_from_sol(ws_price_sol_per_tok, DEFAULT_SOL_USD);
 
     let mut payload = serde_json::json!({
         "mint": mint,
@@ -1635,30 +1662,48 @@ async fn write_bc_paper_trade(
         "bc_progress_pct": if ws_bc_progress > 0.0 { Some(ws_bc_progress) } else { None },
         "bc_virtual_sol_reserves": if ws_v_sol > 0.0 { Some(ws_v_sol) } else { None },
         "bc_virtual_token_reserves": if ws_v_tok > 0.0 { Some(ws_v_tok) } else { None },
-        "bc_price_usd": if ws_price_sol_per_tok > 0.0 { Some(ws_price_sol_per_tok) } else { None },
-        // bc_market_cap_usd: convert SOL→USD with rough $150/SOL fallback
-        "bc_market_cap_usd": if ws_mc_sol > 0.0 { Some(ws_mc_sol * 150.0) } else { None },
+        // bc_price_usd must be USD/token, not SOL/token.
+        "bc_price_usd": if ws_price_usd > 0.0 { Some(ws_price_usd) } else { None },
+        // bc_market_cap_usd: convert SOL→USD with a rough fallback.
+        "bc_market_cap_usd": if ws_market_cap_usd > 0.0 { Some(ws_market_cap_usd) } else { None },
+        // ── v14 feature columns (migration 022) ──
+        "creator_sold_during_bc": signal.get("creator_sold_during_bc"),
+        "buy_pressure_at_entry_pct": signal.get("buy_pressure_at_entry_pct"),
+        // initial_liquidity_sol: only meaningful on graduation_* lanes — at
+        // graduation total_volume_sol approximates the pool's seed liquidity.
+        "initial_liquidity_sol": if trigger.starts_with("graduation") {
+            signal.get("total_volume_sol").cloned().unwrap_or(serde_json::Value::Null)
+        } else {
+            serde_json::Value::Null
+        },
     });
 
     // Merge pump.fun coin data into payload
     if let Some(ref coin) = coin_data {
         let obj = payload.as_object_mut().unwrap();
 
-        // Price: virtual_sol_reserves / virtual_token_reserves * 1e6 (adjusted for decimals)
+        // Approximate USD price from REST reserves only when we still don't have
+        // a usable USD entry price from the WS-derived state.
         let v_sol = coin.get("virtual_sol_reserves").and_then(|v| v.as_f64());
         let v_tok = coin.get("virtual_token_reserves").and_then(|v| v.as_f64());
         if let (Some(vs), Some(vt)) = (v_sol, v_tok) {
             if vt > 0.0 {
-                // reserves are in lamports/raw units — convert to SOL price per token
                 let price_sol = vs / vt;
-                // Rough USD estimate: ~150 USD/SOL (will be approximate)
-                obj.insert("bc_price_usd".to_string(), serde_json::json!(price_sol));
+                let price_usd = bc_price_usd_from_sol(price_sol, DEFAULT_SOL_USD);
+                let current_price = obj.get("bc_price_usd").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                if current_price <= 0.0 && price_usd > 0.0 {
+                    obj.insert("bc_price_usd".to_string(), serde_json::json!(price_usd));
+                }
             }
         }
 
         // Market cap
         if let Some(mc) = coin.get("usd_market_cap").and_then(|v| v.as_f64()) {
             obj.insert("bc_market_cap_usd".to_string(), serde_json::json!(mc));
+            let price_usd = bc_price_usd_from_market_cap(mc);
+            if price_usd > 0.0 {
+                obj.insert("bc_price_usd".to_string(), serde_json::json!(price_usd));
+            }
         }
 
         // Bonding curve progress %

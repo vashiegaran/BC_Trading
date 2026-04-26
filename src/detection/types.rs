@@ -232,9 +232,17 @@ pub struct WatchlistEntry {
     /// Whether a bonding_curve_signals row has already been written.
     pub signal_recorded: bool,
 
-    /// Whether the Lane-B (bc_progress_pct >= 90) signal has been written.
-    /// Independent of `signal_recorded` so a single token writes both rows.
+    /// Whether the Lane-B 75% band (`progress_75pct`) row was written.
+    /// Kept under the historical name to avoid churn at every fire site.
     pub progress_signal_recorded: bool,
+    /// Whether the v14 60% band (`progress_60pct`) row was written.
+    pub progress_60_recorded: bool,
+    /// Whether the v14 90% band (`progress_90pct`) row was written.
+    pub progress_90_recorded: bool,
+    /// Whether v14 graduation-lane rows (`graduation_raw` / `graduation_goplus`)
+    /// were written. Set the first time `handle_token_complete` fires them so
+    /// reconnects don't double-write on replayed graduation events.
+    pub graduation_recorded: bool,
 
     // ── Bonding curve state, updated from each tokenTrade WS event ──
     // PumpPortal includes vSolInBondingCurve, vTokensInBondingCurve and

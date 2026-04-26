@@ -1722,12 +1722,24 @@ async fn monitor_position(
                 let fast_runner_threshold = cfg.strategy.monitoring.fast_runner_threshold_secs;
                 let is_fast_runner = elapsed_secs < fast_runner_threshold && last_narrative_result.is_none();
 
+                // v14 data-driven paths (B/C/D) — fall-back when score is below threshold
+                // and the position is not a fast runner.
+                let paper_path = if openai_score < min_score && !is_fast_runner {
+                    moonbag::evaluate_paper_paths(position.sniper_features.as_ref())
+                } else {
+                    None
+                };
+
                 // Determine if we should promote
-                let should_promote = openai_score >= min_score || is_fast_runner;
+                let should_promote = openai_score >= min_score || is_fast_runner || paper_path.is_some();
                 let promotion_source = if is_fast_runner {
                     PromotionSource::FastRunner
-                } else {
+                } else if openai_score >= min_score {
                     PromotionSource::NarrativeTp2
+                } else if let Some(p) = paper_path.clone() {
+                    p
+                } else {
+                    PromotionSource::NarrativeTp2 // unused if !should_promote
                 };
 
                 // Log TP2 moonbag evaluation
@@ -1792,6 +1804,15 @@ async fn monitor_position(
                             threshold = fast_runner_threshold,
                             remaining_tokens = remaining_token_amount,
                             "🚀 FAST RUNNER — auto-promoting to moonbag (no narrative yet, background check will fire)"
+                        );
+                    } else if let Some(ref p) = paper_path {
+                        info!(
+                            mint = %position.mint,
+                            path = %p,
+                            openai_score = format!("{:.0}/100", openai_score),
+                            min_score = format!("{:.0}", min_score),
+                            remaining_tokens = remaining_token_amount,
+                            "🌙 v14 PAPER-PATH — score below gate but B/C/D matched, PROMOTING to moonbag"
                         );
                     } else {
                         info!(
@@ -2037,15 +2058,38 @@ async fn monitor_position(
                     });
                 }
 
-                if openai_score >= min_score {
-                    info!(
-                        mint = %position.mint,
-                        openai_score = format!("{:.0}/100", openai_score),
-                        min_score = format!("{:.0}", min_score),
-                        narrative_state = %narrative_state,
-                        remaining_tokens = remaining_token_amount,
-                        "🌙 TP1 + OpenAI score → PROMOTING to moonbag"
-                    );
+                // v14 data-driven paths B/C/D \u2014 fallback when OpenAI score below gate.
+                let tp1_paper_path = if openai_score < min_score {
+                    moonbag::evaluate_paper_paths(position.sniper_features.as_ref())
+                } else {
+                    None
+                };
+
+                if openai_score >= min_score || tp1_paper_path.is_some() {
+                    let promo_source = if openai_score >= min_score {
+                        PromotionSource::NarrativeTp1
+                    } else {
+                        tp1_paper_path.clone().unwrap()
+                    };
+                    if openai_score >= min_score {
+                        info!(
+                            mint = %position.mint,
+                            openai_score = format!("{:.0}/100", openai_score),
+                            min_score = format!("{:.0}", min_score),
+                            narrative_state = %narrative_state,
+                            remaining_tokens = remaining_token_amount,
+                            "🌙 TP1 + OpenAI score → PROMOTING to moonbag"
+                        );
+                    } else {
+                        info!(
+                            mint = %position.mint,
+                            path = %promo_source,
+                            openai_score = format!("{:.0}/100", openai_score),
+                            min_score = format!("{:.0}", min_score),
+                            remaining_tokens = remaining_token_amount,
+                            "🌙 TP1 v14 PAPER-PATH — score below gate but B/C/D matched, PROMOTING to moonbag"
+                        );
+                    }
 
                     let cmd = MoonbagCommand {
                         position_id: position.position_id,
@@ -2059,7 +2103,7 @@ async fn monitor_position(
                         narrative_state,
                         is_paper_trade: position.is_paper_trade,
                         narrative_result: last_narrative_result.clone(),
-                        promotion_source: PromotionSource::NarrativeTp1,
+                        promotion_source: promo_source,
                         price_at_promotion: last_price,
                     };
 

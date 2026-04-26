@@ -36,6 +36,16 @@ pub enum PromotionSource {
     CtoStrong,
     /// CTO evaluation — moderate outcome
     CtoModerate,
+    // ── v14 data-driven paths (precision-ranked from this bot's own data) ──
+    /// Path B: pre-discovery liquidity floor — `0 < be_liquidity_usd <= 10_000`.
+    /// 13% precision, 50% recall, 2.34x lift on n=145 sample.
+    LiquidityFloor,
+    /// Path C: off-hours + low 24h volume — `!is_us_hours && be_volume_24h_usd <= 25_000`.
+    /// 30% precision, 37% recall, 5.44x lift on n=145 sample.
+    OffHoursLowVol,
+    /// Path D: BC fast-track score — `bc_score >= 80`.
+    /// 12% precision, 25% recall, 2.13x lift; only fires on fast-track entries.
+    BcScore80,
 }
 
 impl std::fmt::Display for PromotionSource {
@@ -46,8 +56,44 @@ impl std::fmt::Display for PromotionSource {
             Self::FastRunner => write!(f, "fast_runner"),
             Self::CtoStrong => write!(f, "cto_strong"),
             Self::CtoModerate => write!(f, "cto_moderate"),
+            Self::LiquidityFloor => write!(f, "liquidity_floor"),
+            Self::OffHoursLowVol => write!(f, "off_hours_low_vol"),
+            Self::BcScore80 => write!(f, "bc_score_80"),
         }
     }
+}
+
+/// Evaluate the v14 data-driven promotion paths against a position's
+/// `sniper_features` JSONB. Returns the first matching path in
+/// precision-priority order: C (off-hours+low-vol, 30% prec) → B (liquidity
+/// floor, 13% prec) → D (bc_score>=80, 12% prec).
+///
+/// Returns `None` if no path matches — caller falls through to existing
+/// narrative-score gate.
+pub fn evaluate_paper_paths(features: Option<&serde_json::Value>) -> Option<PromotionSource> {
+    let f = features?;
+    let num = |k: &str| f.get(k).and_then(|v| v.as_f64());
+    let boolean = |k: &str| f.get(k).and_then(|v| v.as_bool());
+
+    // Path C — highest precision (30%, 5.44x lift)
+    let off_hours = boolean("is_us_hours") == Some(false);
+    let vol = num("be_volume_24h_usd").unwrap_or(0.0);
+    if off_hours && vol > 0.0 && vol <= 25_000.0 {
+        return Some(PromotionSource::OffHoursLowVol);
+    }
+
+    // Path B — broadest recall (50%, 2.34x lift)
+    let liq = num("be_liquidity_usd").unwrap_or(0.0);
+    if liq > 0.0 && liq <= 10_000.0 {
+        return Some(PromotionSource::LiquidityFloor);
+    }
+
+    // Path D — fast-track only (n=37 in sample)
+    if num("bc_score").unwrap_or(0.0) >= 80.0 {
+        return Some(PromotionSource::BcScore80);
+    }
+
+    None
 }
 
 /// Command to promote a position to a moonbag.
