@@ -3,7 +3,7 @@
 # Bump this when you change filters/exit params, then add a
 # section to VERSION.md describing what changed.
 # ============================================================
-strategy_version = "v12-fast-track"
+strategy_version = "v14-multi-lane"
 
 # ============================================================
 # DETECTION

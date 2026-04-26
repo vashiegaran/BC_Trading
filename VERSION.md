@@ -4,8 +4,38 @@ Each version is stamped into every `positions` and `moonbag_positions` row via t
 `strategy_version` column. Set the active version in `config.toml`:
 
 ```toml
-strategy_version = "v12-fast-track"
+strategy_version = "v14-multi-lane"
 ```
+
+---
+
+## v14 — Multi-Lane BC Research + Data-Driven Moonbag Paths (2026-04-26)
+
+**Cargo version**: 0.3.2 | **strategy_version**: `v14-multi-lane` | **cutover**: `2026-04-26T05:00:29Z` (first `progress_60pct` row)
+
+### BC paper-trade lanes (5 entry triggers)
+- `progress_60pct` — fires at BC ≥60%, no API check (earliest baseline)
+- `progress_75pct` — fires at BC ≥75%, no API check (was mislabeled `progress_90pct` pre-cutover)
+- `progress_90pct` — fires at BC ≥90%, **with GoPlus** (true 90% + safety gate)
+- `graduation_raw` — fires at tokenComplete, no API check (latency baseline)
+- `graduation_goplus` — fires at tokenComplete, **with GoPlus** (paired with raw)
+
+### New feature columns (migration 022)
+- `creator_sold_during_bc` — boolean, did creator dump during BC?
+- `buy_pressure_at_entry_pct` — `buy_count / (buy_count + sell_count) * 100`
+- `initial_liquidity_sol` — total BC volume at graduation (only on `graduation_*` lanes)
+
+### Moonbag promotion paths (3 new, data-driven)
+Fired as **fallback** when OpenAI score < gate AND not fast-runner. Order: C → B → D.
+
+| `promotion_source` | Rule | Sample lift |
+|---|---|---|
+| `off_hours_low_vol` | `!is_us_hours && 0 < be_volume_24h_usd ≤ 25k` | 5.44x |
+| `liquidity_floor` | `0 < be_liquidity_usd ≤ 10k` | 2.34x |
+| `bc_score_80` | `bc_score ≥ 80` (fast-track only) | 2.13x |
+
+### Bug fixes carried in
+- `bc_price_usd` now stored in USD/token (was SOL/token, off ~150x). Backfilled 3,080 historical rows.
 
 ---
 
