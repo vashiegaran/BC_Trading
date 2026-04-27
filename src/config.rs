@@ -143,6 +143,18 @@ pub struct FiltersConfig {
     /// the fast-track pipeline. Data: score >= 65 → median peak 1.97x, 49% hit 2x+.
     #[serde(default = "default_bc_fast_track_min_score")]
     pub bc_fast_track_min_score: f64,
+    /// Enable the Standard buy lane (full 2s enrichment + sniper-score gate).
+    /// v14.1 data: Standard lane peaked under 2x on every closed position
+    /// (median peak 1.22x vs Fast-Track 2.38x; +0.014 SOL vs +1.017 SOL).
+    /// Set false to disable Standard entirely — only Fast-Track buys.
+    #[serde(default = "default_standard_lane_enabled")]
+    pub standard_lane_enabled: bool,
+    /// Enable the `graduation_goplus` paper-trade lane.
+    /// v14.1 data: produced identical rows to `graduation_raw` (n=148/148,
+    /// total +1.54/+1.54 SOL). The GoPlus check filters nothing post-grad.
+    /// Disabled by default to save Helius/GoPlus API calls.
+    #[serde(default = "default_graduation_goplus_enabled")]
+    pub graduation_goplus_enabled: bool,
 }
 
 fn default_max_single_holder_pct() -> f64 { 25.0 }
@@ -151,6 +163,8 @@ fn default_min_buy_sell_ratio() -> f64 { 1.2 }
 fn default_max_bc_sell_count() -> u64 { 40 }
 fn default_min_sniper_score() -> f64 { 60.0 }
 fn default_bc_fast_track_min_score() -> f64 { 65.0 }
+fn default_standard_lane_enabled() -> bool { true }
+fn default_graduation_goplus_enabled() -> bool { true }
 
 #[derive(Debug, Deserialize)]
 pub struct ExecutionConfig {

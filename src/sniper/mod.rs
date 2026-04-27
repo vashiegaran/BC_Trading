@@ -259,6 +259,28 @@ pub fn start(
                 }
             }
 
+            // ── v14.1 Standard-lane kill switch ──
+            // Data showed Standard lane is barely break-even (+0.014 SOL across
+            // 16 closed trades, every position peaked < 2x). When disabled,
+            // a token that didn't qualify for Fast-Track is rejected here
+            // BEFORE the 2s enrichment runs — saves API budget too.
+            if !cfg.strategy.filters.standard_lane_enabled {
+                warn!(
+                    mint = %mint_str,
+                    "❌ STANDARD LANE DISABLED — token did not qualify for Fast-Track, rejecting"
+                );
+                token.pipeline_timing.outcome = Some("rejected_standard_disabled".to_string());
+                token.pipeline_timing.rejection_stage = Some("standard_disabled".to_string());
+                token.pipeline_timing.rejection_reason =
+                    Some("standard lane disabled in config".to_string());
+                let timing_payload = token.pipeline_timing.to_json(&mint_str);
+                let supabase_bg = Arc::clone(&supabase);
+                tokio::spawn(async move {
+                    log_pipeline_latency(&supabase_bg, &timing_payload).await;
+                });
+                continue;
+            }
+
             let enrichment_start = std::time::Instant::now();
 
             // Record detection → sniper latency

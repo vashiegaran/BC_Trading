@@ -4,8 +4,41 @@ Each version is stamped into every `positions` and `moonbag_positions` row via t
 `strategy_version` column. Set the active version in `config.toml`:
 
 ```toml
-strategy_version = "v14-multi-lane"
+strategy_version = "v14.1-fasttrack-only"
 ```
+
+---
+
+## v14.1 — Fast-Track-Only + Duplicate-Lane Prune (2026-04-27)
+
+**Cargo version**: 0.3.3 | **strategy_version**: `v14.1-fasttrack-only` | **cutover**: `2026-04-27T03:15:00Z` (after restart)
+
+### Why
+First 26 hours of v14 data showed two clear, data-driven prunes:
+
+| Lane | n | Total SOL | Avg/fire | Win % | Verdict |
+|---|---|---|---|---|---|
+| Fast-Track (real) | 26 | +1.66 | +0.0638 | 61.5% | **keep — only profitable lane** |
+| Standard (real) | 16 | +0.014 | +0.0009 | 62.5% | **disabled in v14.1** |
+| graduation_goplus (paper) | 148 | +1.54 | +0.0104 | 28.4% | **disabled — duplicate of `graduation_raw`** |
+| progress_60pct / 75 / 90, graduation_raw | 130–148 each | +1.2 to +1.5 | +0.010 | ~28% | kept as research baseline |
+
+Fast-Track shows **5.5x higher avg/fire and 2x higher win rate** vs the best paper lane, with a positive median (+0.089 SOL) where every paper lane has a negative median (-0.031 SOL).
+
+### Code changes
+- **Standard lane disabled** — [src/config.rs](src/config.rs) `standard_lane_enabled: bool` flag (default `true`); [src/sniper/mod.rs](src/sniper/mod.rs) early-rejects with `pipeline_latency` log when off.
+- **graduation_goplus paper lane disabled** — [src/config.rs](src/config.rs) `graduation_goplus_enabled: bool` flag (default `true`); [src/detection/pumpfun_ws.rs](src/detection/pumpfun_ws.rs#L984) skips the duplicate fire when off. Saves one Helius+GoPlus call per graduation.
+- **[config.toml](config.toml)**: `standard_lane_enabled = false`, `graduation_goplus_enabled = false` with data-justification comments.
+
+### New tooling
+- [scripts/v14_lane_comparison.py](scripts/v14_lane_comparison.py) — apples-to-apples ladder simulation across all lanes; clamps `price_1h/bc_price_usd` to `peak_multiplier` to handle late-detection reference-frame mismatch.
+- [scripts/v14_weekly_health_check.py](scripts/v14_weekly_health_check.py) — 5-gate readiness check (FT n≥100, win≥55%, avg≥0.04, median>0, paper avg <50% of FT). Run weekly; when all 5 pass, prune `progress_75pct` + `progress_90pct` and keep `progress_60pct` + `graduation_raw` as the two-point baseline.
+
+### Data bug found and contained
+During lane comparison, one mint (`POTUS`, `D99rM7fEtxAfqLmC1mHrKTqqMAw9ktkShS5adcSGpump`) showed `price_1h / bc_price_usd = 67.79x` despite `peak_multiplier = 1.05x`. Root cause: late-detection (token detected post-graduation) means `bc_price_usd` and `peak_multiplier` live in different reference frames — not a price-feed corruption. Simulator now clamps so this can’t recur.
+
+### Pruning gate (current)
+At v14.1 baseline: 5/5 quality gates **pass**, only Fast-Track sample size is short (n=26, target=100). Re-run health check in ~7 days to evaluate further pruning.
 
 ---
 

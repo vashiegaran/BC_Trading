@@ -981,7 +981,12 @@ async fn handle_token_complete(
         if !entry.graduation_recorded {
             entry.graduation_recorded = true;
             fire_bc_lane(entry, mint_str, supabase, cfg, "graduation_raw", false, bc_progress_pct);
-            fire_bc_lane(entry, mint_str, supabase, cfg, "graduation_goplus", true, bc_progress_pct);
+            // v14.1 data showed graduation_goplus produced identical rows to
+            // graduation_raw — GoPlus filters nothing post-graduation. Gated
+            // off by default to save API calls; flip the flag to re-enable.
+            if cfg.strategy.filters.graduation_goplus_enabled {
+                fire_bc_lane(entry, mint_str, supabase, cfg, "graduation_goplus", true, bc_progress_pct);
+            }
         }
     }
 

@@ -3,7 +3,7 @@
 # Bump this when you change filters/exit params, then add a
 # section to VERSION.md describing what changed.
 # ============================================================
-strategy_version = "v14-multi-lane"
+strategy_version = "v14.1-fasttrack-only"
 
 # ============================================================
 # DETECTION
@@ -125,6 +125,22 @@ max_bc_sell_count = 40
 # post-buy and triggers emergency exit if critical filters fail.
 bc_fast_track_enabled = true
 bc_fast_track_min_score = 65.0
+
+# ── v14.1 Standard-lane kill switch ──
+# Set to false to disable the Standard buy lane entirely. Data from 41 closed
+# v14 trades (2026-04-26..27): Standard total +0.014 SOL across 16 trades,
+# every position peaked under 2x. Fast-Track was +1.017 SOL across 25 trades
+# with median peak 2.38x. Disabling Standard concentrates capacity on the
+# profitable lane and saves the 2s enrichment cost on rejected tokens.
+standard_lane_enabled = false
+
+# ── v14.1 graduation_goplus duplicate-lane prune ──
+# Set to false to skip the graduation_goplus paper-trade fire. Data:
+# n=148/148 vs graduation_raw, identical totals (+1.54/+1.54 SOL),
+# identical win rate (28.4%). GoPlus filters nothing post-graduation,
+# so this lane wastes one Helius+GoPlus call per graduation with zero
+# information gain. Easy to re-enable if the data picture changes.
+graduation_goplus_enabled = false
 
 # Minimum sniper score to pass.
 # v9 set at 60 (data-driven from corrupted post-bug data).
