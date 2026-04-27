@@ -312,6 +312,7 @@ async fn handle_new_token(
         progress_60_recorded: false,
         progress_90_recorded: false,
         graduation_recorded: false,
+        control_recorded: false,
         last_v_sol_reserves: 0.0,
         last_v_token_reserves: 0.0,
         last_market_cap_sol: 0.0,
@@ -517,6 +518,15 @@ async fn handle_token_trade(
         let bc_progress_pct = (((entry.last_v_sol_reserves - 30.0) / 85.0) * 100.0)
             .clamp(0.0, 100.0);
 
+        // v14.1 counterfactual control — record once when warming starts.
+        // Gives us a negative-class sample of tokens that crossed 30% but
+        // never reached our 60% lane threshold. Same writer/payload so
+        // analysis filters cleanly on entry_trigger='control_no_fire'.
+        if !entry.control_recorded && bc_progress_pct >= 30.0 {
+            entry.control_recorded = true;
+            fire_bc_lane(entry, mint_str, supabase, cfg, "control_no_fire", false, bc_progress_pct);
+        }
+
         if !entry.progress_60_recorded && bc_progress_pct >= 60.0 {
             entry.progress_60_recorded = true;
             fire_bc_lane(entry, mint_str, supabase, cfg, "progress_60pct", false, bc_progress_pct);
@@ -589,7 +599,76 @@ fn fire_bc_lane(
                 run_lane_b_api_check(&supabase_c, &cfg_c, id, &mint_for).await;
             }
         }
+        // v14.1 #2 — start the per-minute price-tick tracker on the FIRST
+        // lane fire only (control_no_fire is always first). Avoids 4 trackers
+        // per mint when later lanes fire too.
+        if lane == "control_no_fire" {
+            if let Some(id) = row_id {
+                let baseline_sol_per_tok = signal_payload
+                    .get("bc_price_sol_per_token")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                let baseline_usd = bc_price_usd_from_sol(baseline_sol_per_tok, DEFAULT_SOL_USD);
+                if baseline_usd > 0.0 {
+                    let sb = Arc::clone(&supabase_c);
+                    let m = mint_for.clone();
+                    tokio::spawn(async move {
+                        spawn_bc_price_tick_tracker(sb, m, id, baseline_usd).await;
+                    });
+                }
+            }
+        }
     });
+}
+
+/// v14.1 #2 — Per-minute price-tick tracker. Polls DexScreener every 60s for
+/// 60 minutes and writes one row to `bc_price_ticks` per tick. Tick seq=0
+/// is written immediately at fire time using the live BC reserve-derived
+/// baseline, so we always have at least one anchor row even if DexScreener
+/// hasn't indexed the token yet (typical pre-graduation).
+async fn spawn_bc_price_tick_tracker(
+    supabase: Arc<SupabaseClient>,
+    mint: String,
+    paper_trade_id: i64,
+    baseline_usd: f64,
+) {
+    // Anchor tick at seq=0
+    insert_price_tick(&supabase, paper_trade_id, &mint, 0, 0, baseline_usd, baseline_usd).await;
+
+    // Poll every 60s for 60 minutes (61 ticks total: seq 0..60)
+    for seq in 1u32..=60 {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        let elapsed = (seq as i64) * 60;
+        let price = match fetch_bc_price(&mint).await {
+            Some(p) if p > 0.0 => p,
+            _ => continue, // skip null ticks; gaps are fine for analysis
+        };
+        insert_price_tick(&supabase, paper_trade_id, &mint, seq, elapsed, price, baseline_usd).await;
+    }
+}
+
+async fn insert_price_tick(
+    supabase: &SupabaseClient,
+    paper_trade_id: i64,
+    mint: &str,
+    seq: u32,
+    elapsed_secs: i64,
+    price_usd: f64,
+    baseline_usd: f64,
+) {
+    let multiplier = if baseline_usd > 0.0 { price_usd / baseline_usd } else { 0.0 };
+    let payload = serde_json::json!({
+        "paper_trade_id": paper_trade_id,
+        "mint":           mint,
+        "seq":            seq,
+        "elapsed_secs":   elapsed_secs,
+        "price_usd":      price_usd,
+        "multiplier":     multiplier,
+    });
+    let url = format!("{}/bc_price_ticks", supabase.base_url);
+    if let Err(e) = supabase.client.post(&url).json(&payload).send().await {
+        debug!(mint, seq, "bc_price_ticks POST error: {}", e);
+    }
 }
 
 /// Run a fast safety-check on a Lane-B candidate and PATCH the result onto

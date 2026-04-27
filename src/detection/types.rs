@@ -243,6 +243,11 @@ pub struct WatchlistEntry {
     /// were written. Set the first time `handle_token_complete` fires them so
     /// reconnects don't double-write on replayed graduation events.
     pub graduation_recorded: bool,
+    /// v14.1 counterfactual: whether the `control_no_fire` row has been
+    /// written. Fires once when bc_progress_pct first crosses 30% — gives
+    /// us the negative class for "tokens that started warming but didn't
+    /// reach our 60% threshold". Re-firing is harmless (one-shot flag).
+    pub control_recorded: bool,
 
     // ── Bonding curve state, updated from each tokenTrade WS event ──
     // PumpPortal includes vSolInBondingCurve, vTokensInBondingCurve and

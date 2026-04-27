@@ -373,6 +373,7 @@ async fn monitor_position(
     let started_at = Instant::now();
     let mut tp1_triggered = false;
     let mut tp2_triggered = false;
+    let mut moonbag_eval_done = false;  // v14.1: tick-level early-promote runs at most once
     let mut peak_price = position.entry_price_usd;
     let mut remaining_token_amount = position.token_amount;
     let mut remaining_sol_spent = position.sol_spent;
@@ -1682,6 +1683,90 @@ async fn monitor_position(
             );
         }
 
+        // ── v14.1 TICK-LEVEL EARLY-PROMOTE ─────────────────────────────────
+        // Run moonbag-eval as soon as price crosses TP1, BEFORE check_triggers
+        // so trailing-stop / momentum-kill can't pre-empt the promotion. Only
+        // fires for v14 paper-paths (B/C/D) — narrative-score promotion stays
+        // in the existing TP1 intercept which has cached last_narrative_result.
+        // Runs at most once per position via moonbag_eval_done flag.
+        if !moonbag_eval_done
+            && entry_price_usd > 0.000001
+            && remaining_token_amount > 1.0
+            && current_price / entry_price_usd >= exit_cfg.tp1_multiplier
+        {
+            let early_eval = moonbag::evaluate_paper_paths_detail(
+                position.sniper_features.as_ref(),
+            );
+
+            // Always log the eval (helps the path_eval_log answer the
+            // "did we even reach this point?" question).
+            {
+                let sb = Arc::clone(&supabase);
+                let mint_bg = position.mint.clone();
+                let pos_id = position.position_id;
+                let eval = early_eval.clone();
+                let openai_score = last_narrative_result.as_ref()
+                    .map(|nr| nr.score as f64).unwrap_or(0.0);
+                let min_score = cfg.strategy.monitoring.moonbag_promotion_min_score;
+                let decision: &'static str = if eval.selected.is_some() {
+                    "paper_path_promoted"
+                } else {
+                    "no_promote"
+                };
+                tokio::spawn(async move {
+                    moonbag::write_path_eval_log(
+                        &sb, pos_id, &mint_bg, "early_tick",
+                        openai_score, min_score, false,
+                        &eval, decision,
+                    ).await;
+                });
+            }
+
+            if let Some(promo_source) = early_eval.selected.clone() {
+                info!(
+                    mint = %position.mint,
+                    path = %promo_source,
+                    multiplier = format!("{:.2}x", current_price / entry_price_usd),
+                    elapsed_s = elapsed_seconds,
+                    remaining_tokens = remaining_token_amount,
+                    "🌙 v14.1 EARLY-PROMOTE — paper-path matched at TP1 cross, sending MoonbagCommand"
+                );
+
+                let cmd = MoonbagCommand {
+                    position_id: position.position_id,
+                    mint: position.mint.clone(),
+                    token_name: position.token_name.clone(),
+                    token_symbol: position.token_symbol.clone(),
+                    entry_price_usd,
+                    token_amount: remaining_token_amount,
+                    sol_value: remaining_sol_spent,
+                    peak_price,
+                    narrative_state,
+                    is_paper_trade: position.is_paper_trade,
+                    narrative_result: last_narrative_result.clone(),
+                    promotion_source: promo_source,
+                    price_at_promotion: current_price,
+                };
+
+                if moonbag_tx.send(cmd).await.is_ok() {
+                    trading_state.record_exit(
+                        &position.mint,
+                        position.sol_spent,
+                        0.0,
+                        true,
+                    ).await;
+                    info!(mint = %position.mint, "🌙 Slot freed — moonbag tracker now owns this position");
+                    last_exit_reason = Some("moonbag_promoted_early".to_string());
+                    break;
+                } else {
+                    warn!(mint = %position.mint,
+                        "Moonbag channel closed during early-promote — falling through to triggers");
+                }
+            }
+
+            moonbag_eval_done = true;
+        }
+
         // Check exit triggers (trailing stop may be suppressed by dip state)
         if let Some(signal) = check_triggers(&pos_state, exit_cfg, suppress_trailing) {
             info!(
@@ -1724,8 +1809,9 @@ async fn monitor_position(
 
                 // v14 data-driven paths (B/C/D) — fall-back when score is below threshold
                 // and the position is not a fast runner.
+                let tp2_eval = moonbag::evaluate_paper_paths_detail(position.sniper_features.as_ref());
                 let paper_path = if openai_score < min_score && !is_fast_runner {
-                    moonbag::evaluate_paper_paths(position.sniper_features.as_ref())
+                    tp2_eval.selected.clone()
                 } else {
                     None
                 };
@@ -1741,6 +1827,31 @@ async fn monitor_position(
                 } else {
                     PromotionSource::NarrativeTp2 // unused if !should_promote
                 };
+
+                // path_eval_log (migration 024) — best-effort background write.
+                let tp2_decision: &'static str = if is_fast_runner {
+                    "fast_runner_promoted"
+                } else if openai_score >= min_score {
+                    "narrative_promoted"
+                } else if paper_path.is_some() {
+                    "paper_path_promoted"
+                } else {
+                    "no_promote"
+                };
+                {
+                    let sb = Arc::clone(&supabase);
+                    let mint_bg = position.mint.clone();
+                    let pos_id = position.position_id;
+                    let eval = tp2_eval.clone();
+                    let is_fr = is_fast_runner;
+                    tokio::spawn(async move {
+                        moonbag::write_path_eval_log(
+                            &sb, pos_id, &mint_bg, "tp2",
+                            openai_score, min_score, is_fr,
+                            &eval, tp2_decision,
+                        ).await;
+                    });
+                }
 
                 // Log TP2 moonbag evaluation
                 {
@@ -2059,11 +2170,33 @@ async fn monitor_position(
                 }
 
                 // v14 data-driven paths B/C/D \u2014 fallback when OpenAI score below gate.
+                let tp1_eval = moonbag::evaluate_paper_paths_detail(position.sniper_features.as_ref());
                 let tp1_paper_path = if openai_score < min_score {
-                    moonbag::evaluate_paper_paths(position.sniper_features.as_ref())
+                    tp1_eval.selected.clone()
                 } else {
                     None
                 };
+                // Decision label for path_eval_log
+                let tp1_decision: &'static str = if openai_score >= min_score {
+                    "narrative_promoted"
+                } else if tp1_paper_path.is_some() {
+                    "paper_path_promoted"
+                } else {
+                    "no_promote"
+                };
+                {
+                    let sb = Arc::clone(&supabase);
+                    let mint_bg = position.mint.clone();
+                    let pos_id = position.position_id;
+                    let eval = tp1_eval.clone();
+                    tokio::spawn(async move {
+                        moonbag::write_path_eval_log(
+                            &sb, pos_id, &mint_bg, "tp1",
+                            openai_score, min_score, false,
+                            &eval, tp1_decision,
+                        ).await;
+                    });
+                }
 
                 if openai_score >= min_score || tp1_paper_path.is_some() {
                     let promo_source = if openai_score >= min_score {

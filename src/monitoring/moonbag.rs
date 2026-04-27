@@ -37,14 +37,15 @@ pub enum PromotionSource {
     /// CTO evaluation — moderate outcome
     CtoModerate,
     // ── v14 data-driven paths (precision-ranked from this bot's own data) ──
-    /// Path B: pre-discovery liquidity floor — `0 < be_liquidity_usd <= 10_000`.
+    /// Path C: pre-discovery liquidity floor — `0 < be_liquidity_usd <= 10_000`.
     /// 13% precision, 50% recall, 2.34x lift on n=145 sample.
     LiquidityFloor,
     /// Path C: off-hours + low 24h volume — `!is_us_hours && be_volume_24h_usd <= 25_000`.
     /// 30% precision, 37% recall, 5.44x lift on n=145 sample.
     OffHoursLowVol,
-    /// Path D: BC fast-track score — `bc_score >= 80`.
-    /// 12% precision, 25% recall, 2.13x lift; only fires on fast-track entries.
+    /// Path D: BC fast-track score — `bc_score >= 70` (lowered from 80 in v14.1
+    /// after live data showed median bc_score=85 with 60% above 80 yet zero
+    /// promotions; the bottleneck was the eval site, not the gate).
     BcScore80,
 }
 
@@ -63,37 +64,104 @@ impl std::fmt::Display for PromotionSource {
     }
 }
 
-/// Evaluate the v14 data-driven promotion paths against a position's
-/// `sniper_features` JSONB. Returns the first matching path in
-/// precision-priority order: C (off-hours+low-vol, 30% prec) → B (liquidity
-/// floor, 13% prec) → D (bc_score>=80, 12% prec).
-///
-/// Returns `None` if no path matches — caller falls through to existing
-/// narrative-score gate.
-pub fn evaluate_paper_paths(features: Option<&serde_json::Value>) -> Option<PromotionSource> {
-    let f = features?;
+/// Detailed result of paper-path evaluation — used both for routing
+/// decisions and for the `path_eval_log` debug table (migration 024).
+#[derive(Debug, Clone, Default)]
+pub struct PaperPathEval {
+    pub is_us_hours:        Option<bool>,
+    pub be_volume_24h_usd:  Option<f64>,
+    pub be_liquidity_usd:   Option<f64>,
+    pub bc_score:           Option<f64>,
+    pub match_off_hours_low_vol: bool,
+    pub match_liquidity_floor:   bool,
+    pub match_bc_score_80:       bool,
+    pub eligible_count:     u32,
+    pub selected:           Option<PromotionSource>,
+}
+
+/// Evaluate the v14 data-driven paper paths against `sniper_features`.
+/// Returns full eligibility detail. Selection priority is C → B → D
+/// (highest precision first). Caller uses `.selected` for routing and
+/// the rest for `path_eval_log`.
+pub fn evaluate_paper_paths_detail(features: Option<&serde_json::Value>) -> PaperPathEval {
+    let mut out = PaperPathEval::default();
+    let Some(f) = features else { return out; };
     let num = |k: &str| f.get(k).and_then(|v| v.as_f64());
     let boolean = |k: &str| f.get(k).and_then(|v| v.as_bool());
 
-    // Path C — highest precision (30%, 5.44x lift)
-    let off_hours = boolean("is_us_hours") == Some(false);
-    let vol = num("be_volume_24h_usd").unwrap_or(0.0);
-    if off_hours && vol > 0.0 && vol <= 25_000.0 {
-        return Some(PromotionSource::OffHoursLowVol);
-    }
+    out.is_us_hours       = boolean("is_us_hours");
+    out.be_volume_24h_usd = num("be_volume_24h_usd");
+    out.be_liquidity_usd  = num("be_liquidity_usd");
+    out.bc_score          = num("bc_score");
 
-    // Path B — broadest recall (50%, 2.34x lift)
-    let liq = num("be_liquidity_usd").unwrap_or(0.0);
-    if liq > 0.0 && liq <= 10_000.0 {
-        return Some(PromotionSource::LiquidityFloor);
-    }
+    // Path C — off-hours + low 24h vol (highest precision)
+    let off_hours = out.is_us_hours == Some(false);
+    let vol = out.be_volume_24h_usd.unwrap_or(0.0);
+    out.match_off_hours_low_vol = off_hours && vol > 0.0 && vol <= 25_000.0;
 
-    // Path D — fast-track only (n=37 in sample)
-    if num("bc_score").unwrap_or(0.0) >= 80.0 {
-        return Some(PromotionSource::BcScore80);
-    }
+    // Path B — liquidity floor
+    let liq = out.be_liquidity_usd.unwrap_or(0.0);
+    out.match_liquidity_floor = liq > 0.0 && liq <= 10_000.0;
 
-    None
+    // Path D — bc_score gate (lowered to 70 after live data; see PromotionSource::BcScore80)
+    out.match_bc_score_80 = out.bc_score.unwrap_or(0.0) >= 70.0;
+
+    out.eligible_count =
+        u32::from(out.match_off_hours_low_vol)
+        + u32::from(out.match_liquidity_floor)
+        + u32::from(out.match_bc_score_80);
+
+    out.selected = if out.match_off_hours_low_vol {
+        Some(PromotionSource::OffHoursLowVol)
+    } else if out.match_liquidity_floor {
+        Some(PromotionSource::LiquidityFloor)
+    } else if out.match_bc_score_80 {
+        Some(PromotionSource::BcScore80)
+    } else {
+        None
+    };
+    out
+}
+
+/// Backwards-compatible thin wrapper — returns just the selected path.
+pub fn evaluate_paper_paths(features: Option<&serde_json::Value>) -> Option<PromotionSource> {
+    evaluate_paper_paths_detail(features).selected
+}
+
+/// Best-effort write to `path_eval_log`. Background-spawned by the caller.
+pub async fn write_path_eval_log(
+    supabase: &Arc<crate::logger::SupabaseClient>,
+    position_id: i64,
+    mint: &str,
+    tp_intercept: &'static str,
+    openai_score: f64,
+    min_score_gate: f64,
+    is_fast_runner: bool,
+    eval: &PaperPathEval,
+    decision: &'static str,
+) {
+    let payload = serde_json::json!({
+        "position_id":         position_id,
+        "mint":                mint,
+        "tp_intercept":        tp_intercept,
+        "openai_score":        openai_score,
+        "min_score_gate":      min_score_gate,
+        "is_fast_runner":      is_fast_runner,
+        "is_us_hours":         eval.is_us_hours,
+        "be_volume_24h_usd":   eval.be_volume_24h_usd,
+        "be_liquidity_usd":    eval.be_liquidity_usd,
+        "bc_score":            eval.bc_score,
+        "matched_path_c_off_hours_low_vol": eval.match_off_hours_low_vol,
+        "matched_path_b_liquidity_floor":   eval.match_liquidity_floor,
+        "matched_path_d_bc_score_80":       eval.match_bc_score_80,
+        "matched_path":        eval.selected.as_ref().map(|p| p.to_string()),
+        "eligible_count":      eval.eligible_count,
+        "decision":            decision,
+    });
+    let url = format!("{}/path_eval_log", supabase.base_url);
+    if let Err(e) = supabase.client.post(&url).json(&payload).send().await {
+        warn!(mint, "path_eval_log POST error: {}", e);
+    }
 }
 
 /// Command to promote a position to a moonbag.
