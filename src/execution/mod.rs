@@ -156,9 +156,14 @@ pub fn start(
             }
         
             // ── Dedup: skip if we already have a position in this mint (in-memory) ──
+            // ATOMIC reserve-or-skip — protects against the TOCTOU race where two
+            // near-simultaneous events (e.g. pump.fun migrate+complete double-emit,
+            // or rapid duplicate signals) both passed a non-atomic read before
+            // either had called record_buy. The reservation is consumed by
+            // record_buy on success, or released on every failure path below.
             let dedup_start = Instant::now();
-            if trading_state.has_position_for_mint(&mint_str).await {
-                warn!(mint = %mint_str, "⏭️ Skipping — already have a position in this mint");
+            if !trading_state.try_reserve_for_mint(&mint_str).await {
+                warn!(mint = %mint_str, "⏭️ Skipping — mint already open or reserved (dedup)");
                 timing.outcome = Some("rejected_precheck".to_string());
                 timing.rejection_stage = Some("precheck".to_string());
                 timing.rejection_reason = Some("duplicate_mint".to_string());
@@ -172,12 +177,14 @@ pub fn start(
             info!(
                 mint = %mint_str,
                 elapsed_ms = dedup_start.elapsed().as_millis() as u64,
-                "⏱️ Dedup check (cached)"
+                "⏱️ Dedup check (reserved)"
             );
 
             // ── Dev wallet blacklist check ────────────────────────────────────────────
             let dev_wallet_str = token.event.creator_wallet.to_string();
             if trading_state.is_dev_blacklisted(&dev_wallet_str).await {
+                // Release the reservation we just took — this mint is rejected.
+                trading_state.release_reservation(&mint_str).await;
                 warn!(
                     mint = %mint_str,
                     dev_wallet = %dev_wallet_str,
@@ -249,6 +256,8 @@ pub fn start(
                         });
                     }
                     Ok(None) => {
+                        // Trade did not open a position — free the reservation.
+                        trading_state.release_reservation(&mint_str).await;
                         timing.outcome = Some("execution_failed".to_string());
                         timing.rejection_stage = Some("execution".to_string());
                         timing.rejection_reason = Some("no_position_produced".to_string());
@@ -261,6 +270,8 @@ pub fn start(
                         debug!(mint = %mint_str, "Paper trade did not produce a position");
                     }
                     Err(e) => {
+                        // Trade errored — free the reservation.
+                        trading_state.release_reservation(&mint_str).await;
                         timing.outcome = Some("execution_failed".to_string());
                         timing.rejection_stage = Some("execution".to_string());
                         timing.rejection_reason = Some(e.to_string());
@@ -317,6 +328,8 @@ pub fn start(
                         });
                     }
                     Ok(None) => {
+                        // Trade did not open a position — free the reservation.
+                        trading_state.release_reservation(&mint_str).await;
                         timing.outcome = Some("execution_failed".to_string());
                         timing.rejection_stage = Some("execution".to_string());
                         timing.rejection_reason = Some("no_position_produced".to_string());
@@ -329,6 +342,8 @@ pub fn start(
                         debug!(mint = %mint_str, "Real trade did not produce a position");
                     }
                     Err(e) => {
+                        // Trade errored — free the reservation.
+                        trading_state.release_reservation(&mint_str).await;
                         timing.outcome = Some("execution_failed".to_string());
                         timing.rejection_stage = Some("execution".to_string());
                         timing.rejection_reason = Some(e.to_string());

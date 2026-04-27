@@ -34,6 +34,11 @@ struct TradingStateInner {
     /// Mints recently exited — prevents immediate re-buy of the same token.
     /// Maps mint → exit timestamp. Entries older than REBUY_COOLDOWN_SECS are ignored.
     recently_exited: HashMap<String, Instant>,
+    /// Mints with an in-flight buy reservation (between dedup check and record_buy).
+    /// Prevents race where two near-simultaneous events both pass the dedup check
+    /// before either has called `record_buy`. Cleared by `record_buy` on success
+    /// or `release_reservation` on failure.
+    pending_mints: HashSet<String>,
 }
 
 impl TradingState {
@@ -52,6 +57,7 @@ impl TradingState {
                 pnl_date: today_str(),
                 blacklisted_devs,
                 recently_exited: HashMap::new(),
+                pending_mints: HashSet::new(),
             }),
         })
     }
@@ -161,6 +167,9 @@ impl TradingState {
         if inner.open_mints.contains(mint) {
             return true;
         }
+        if inner.pending_mints.contains(mint) {
+            return true;
+        }
         // Re-buy cooldown: reject if we exited this mint recently
         if let Some(exit_time) = inner.recently_exited.get(mint) {
             let elapsed = exit_time.elapsed().as_secs();
@@ -174,6 +183,50 @@ impl TradingState {
             }
         }
         false
+    }
+
+    /// Atomically check-and-reserve a mint for an in-flight buy.
+    ///
+    /// Returns `true` if the caller is granted the reservation and may proceed
+    /// to execute a trade. Returns `false` if the mint is already open, already
+    /// reserved by another in-flight buy, or within the re-buy cooldown.
+    ///
+    /// This is the **only** safe pre-trade dedup primitive — `has_position_for_mint`
+    /// is a non-atomic read and is subject to TOCTOU races when two events for
+    /// the same mint arrive within the trade-execution window (e.g. paper trades
+    /// completing in <100ms, or a pump.fun migrate+complete double-event).
+    ///
+    /// On trade failure, callers MUST invoke [`release_reservation`] to clear
+    /// the pending marker. On success, [`record_buy`] consumes the reservation.
+    pub async fn try_reserve_for_mint(&self, mint: &str) -> bool {
+        let mut inner = self.inner.write().await;
+        if inner.open_mints.contains(mint) || inner.pending_mints.contains(mint) {
+            return false;
+        }
+        if let Some(exit_time) = inner.recently_exited.get(mint) {
+            let elapsed = exit_time.elapsed().as_secs();
+            if elapsed < Self::REBUY_COOLDOWN_SECS {
+                info!(
+                    mint = mint,
+                    cooldown_remaining = Self::REBUY_COOLDOWN_SECS - elapsed,
+                    "🕐 Re-buy cooldown active — skipping mint"
+                );
+                return false;
+            }
+        }
+        inner.pending_mints.insert(mint.to_string());
+        debug!(mint = mint, pending = inner.pending_mints.len(), "🔒 Reserved mint for in-flight buy");
+        true
+    }
+
+    /// Release a pending reservation made by [`try_reserve_for_mint`].
+    /// Call this on every trade-execution failure path so the mint can be
+    /// retried by a future signal.
+    pub async fn release_reservation(&self, mint: &str) {
+        let mut inner = self.inner.write().await;
+        if inner.pending_mints.remove(mint) {
+            debug!(mint = mint, pending = inner.pending_mints.len(), "🔓 Released mint reservation");
+        }
     }
 
     /// Check if a dev wallet is blacklisted (known scammer/dumper).
@@ -227,6 +280,7 @@ impl TradingState {
     /// Record a new position opened (buy confirmed).
     pub async fn record_buy(&self, mint: &str, sol_spent: f64) {
         let mut inner = self.inner.write().await;
+        inner.pending_mints.remove(mint);
         inner.open_mints.insert(mint.to_string());
         inner.open_since.insert(mint.to_string(), Instant::now());
         inner.total_exposure_sol += sol_spent;

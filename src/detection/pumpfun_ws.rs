@@ -134,6 +134,24 @@ async fn connect_and_listen(tx: &mpsc::Sender<GraduatedToken>, supabase: &Arc<Su
     // Populated by newToken, enriched by tokenTrade, consumed by tokenComplete.
     let mut watchlist: HashMap<String, WatchlistEntry> = HashMap::new();
 
+    // Dedup table for tokenComplete events.
+    //
+    // pump.fun occasionally emits BOTH a "migrate" event AND a "complete" event
+    // for the same mint within milliseconds. Both messages would otherwise call
+    // `handle_token_complete`: the first consumes the watchlist entry, and the
+    // second falls through the `None` branch in `watchlist.remove(...)` and
+    // STILL emits a `GraduatedToken` downstream, producing duplicate positions
+    // (the downstream `try_reserve_for_mint` race only protected against an
+    // even tighter in-process race).
+    //
+    // Tracks `mint → unix_ms_emitted` so we can prune entries older than the
+    // dedup window. We keep the window short (5 min) because pump.fun never
+    // re-graduates the same mint, and any legitimate re-emit would be a true
+    // duplicate.
+    let mut emitted_complete: HashMap<String, i64> = HashMap::new();
+    const COMPLETE_DEDUP_WINDOW_MS: i64 = 5 * 60 * 1000;
+    const COMPLETE_DEDUP_MAX_ENTRIES: usize = 5_000;
+
     // ── Read loop ─────────────────────────────────────────
     while let Some(msg_result) = read.next().await {
         let msg = match msg_result {
@@ -145,7 +163,7 @@ async fn connect_and_listen(tx: &mpsc::Sender<GraduatedToken>, supabase: &Arc<Su
 
         match msg {
             Message::Text(text) => {
-                if let Err(e) = handle_text_message(&text, tx, &mut watchlist, supabase, &ws_write_tx, rpc_url, cfg, bc_cache).await {
+                if let Err(e) = handle_text_message(&text, tx, &mut watchlist, &mut emitted_complete, COMPLETE_DEDUP_WINDOW_MS, COMPLETE_DEDUP_MAX_ENTRIES, supabase, &ws_write_tx, rpc_url, cfg, bc_cache).await {
                     // Log parse errors but keep the connection alive.
                     warn!("Failed to process PumpFun message: {:#}", e);
                 }
@@ -202,6 +220,9 @@ async fn handle_text_message(
     text: &str,
     tx: &mpsc::Sender<GraduatedToken>,
     watchlist: &mut HashMap<String, WatchlistEntry>,
+    emitted_complete: &mut HashMap<String, i64>,
+    complete_dedup_window_ms: i64,
+    complete_dedup_max_entries: usize,
     supabase: &Arc<SupabaseClient>,
     ws_write_tx: &mpsc::Sender<Message>,
     rpc_url: &str,
@@ -221,7 +242,52 @@ async fn handle_text_message(
     match kind {
         EventKind::NewToken => handle_new_token(&v, watchlist, ws_write_tx).await?,
         EventKind::TokenTrade => handle_token_trade(&v, watchlist, cfg, supabase, bc_cache).await?,
-        EventKind::TokenComplete => handle_token_complete(&v, tx, watchlist, supabase, rpc_url, cfg).await?,
+        EventKind::TokenComplete => {
+            // ── Dedup tokenComplete: pump.fun can emit migrate+complete for the
+            // same mint. The first call consumes the watchlist entry; without
+            // this guard, the second call would fall into the `None` branch
+            // inside handle_token_complete and emit a SECOND GraduatedToken,
+            // producing a duplicate position downstream.
+            let mint_for_dedup = v
+                .get("mint")
+                .and_then(|m| m.as_str())
+                .map(str::to_string);
+
+            if let Some(ref mint_str) = mint_for_dedup {
+                let now_ms = chrono::Utc::now().timestamp_millis();
+
+                // Prune stale entries opportunistically.
+                emitted_complete.retain(|_, ts| now_ms - *ts < complete_dedup_window_ms);
+                if emitted_complete.len() > complete_dedup_max_entries {
+                    // Hard cap: drop oldest half if we somehow blow past the window.
+                    let mut entries: Vec<(String, i64)> = emitted_complete
+                        .iter()
+                        .map(|(k, v)| (k.clone(), *v))
+                        .collect();
+                    entries.sort_by_key(|(_, ts)| *ts);
+                    let drop_n = entries.len() / 2;
+                    for (k, _) in entries.into_iter().take(drop_n) {
+                        emitted_complete.remove(&k);
+                    }
+                }
+
+                if let Some(prev_ms) = emitted_complete.get(mint_str) {
+                    let dt = now_ms - *prev_ms;
+                    warn!(
+                        mint = %mint_str,
+                        delta_ms = dt,
+                        "🛑 DUPLICATE tokenComplete event suppressed (pump.fun migrate+complete double-emit)"
+                    );
+                    return Ok(());
+                }
+
+                // Mark BEFORE invoking the handler. If the handler errors, we
+                // still want the dedup to apply — re-running it would double-emit.
+                emitted_complete.insert(mint_str.clone(), now_ms);
+            }
+
+            handle_token_complete(&v, tx, watchlist, supabase, rpc_url, cfg).await?
+        }
         EventKind::Unknown => {
             // Subscription acks have no txType — only log events that have one
             if let Some(tx_type) = v.get("txType").and_then(|t| t.as_str()) {

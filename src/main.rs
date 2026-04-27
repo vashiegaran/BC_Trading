@@ -33,6 +33,81 @@ use tracing_subscriber::EnvFilter;
 /// Global shutdown flag — set by Ctrl+C handler.
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
+/// Acquire a single-instance lock keyed on the wallet pubkey.
+///
+/// Two bot processes sharing the same Supabase + wallet will each maintain
+/// their own in-memory `TradingState`, so neither sees the other's open
+/// positions and they emit duplicate buys (the v14↔v15 / v15↔v15.1 pattern
+/// observed at restart cut-overs). This lock is the canonical fix: the new
+/// instance refuses to start until the previous one exits and releases the
+/// lock. The OS releases the lock automatically on process exit / kill, so
+/// no stale-lock cleanup is needed.
+///
+/// Returns the locked `File` — the lock is held for as long as the file
+/// handle is alive (i.e. for the lifetime of `main`). Panics with a clear
+/// message if another instance is already running.
+fn acquire_single_instance_lock(wallet_pubkey: &str) -> std::fs::File {
+    use fs2::FileExt;
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    // Use the OS temp dir so the lock works regardless of cwd and survives
+    // running from different working directories.
+    let lock_dir = std::env::temp_dir().join("bc_trading_locks");
+    if let Err(e) = std::fs::create_dir_all(&lock_dir) {
+        panic!("Failed to create lock directory {:?}: {}", lock_dir, e);
+    }
+    let lock_path = lock_dir.join(format!("{}.lock", wallet_pubkey));
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .unwrap_or_else(|e| panic!("Failed to open lock file {:?}: {}", lock_path, e));
+
+    match file.try_lock_exclusive() {
+        Ok(()) => {
+            // Best-effort: write our PID + start time so an operator can see
+            // who holds the lock when investigating a refusal.
+            let _ = file.set_len(0);
+            let _ = writeln!(
+                file,
+                "pid={} started_at={}",
+                std::process::id(),
+                chrono::Utc::now().to_rfc3339()
+            );
+            info!(
+                lock_path = %lock_path.display(),
+                "🔐 Single-instance lock acquired"
+            );
+            file
+        }
+        Err(e) => {
+            // Read whatever the previous holder wrote so we can show it.
+            let existing = std::fs::read_to_string(&lock_path).unwrap_or_default();
+            eprintln!(
+                "\n═══════════════════════════════════════════════════\n\
+                 REFUSING TO START — another bot instance is already\n\
+                 running for wallet {}.\n\n\
+                 Lock file : {}\n\
+                 Holder    : {}\n\
+                 Lock err  : {}\n\n\
+                 Two processes sharing the same wallet would emit\n\
+                 duplicate buys (separate in-memory TradingState per\n\
+                 process). Stop the existing instance before starting\n\
+                 this one.\n═══════════════════════════════════════════════════\n",
+                wallet_pubkey,
+                lock_path.display(),
+                existing.trim(),
+                e
+            );
+            std::process::exit(2);
+        }
+    }
+}
+
 /// Clean up old records from Supabase tables on startup.
 /// Runs DELETE queries to prune stale data so tables don't grow unbounded.
 async fn cleanup_old_records(supabase: &SupabaseClient) {
@@ -109,6 +184,13 @@ async fn main() {
         .expect("Failed to load wallet from WALLET_PRIVATE_KEY");
     let pubkey = wallet.pubkey();
     let wallet = Arc::new(wallet);
+
+    // ── 3b. Single-instance lock (per-wallet) ──────────────
+    // MUST come before any Supabase writes / state hydration so we don't
+    // double-write startup events or compete with another instance for
+    // the same TradingState. The lock is held for the entire process
+    // lifetime via this binding; do NOT drop it.
+    let _instance_lock = acquire_single_instance_lock(&pubkey.to_string());
 
     // Build version compiled into the binary at compile time
     const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
