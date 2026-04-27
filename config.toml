@@ -80,8 +80,12 @@ reject_bundled = true
 
 # Minimum buy pressure percentage — below this, momentum is too weak
 # v5: lowered 58 → 54 — Supabase showed 10+ tokens rejected at 55-57.9% (marginal).
-# Arch doc says 52; keep 54 as conservative middle.
-min_buy_pressure_pct = 54.0
+# v14.2 (2026-04-27): raised 54 → 65 based on graduated paper data:
+#   buy_pressure 65-80% bucket: med peak 1.91x, %>=5x = 13% (n=231)
+#   buy_pressure 50-65% bucket: med peak 1.30x, %>=5x =  5% (n=551)
+#   65-80% has 2x the 5x-rate and 2x median peak vs 50-65%.
+#   Trade-off: ~60% lower fire volume but concentrated on highest-EV band.
+min_buy_pressure_pct = 65.0
 
 # Minimum bonding curve volume (SOL) — below this, nobody cared
 min_bonding_volume_sol = 5.0

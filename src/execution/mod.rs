@@ -613,7 +613,11 @@ async fn execute_paper_trade(
         dev_wallet: Some(token.event.creator_wallet.to_string()),
         dev_initial_balance: None,
         pool_address,
-        sniper_features: None,
+        // BUG FIX (2026-04-27): was None — broke v14 paper-paths B/C/D because
+        // monitor.evaluate_paper_paths_detail(None) returns no match. Pass the
+        // actual features so Path B (liq_floor), C (off_hours_low_vol), and D
+        // (bc_score>=70) can fire from the early-promote intercept.
+        sniper_features: token.event.sniper_features.clone(),
         initial_liquidity_sol: token.event.initial_liquidity_sol,
         detection_source: token.event.source.to_string(),
         token_name: token.event.name.clone(),
@@ -1140,7 +1144,8 @@ async fn execute_real_trade(
         dev_wallet: Some(token.event.creator_wallet.to_string()),
         dev_initial_balance: None,
         pool_address,
-        sniper_features: None,
+        // BUG FIX (2026-04-27): see paper-buy branch — None broke v14 B/C/D paths.
+        sniper_features: token.event.sniper_features.clone(),
         initial_liquidity_sol: token.event.initial_liquidity_sol,
         detection_source: token.event.source.to_string(),
         token_name: token.event.name.clone(),
