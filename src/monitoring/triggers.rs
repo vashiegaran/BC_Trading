@@ -41,10 +41,23 @@ pub fn check_triggers(pos: &PositionState, exit_cfg: &ExitConfig, suppress_trail
         && exit_cfg.low_liq_max_hold_seconds > 0
         && pos.initial_liquidity_sol < 50.0; // matches low_liq_threshold_sol default
 
-    let effective_max_hold = if low_liq && exit_cfg.low_liq_max_hold_seconds > 0 {
+    let base_max_hold = if low_liq && exit_cfg.low_liq_max_hold_seconds > 0 {
         exit_cfg.low_liq_max_hold_seconds
     } else {
         exit_cfg.max_hold_seconds
+    };
+    // v14.2 RUNNER PROTECTION: extend TimeStop window after TP1/TP2 so we
+    // don't force-exit a position that's banked profit and is still climbing.
+    // (Real example: 8DyXMHNS… exited at 5.64x on time_stop while paper showed 14.11x peak.)
+    //   Pre-TP1 : base (default 900s = 15min)
+    //   Post-TP1: 2x base   (30min — gives bag time to either run or trail out)
+    //   Post-TP2: 4x base   (60min — proven runner, let trailing govern)
+    let effective_max_hold = if pos.tp2_triggered {
+        base_max_hold.saturating_mul(4)
+    } else if pos.tp1_triggered {
+        base_max_hold.saturating_mul(2)
+    } else {
+        base_max_hold
     };
     let effective_trailing_pct = if low_liq && exit_cfg.low_liq_trailing_stop_pct > 0.0 {
         exit_cfg.low_liq_trailing_stop_pct
@@ -85,22 +98,45 @@ pub fn check_triggers(pos: &PositionState, exit_cfg: &ExitConfig, suppress_trail
     let pnl_pct = (pos.current_price - pos.entry_price_usd) / pos.entry_price_usd * 100.0;
     let price_multiplier = pos.current_price / pos.entry_price_usd;
 
-    // 1. StopLoss: Two-tier system.
-    //    - If position has NEVER been profitable (peak < entry) and grace period
-    //      has elapsed, use the tighter never_profitable_stop_loss_pct.
-    //    - Otherwise use the normal (wider) stop_loss_pct.
+    // 1. StopLoss: Three-tier system.
+    //    - Pre-TP1, never profitable + grace elapsed → tighter never_profitable_stop_loss_pct (-from entry).
+    //    - Pre-TP1, otherwise                       → normal stop_loss_pct (-from entry).
+    //    - Post-TP1                                  → peak-based 50% drawdown (was: -35% from entry,
+    //                                                   which dumped the bag on profitable positions).
+    //    - Post-TP2                                  → peak-based 60% drawdown (proven runner — wider).
+    //
+    // v14.2 RUNNER PROTECTION (2026-04-28): the previous logic measured stop_loss
+    // from entry_price_usd regardless of TP state. A position that hit TP1 (1.8x)
+    // + TP2 (4x) and peaked at 5.83x then retraced through 0.65x entry would fire
+    // hard stop_loss and dump the remaining bag at -91% from entry — even though
+    // the position was profitable overall. Switching to peak-based post-TP1 keeps
+    // the safety net (catches catastrophic dumps) but doesn't sell into normal
+    // post-graduation chop. Trailing stop still handles routine retraces.
     let peak_multiplier = pos.peak_price / pos.entry_price_usd;
     let never_profitable = peak_multiplier < 1.0;
     let grace_elapsed = pos.elapsed_seconds >= exit_cfg.never_profitable_grace_secs;
-    let effective_stop = if never_profitable && grace_elapsed
-        && exit_cfg.never_profitable_stop_loss_pct > 0.0
-    {
-        exit_cfg.never_profitable_stop_loss_pct
+
+    let stop_fired = if pos.tp2_triggered && pos.peak_price > pos.entry_price_usd {
+        // Post-TP2: 60% drawdown from peak. At peak 5x → fires at 2x (still profitable).
+        let drawdown_pct = (pos.peak_price - pos.current_price) / pos.peak_price * 100.0;
+        drawdown_pct >= 60.0
+    } else if pos.tp1_triggered && pos.peak_price > pos.entry_price_usd {
+        // Post-TP1: 50% drawdown from peak. At peak 2x → fires at 1x (break-even on bag).
+        let drawdown_pct = (pos.peak_price - pos.current_price) / pos.peak_price * 100.0;
+        drawdown_pct >= 50.0
     } else {
-        effective_stop_loss
+        // Pre-TP1: original two-tier entry-based stop.
+        let effective_stop = if never_profitable && grace_elapsed
+            && exit_cfg.never_profitable_stop_loss_pct > 0.0
+        {
+            exit_cfg.never_profitable_stop_loss_pct
+        } else {
+            effective_stop_loss
+        };
+        pnl_pct <= -(effective_stop)
     };
 
-    if pnl_pct <= -(effective_stop) {
+    if stop_fired {
         return Some(ExitSignal {
             position_id: pos.position_id,
             mint: pos.mint.clone(),

@@ -757,8 +757,23 @@ async fn monitor_position(
         // ── TimeStop: evaluate BEFORE price fetch — it's purely time-based ──
         // This must never be gated behind price availability. If price is 0,
         // all other triggers are skipped, but TimeStop must still fire.
+        //
+        // v14.2 RUNNER PROTECTION (2026-04-28): extend the TimeStop window after
+        // TP1/TP2 fires so we don't force-exit a position that has banked profit
+        // and is still climbing. (Real example: 8DyXMHNS… was force-exited at
+        // 5.64x on time_stop while paper-tracker showed peak of 14.11x.)
+        //   Pre-TP1 : base max_hold (default 900s = 15min)
+        //   Post-TP1: 2x base   (30min — gives the bag time to either run or trail out)
+        //   Post-TP2: 4x base   (60min — proven runner, let trailing govern)
         let elapsed_seconds = started_at.elapsed().as_secs();
-        if elapsed_seconds >= cfg.strategy.exit.max_hold_seconds {
+        let effective_max_hold_loop = if tp2_triggered {
+            cfg.strategy.exit.max_hold_seconds.saturating_mul(4)
+        } else if tp1_triggered {
+            cfg.strategy.exit.max_hold_seconds.saturating_mul(2)
+        } else {
+            cfg.strategy.exit.max_hold_seconds
+        };
+        if elapsed_seconds >= effective_max_hold_loop {
             // Try to get a price for the exit signal; fall back to entry price
             let exit_price = {
                 let p = price_fetcher.get_price(&position.mint).await;
@@ -768,7 +783,9 @@ async fn monitor_position(
             info!(
                 mint = %position.mint,
                 elapsed_s = elapsed_seconds,
-                max_hold_s = cfg.strategy.exit.max_hold_seconds,
+                max_hold_s = effective_max_hold_loop,
+                tp1 = tp1_triggered,
+                tp2 = tp2_triggered,
                 exit_price,
                 "⏰ TimeStop triggered — forcing exit"
             );
