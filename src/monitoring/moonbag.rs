@@ -337,6 +337,82 @@ pub async fn run_moonbag_tracker(
         .build()
         .unwrap_or_default();
 
+    // ── Orphan recovery on startup ──────────────────────────────────────────
+    // Moonbag positions live in memory. If the bot restarts while moonbags are
+    // open, the in-memory state is lost but the DB rows linger forever with
+    // exited_at IS NULL. Mark them closed so analytics + the parent positions
+    // row reflect reality. We don't try to resume them — the price cache,
+    // trailing high-water-mark, and narrative state are gone.
+    {
+        let url = format!(
+            "{}/moonbag_positions?select=position_id,promoted_at&exited_at=is.null",
+            supabase.base_url
+        );
+        match supabase.client.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                #[derive(serde::Deserialize)]
+                struct OrphanRow {
+                    position_id: i64,
+                    #[serde(default)]
+                    promoted_at: Option<chrono::DateTime<chrono::Utc>>,
+                }
+                match resp.json::<Vec<OrphanRow>>().await {
+                    Ok(orphans) if !orphans.is_empty() => {
+                        warn!(
+                            count = orphans.len(),
+                            "🌙 Found orphaned moonbag positions from prior run — marking closed"
+                        );
+                        let now = chrono::Utc::now();
+                        for row in orphans {
+                            let started = row.promoted_at.unwrap_or(now);
+                            let hold_secs = (now - started).num_seconds().max(0);
+
+                            let mb_url = format!(
+                                "{}/moonbag_positions?position_id=eq.{}",
+                                supabase.base_url, row.position_id
+                            );
+                            let mb_payload = serde_json::json!({
+                                "exit_reason": "orphaned_on_restart",
+                                "hold_duration_secs": hold_secs,
+                                "exited_at": now.to_rfc3339(),
+                            });
+                            let _ = supabase.client.patch(&mb_url).json(&mb_payload).send().await;
+
+                            let pos_url = format!(
+                                "{}/positions?id=eq.{}",
+                                supabase.base_url, row.position_id
+                            );
+                            let pos_payload = serde_json::json!({
+                                "moonbag_exit_reason": "orphaned_on_restart",
+                                "moonbag_hold_duration_secs": hold_secs,
+                                "status": "closed",
+                            });
+                            let _ = supabase.client.patch(&pos_url).json(&pos_payload).send().await;
+
+                            info!(
+                                position_id = row.position_id,
+                                hold_secs,
+                                "🌙 Orphan moonbag closed"
+                            );
+                        }
+                    }
+                    Ok(_) => {
+                        debug!("🌙 No orphan moonbag positions found");
+                    }
+                    Err(e) => {
+                        warn!("🌙 Orphan recovery decode failed: {}", e);
+                    }
+                }
+            }
+            Ok(resp) => {
+                warn!(status = %resp.status(), "🌙 Orphan recovery query failed");
+            }
+            Err(e) => {
+                warn!("🌙 Orphan recovery request error: {}", e);
+            }
+        }
+    }
+
     let max_concurrent = cfg.strategy.monitoring.moonbag_max_concurrent;
     let max_hold_early_secs = cfg.strategy.monitoring.moonbag_max_hold_early_hours * 3600;
     let max_hold_expanding_secs = cfg.strategy.monitoring.moonbag_max_hold_expanding_hours * 3600;
@@ -456,6 +532,7 @@ pub async fn run_moonbag_tracker(
                         "price_at_promotion": insert_price_at_promo,
                         "is_fast_runner": is_fast_runner,
                         "strategy_version": insert_version,
+                        "promoted_at": chrono::Utc::now().to_rfc3339(),
                     });
                     if let Some(nr) = insert_nr {
                         payload.as_object_mut().unwrap().insert(
@@ -1038,6 +1115,24 @@ pub async fn run_moonbag_tracker(
                             "narrative_state": state_log,
                         });
                         let _ = supa.client.patch(&url).json(&payload).send().await;
+
+                        // Also mirror moonbag exit data onto the parent `positions` row so
+                        // analytics queries on `positions` (without joining moonbag_positions)
+                        // see the realised tail outcome. Only the moonbag-specific columns
+                        // are written here — `status`, `pnl_sol`, `sol_received`, etc. are
+                        // owned by the exit engine when it processes the ExitSignal.
+                        let pos_url = format!(
+                            "{}/positions?id=eq.{}",
+                            supa.base_url, pos_id
+                        );
+                        let pos_payload = serde_json::json!({
+                            "moonbag_exit_reason": reason_log,
+                            "moonbag_exit_multiplier": exit_mult,
+                            "moonbag_hold_duration_secs": hold_secs,
+                        });
+                        if let Err(e) = supa.client.patch(&pos_url).json(&pos_payload).send().await {
+                            tracing::warn!(position_id = pos_id, "positions moonbag_exit_* sync error: {}", e);
+                        }
                     });
 
                     if exit_tx.send(signal).await.is_err() {
