@@ -3,14 +3,7 @@
 # Bump this when you change filters/exit params, then add a
 # section to VERSION.md describing what changed.
 # ============================================================
-# Rollback from v16.1 (2026-04-29):
-#   v16.1 introduced an uncommitted `pump_amm_grpc` detection path with a
-#   3-source fast-track that skipped GoPlus pre-buy. Result: 77.7% of trades
-#   exited via post_buy_verification_failed, ROI -2.56% over 103 trades.
-#   This repo's pumpfun_ws + 2-source (mint+GoPlus) fast-track is the v15.3
-#   behavior that returned +48.95% ROI on 18 trades. Plus the moonbag-exit
-#   sync fix (commit bd96e94).
-strategy_version = "v15.3-rollback"
+strategy_version = "v14.2-runner-protection"
 
 # ============================================================
 # DETECTION
