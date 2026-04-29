@@ -3,7 +3,13 @@
 # Bump this when you change filters/exit params, then add a
 # section to VERSION.md describing what changed.
 # ============================================================
-strategy_version = "v14.2-runner-protection"
+# v17-clean-rebuild (2026-04-29):
+#   Same code as v14.2-runner-protection (commit bd96e94) plus the
+#   moonbag exit-sync fix. Bumped to make the clean rebuild trivially
+#   filterable in analytics vs the broken v16.1 binary that was running
+#   from never-committed source. Detection: pumpfun_ws. Fast-track:
+#   2-source (on_chain_mint + goplus) so GoPlus runs PRE-buy.
+strategy_version = "v17-clean-rebuild"
 
 # ============================================================
 # DETECTION
