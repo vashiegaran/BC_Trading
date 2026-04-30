@@ -473,24 +473,115 @@ async fn execute_paper_trade(
         "📐 Dynamic position size computed"
     );
 
-    // Paper trades skip Jupiter quotes entirely — use DexScreener price only.
-    // This avoids burning Jupiter API calls/rate limit for data collection.
-    let price_start = Instant::now();
-    let mut entry_price_usd = match jupiter.get_price(&mint_str).await {
-        Ok(p) if p > 0.0 => p,
-        _ => 0.0,
-    };
-    let price_ms = price_start.elapsed().as_millis() as i64;
+    // ── Realistic-fill guard: reject buys that would consume too much of the
+    // pool. Without this, paper trades into <$1 liquidity pools "fill" 0.05 SOL
+    // and produce fictional 50x outcomes that no real tx could ever achieve.
+    let realistic = cfg.strategy.execution.paper_realistic_fills;
+    if realistic && token.event.initial_liquidity_sol > 0.0 {
+        let max_fill = token.event.initial_liquidity_sol * (cfg.strategy.execution.paper_max_pool_fill_pct / 100.0);
+        if buy_amount_sol > max_fill {
+            warn!(
+                mint = %mint_str,
+                buy_amount_sol = format!("{:.4}", buy_amount_sol),
+                pool_sol = format!("{:.4}", token.event.initial_liquidity_sol),
+                max_fill_sol = format!("{:.4}", max_fill),
+                cap_pct = cfg.strategy.execution.paper_max_pool_fill_pct,
+                "⏭️ Paper buy skipped — size exceeds pool fill cap (would move price too much)"
+            );
+            log_system_event(
+                supabase,
+                "paper_fill_rejected",
+                &format!(
+                    "Mint: {} — buy {:.4} SOL > {:.1}% of pool {:.4} SOL",
+                    mint_str,
+                    buy_amount_sol,
+                    cfg.strategy.execution.paper_max_pool_fill_pct,
+                    token.event.initial_liquidity_sol
+                ),
+            )
+            .await;
+            return Ok(None);
+        }
+    }
 
-    // Estimate token amount from DexScreener price + SOL/USD
+    // ── Entry price + token amount ─────────────────────────────────────
+    // Realistic mode: use a real Jupiter quote for the buy (mirrors the
+    // exit path), so price impact and route availability gate the entry the
+    // same way they gate a real tx.
+    // Legacy mode: DexScreener mid-price + flat configured slippage. Cheap
+    // but cheats on thin pools — kept only for old-data parity.
+    let price_start = Instant::now();
     let sol_usd = jupiter.get_price(SOL_MINT).await.unwrap_or(150.0);
-    let token_amount = if entry_price_usd > 0.0 {
-        let value_usd = buy_amount_sol * sol_usd;
-        let tokens_ui = value_usd / entry_price_usd;
-        tokens_ui * 1_000_000.0 // Store in raw units (6 decimals for pump.fun)
+    let slippage_bps = cfg.strategy.execution.paper_slippage_bps;
+    let mut entry_price_usd: f64;
+    let mut token_amount: f64;
+    let mut used_jupiter_buy_quote = false;
+    let mut buy_quote_impact_bps: f64 = 0.0;
+
+    if realistic {
+        // Quote SOL -> mint for the dynamic buy size
+        let lamports = (buy_amount_sol * 1_000_000_000.0) as u64;
+        // Use the configured slippage as the quote tolerance
+        let quote_slippage = if slippage_bps > 0 { slippage_bps } else { 500 };
+        match jupiter.get_quote(SOL_MINT, &mint_str, lamports, quote_slippage).await {
+            Ok(q) => {
+                let out_raw: f64 = q.out_amount.parse().unwrap_or(0.0);
+                let impact: f64 = q.price_impact_pct.parse().unwrap_or(0.0);
+                buy_quote_impact_bps = (impact * 100.0).abs();
+                if out_raw <= 0.0 {
+                    warn!(mint = %mint_str, "Skipping paper trade — Jupiter buy quote returned zero out_amount");
+                    return Ok(None);
+                }
+                token_amount = out_raw; // already in raw token units
+                let tokens_ui = out_raw / 1_000_000.0; // pump.fun = 6 decimals
+                let value_usd = buy_amount_sol * sol_usd;
+                entry_price_usd = if tokens_ui > 0.0 { value_usd / tokens_ui } else { 0.0 };
+                used_jupiter_buy_quote = true;
+                info!(
+                    mint = %mint_str,
+                    buy_amount_sol = format!("{:.4}", buy_amount_sol),
+                    tokens_received = format!("{:.0}", out_raw),
+                    entry_price_usd = format!("{:.10}", entry_price_usd),
+                    impact_bps = format!("{:.1}", buy_quote_impact_bps),
+                    "📊 Paper buy: Jupiter quote used (realistic fill)"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    mint = %mint_str,
+                    error = %e,
+                    "Paper buy: Jupiter quote failed — falling back to DexScreener mid + flat slippage"
+                );
+                let px = match jupiter.get_price(&mint_str).await { Ok(p) if p > 0.0 => p, _ => 0.0 };
+                entry_price_usd = if slippage_bps > 0 && px > 0.0 {
+                    px * (1.0 + slippage_bps as f64 / 10_000.0)
+                } else { px };
+                token_amount = if entry_price_usd > 0.0 {
+                    (buy_amount_sol * sol_usd / entry_price_usd) * 1_000_000.0
+                } else { 0.0 };
+            }
+        }
     } else {
-        0.0
-    };
+        // Legacy DexScreener path
+        let px = match jupiter.get_price(&mint_str).await { Ok(p) if p > 0.0 => p, _ => 0.0 };
+        let pre_slippage_price = px;
+        entry_price_usd = if slippage_bps > 0 && px > 0.0 {
+            px * (1.0 + slippage_bps as f64 / 10_000.0)
+        } else { px };
+        token_amount = if entry_price_usd > 0.0 {
+            (buy_amount_sol * sol_usd / entry_price_usd) * 1_000_000.0
+        } else { 0.0 };
+        if slippage_bps > 0 && pre_slippage_price > 0.0 {
+            info!(
+                mint = %mint_str,
+                original_price = pre_slippage_price,
+                slipped_price = entry_price_usd,
+                slippage_bps,
+                "📊 Paper buy slippage applied (legacy mode)"
+            );
+        }
+    }
+    let price_ms = price_start.elapsed().as_millis() as i64;
 
     // ── Anti-chase: check if price moved too much since filter time ──
     let max_move_pct = cfg.strategy.execution.max_entry_price_move_pct;
@@ -523,19 +614,7 @@ async fn execute_paper_trade(
     }
 
     // Apply simulated slippage for paper trades (entry = you pay MORE)
-    let slippage_bps = cfg.strategy.execution.paper_slippage_bps;
-    let pre_slippage_price = entry_price_usd;
-    if slippage_bps > 0 && entry_price_usd > 0.0 {
-        let slippage_pct = slippage_bps as f64 / 10_000.0;
-        entry_price_usd *= 1.0 + slippage_pct;
-        info!(
-            mint = %mint_str,
-            original_price = pre_slippage_price,
-            slipped_price = entry_price_usd,
-            slippage_bps,
-            "📊 Paper buy slippage applied"
-        );
-    }
+    // (Already applied above per realistic/legacy branch — keep no-op here.)
 
     // Guard: if we have no price, skip the trade entirely
     if entry_price_usd == 0.0 {
@@ -638,6 +717,12 @@ async fn execute_paper_trade(
     );
     let supabase_bg = supabase.clone();
     let mint_bg = mint_str.clone();
+    let effective_buy_slippage_bps: f64 = if used_jupiter_buy_quote {
+        buy_quote_impact_bps
+    } else {
+        slippage_bps as f64
+    };
+    let tx_sig_label = if used_jupiter_buy_quote { "paper_jupiter_quote" } else { "paper_dexscreener" };
     tokio::spawn(async move {
         let latency_payload = serde_json::json!({
             "position_id": position_id,
@@ -651,12 +736,12 @@ async fn execute_paper_trade(
             "total_ms": total_ms,
             "used_jito": false,
             "used_helius_sender": false,
-            "tx_sig": "paper",
+            "tx_sig": tx_sig_label,
         });
         log_latency(&supabase_bg, &latency_payload).await;
 
         // Paper buy: all fees are 0, only simulated slippage has cost
-        let slippage_cost = buy_amount_sol * (slippage_bps as f64 / 10_000.0);
+        let slippage_cost = buy_amount_sol * (effective_buy_slippage_bps / 10_000.0);
         let cost_payload = serde_json::json!({
             "position_id": position_id,
             "mint": mint_bg,
@@ -671,11 +756,11 @@ async fn execute_paper_trade(
             "jito_tip_sol": 0.0,
             "helius_tip_sol": 0.0,
             "total_fees_sol": 0.0,
-            "slippage_bps": slippage_bps,
+            "slippage_bps": effective_buy_slippage_bps,
             "expected_sol": buy_amount_sol,
             "actual_sol": buy_amount_sol,
             "slippage_cost_sol": slippage_cost,
-            "tx_sig": "paper",
+            "tx_sig": tx_sig_label,
             "execution_ms": total_ms,
         });
         log_trade_cost(&supabase_bg, &cost_payload).await;

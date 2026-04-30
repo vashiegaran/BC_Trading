@@ -206,10 +206,25 @@ pub struct ExecutionConfig {
     /// simulate realistic exit price drift.  0 = instant (no delay).
     #[serde(default = "default_paper_exit_delay_ms")]
     pub paper_exit_delay_ms: u64,
+    /// When true, paper buys use a real Jupiter quote (same as exits) to
+    /// derive entry price + token amount with real price impact, AND reject
+    /// trades whose size would consume more than `paper_max_pool_fill_pct`
+    /// of the bonding-curve pool. When false (legacy), buys use the
+    /// DexScreener mid-price with only flat `paper_slippage_bps`, which
+    /// produces fills no real tx could ever achieve on thin curves.
+    #[serde(default = "default_paper_realistic_fills")]
+    pub paper_realistic_fills: bool,
+    /// Maximum % of `initial_liquidity_sol` a single paper buy is allowed to
+    /// consume. Above this, the trade is skipped (would move the pool too
+    /// much for a real fill). Only applies when `paper_realistic_fills=true`.
+    #[serde(default = "default_paper_max_pool_fill_pct")]
+    pub paper_max_pool_fill_pct: f64,
 }
 
 fn default_paper_slippage_bps() -> u64 { 0 }
 fn default_paper_exit_delay_ms() -> u64 { 0 }
+fn default_paper_realistic_fills() -> bool { true }
+fn default_paper_max_pool_fill_pct() -> f64 { 5.0 }
 fn default_priority_fee_max_lamports() -> u64 { 1_000_000 }
 fn default_priority_level() -> String { "veryHigh".to_string() }
 fn default_max_entry_price_move_pct() -> f64 { 50.0 }

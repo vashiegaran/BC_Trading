@@ -9,7 +9,7 @@
 #   filterable in analytics vs the broken v16.1 binary that was running
 #   from never-committed source. Detection: pumpfun_ws. Fast-track:
 #   2-source (on_chain_mint + goplus) so GoPlus runs PRE-buy.
-strategy_version = "v17-clean-rebuild"
+strategy_version = "v18.0-realistic-fills"
 
 # ============================================================
 # DETECTION
@@ -217,6 +217,14 @@ paper_slippage_bps = 250
 # After sleeping, re-fetches price to capture real drift.
 # Real exits take 3-8s. 2000 = tighter simulation.
 paper_exit_delay_ms = 2000
+
+# v18.0-realistic-fills: when true, paper buys go through a real Jupiter
+# quote (mirrors the exit path) and reject buys that would consume more
+# than `paper_max_pool_fill_pct` of the pool. Eliminates fictional fills
+# into <$1 liquidity bonding curves that produced phantom 50x outcomes
+# in earlier paper datasets.
+paper_realistic_fills = true
+paper_max_pool_fill_pct = 5.0
 
 
 # ============================================================
