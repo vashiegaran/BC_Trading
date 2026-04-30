@@ -1,27 +1,23 @@
-# PM2 setup — solana-memecoin-bot
+# PM2 setup — solana-memecoin-bot (Linux)
 
 PM2 manages the Rust release binary as a long-running, auto-restarting process
 with timestamped logs.
 
-## One-time install
+## 1. One-time install (on the server)
 
-### Windows
-```powershell
-# Install Node.js 20+ first (https://nodejs.org), then:
-npm install -g pm2
-npm install -g pm2-windows-startup
-pm2-startup install
-# (You may need a fresh PowerShell window after install.)
-```
-
-### Linux / macOS
 ```bash
-# Install Node.js 20+ first, then:
-npm install -g pm2
-pm2 startup            # follow the printed sudo command
+# Node.js 20+ (Debian/Ubuntu example)
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt-get install -y nodejs
+
+# PM2
+sudo npm install -g pm2
+
+# Boot autostart — run the sudo command that PM2 prints
+pm2 startup
 ```
 
-### Optional: log rotation (recommended on both OSes)
+### Log rotation (recommended)
 ```bash
 pm2 install pm2-logrotate
 pm2 set pm2-logrotate:max_size 50M
@@ -30,45 +26,46 @@ pm2 set pm2-logrotate:compress true
 pm2 set pm2-logrotate:rotateInterval '0 0 * * *'   # midnight daily
 ```
 
-## Build the release binary
+## 2. Build the release binary
 
-```powershell
-$env:PROTOC = "C:\Users\vmanogar\protoc\bin\protoc.exe"
+```bash
+sudo apt install -y protobuf-compiler   # if not already
+export PROTOC=$(which protoc)
 cargo build --release
 ```
 
-The PM2 config points at `target/release/solana-memecoin-bot(.exe)`.
+PM2 runs `target/release/solana-memecoin-bot` from this repo root.
 
-## Start
+## 3. Start
 
-```powershell
-mkdir logs -ErrorAction SilentlyContinue
+```bash
+mkdir -p logs
 pm2 start ecosystem.config.js
 pm2 save                  # persist process list across reboots
 ```
 
-## Daily operations
+## 4. Daily operations
 
-```powershell
-pm2 status                          # all apps + cpu/mem
-pm2 logs solana-memecoin-bot        # tail combined logs
-pm2 logs solana-memecoin-bot --err  # tail errors only
-pm2 logs --lines 200                # last 200 lines
-pm2 monit                           # live dashboard (cpu, mem, log stream)
-pm2 describe solana-memecoin-bot    # full process details
+```bash
+pm2 status                            # all apps + cpu/mem
+pm2 logs solana-memecoin-bot          # tail combined logs
+pm2 logs solana-memecoin-bot --err    # errors only
+pm2 logs --lines 200                  # last 200 lines
+pm2 monit                             # live dashboard
+pm2 describe solana-memecoin-bot      # full process details
 ```
 
-## Restart / reload after a rebuild
+## 5. Restart after a rebuild
 
-```powershell
-$env:PROTOC = "C:\Users\vmanogar\protoc\bin\protoc.exe"
+```bash
+export PROTOC=$(which protoc)
 cargo build --release
 pm2 restart solana-memecoin-bot
 ```
 
-## Stop / remove
+## 6. Stop / remove
 
-```powershell
+```bash
 pm2 stop solana-memecoin-bot
 pm2 delete solana-memecoin-bot
 pm2 save
@@ -76,24 +73,38 @@ pm2 save
 
 ## What the config does
 
-See `ecosystem.config.js` — highlights:
+See [ecosystem.config.js](ecosystem.config.js). Highlights:
 
 - `instances: 1`, `exec_mode: fork` — bot is stateful, never cluster.
-- `autorestart: true`, `min_uptime: 30s`, `max_restarts: 10` — guards against
-  crash-loops while still recovering from transient errors.
-- `max_memory_restart: 2G` — recycles the process if it leaks past 2 GB.
-- `stop_exit_codes: [0]` — a clean exit (e.g. shutdown signal handled by the
-  bot) is treated as intentional and PM2 will NOT restart.
-- `kill_timeout: 15000` — allows up to 15 s for the bot to flush in-flight
-  Supabase writes before PM2 force-kills.
-- `time: true` + `log_date_format` — every log line is prefixed with a
-  millisecond timestamp.
-- Logs are written to `./logs/bot.out.log` and `./logs/bot.err.log`.
+- `autorestart: true`, `min_uptime: 30s`, `max_restarts: 10` — recovers from
+  transient errors, refuses to crash-loop.
+- `max_memory_restart: 2G` — recycles the process on memory leak.
+- `stop_exit_codes: [0]` — clean exits are not restarted.
+- `kill_timeout: 15000` — 15 s for graceful SIGTERM (Supabase flush) before
+  SIGKILL.
+- Logs: `./logs/bot.out.log`, `./logs/bot.err.log`, timestamped per line.
+- `.env` is loaded by the bot itself — not duplicated in PM2 config.
 
 ## Verifying autostart
 
-After `pm2 save` + `pm2-startup install` (Windows) or `pm2 startup` (Linux):
+After `pm2 save` and the `pm2 startup` sudo command:
 
-1. Reboot the machine.
-2. Run `pm2 list` — the bot should already be `online`.
-3. If not, re-run `pm2 resurrect` and then `pm2 save` again.
+```bash
+sudo reboot
+# after reboot:
+pm2 list            # bot should already be `online`
+```
+
+If not, run `pm2 resurrect && pm2 save` and re-check `systemctl status pm2-<user>`.
+
+## Coexistence with the existing systemd setup
+
+This repo also ships [setup_systemd.sh](setup_systemd.sh). Pick **one**
+supervisor — running both will fight over the binary. To switch from systemd
+to PM2:
+
+```bash
+sudo systemctl stop solana-memecoin-bot
+sudo systemctl disable solana-memecoin-bot
+pm2 start ecosystem.config.js && pm2 save
+```

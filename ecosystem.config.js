@@ -1,29 +1,24 @@
-// PM2 ecosystem config for solana-memecoin-bot.
+// PM2 ecosystem config for solana-memecoin-bot (Linux server).
 // Manages the Rust release binary as a long-running process with
 // auto-restart, log rotation hooks, and graceful shutdown.
 //
-// Usage:
+// Usage (on the server):
 //   npm i -g pm2
 //   pm2 start ecosystem.config.js
 //   pm2 logs solana-memecoin-bot
-//   pm2 save                 # persist to disk
-//   pm2 startup              # generate OS-level autostart (Linux/macOS)
-//   pm2-startup install      # Windows equivalent (npm i -g pm2-windows-startup)
+//   pm2 save                 # persist process list to disk
+//   pm2 startup              # follow the printed sudo command for boot autostart
 //
-// On Windows, ensure PROTOC is available at build time only — runtime does
-// not need it. The .env file is loaded by the bot itself (not PM2), so we do
-// not duplicate env vars here. Only PM2-specific overrides go in `env`.
+// The .env file in the repo root is loaded by the bot itself (not PM2), so
+// secrets are NOT duplicated here. Only PM2-specific overrides go in `env`.
 
 const path = require('path');
-const isWin = process.platform === 'win32';
 
 module.exports = {
   apps: [
     {
       name: 'solana-memecoin-bot',
-      script: isWin
-        ? path.join(__dirname, 'target', 'release', 'solana-memecoin-bot.exe')
-        : path.join(__dirname, 'target', 'release', 'solana-memecoin-bot'),
+      script: path.join(__dirname, 'target', 'release', 'solana-memecoin-bot'),
       cwd: __dirname,
       interpreter: 'none',          // run binary directly, not via node
       instances: 1,                 // single-instance — bot is stateful
