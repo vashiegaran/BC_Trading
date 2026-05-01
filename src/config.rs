@@ -174,10 +174,19 @@ fn default_probe_add_probe_progress_pct() -> f64 { 60.0 }
 fn default_probe_add_add_progress_pct() -> f64 { 75.0 }
 fn default_probe_add_min_unique_buyer_delta() -> usize { 10 }
 fn default_probe_add_min_volume_multiplier() -> f64 { 1.5 }
+fn default_max_liquidity_usd() -> u64 { 0 } // 0 = disabled, must be set explicitly to take effect
 
 #[derive(Debug, Deserialize)]
 pub struct FiltersConfig {
     pub min_liquidity_usd: u64,
+    /// Maximum USD value of liquidity at launch.
+    /// Data (rahwn 280 closed positions): liquidity 80-150 SOL bucket avg
+    /// pnl/trade is essentially flat-to-negative (n≈40, pnl ≈ -0.05 SOL),
+    /// while 30-80 SOL band carried the full +8 SOL upside. Cap default
+    /// 27_000 USD ≈ 90 SOL trims dead-capital fires without losing winners.
+    /// 0 = disabled (back-compat).
+    #[serde(default = "default_max_liquidity_usd")]
+    pub max_liquidity_usd: u64,
     pub max_top_holder_pct: f64,
     pub max_dev_hold_pct: f64,
     pub max_token_age_seconds: u64,

@@ -147,6 +147,16 @@ impl LiquidityFilter {
                         Some(liquidity_usd),
                     );
                 }
+                let max = cfg.strategy.filters.max_liquidity_usd as f64;
+                if max > 0.0 && liquidity_usd > max {
+                    return (
+                        FilterResult::fail(
+                            CHECK_NAME,
+                            &format!("no_pool_liquidity_${:.0}_above_max_${:.0}", liquidity_usd, max),
+                        ),
+                        Some(liquidity_usd),
+                    );
+                }
                 return (FilterResult::pass(CHECK_NAME), Some(liquidity_usd));
             }
         };
@@ -198,6 +208,16 @@ impl LiquidityFilter {
                             Some(liquidity_usd),
                         );
                     }
+                    let max = cfg.strategy.filters.max_liquidity_usd as f64;
+                    if max > 0.0 && liquidity_usd > max {
+                        return (
+                            FilterResult::fail(
+                                CHECK_NAME,
+                                &format!("pump_amm_liquidity_${:.0}_above_max_${:.0}", liquidity_usd, max),
+                            ),
+                            Some(liquidity_usd),
+                        );
+                    }
                     return (FilterResult::pass(CHECK_NAME), Some(liquidity_usd));
                 }
                 warn!(pool = %pool_address, "liquidity: reserve parse failed: {}", e);
@@ -225,6 +245,17 @@ impl LiquidityFilter {
                 FilterResult::fail(
                     CHECK_NAME,
                     &format!("liquidity_${:.0}_below_min_${:.0}", liquidity_usd, min),
+                ),
+                Some(liquidity_usd),
+            );
+        }
+
+        let max = cfg.strategy.filters.max_liquidity_usd as f64;
+        if max > 0.0 && liquidity_usd > max {
+            return (
+                FilterResult::fail(
+                    CHECK_NAME,
+                    &format!("liquidity_${:.0}_above_max_${:.0}", liquidity_usd, max),
                 ),
                 Some(liquidity_usd),
             );

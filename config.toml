@@ -3,6 +3,12 @@
 # Bump this when you change filters/exit params, then add a
 # section to VERSION.md describing what changed.
 # ============================================================
+# v18.6-max-liq-cap (2026-05-01):
+#   Adds max_liquidity_usd = 27000 (~90 SOL) cap. Audit of 280 closed
+#   rahwn positions showed liq 80-150 SOL bucket avg pnl ~ -0.05 SOL
+#   (n=40, 39% WR in the 80-90 bc_score band) while 30-80 SOL band
+#   carried the full +8 SOL upside. Median runner liq = 58 SOL,
+#   median loser liq = 83 SOL. Cap trims dead-capital fires.
 # v18.5-bags-watchworthy-shadow (2026-05-01):
 #   Keeps v18.4 shadow label research and adds a Bags launch monitor,
 #   watchworthy-creator scoreboard, and a research-only Bags shadow lane.
@@ -13,7 +19,7 @@
 #   filterable in analytics vs the broken v16.1 binary that was running
 #   from never-committed source. Detection: pumpfun_ws. Fast-track:
 #   2-source (on_chain_mint + goplus) so GoPlus runs PRE-buy.
-strategy_version = "v18.5-bags-watchworthy-shadow"
+strategy_version = "v18.6-max-liq-cap"
 
 # ============================================================
 # DETECTION
@@ -73,6 +79,16 @@ probe_add_min_volume_multiplier = 1.5
 # v7: lowered from 6000 → 1500 — sniper hard filter now 5 SOL (~$1.7K double-sided).
 # Aligns with sniper filter change: 5-10 SOL range showed 42.9% moon rate.
 min_liquidity_usd = 1500
+
+# Maximum USD value of liquidity at launch.
+# v18.6 (2026-05-01): rahwn audit (280 closed positions) showed 80-150 SOL
+# liquidity band averaged ~-0.05 SOL pnl/trade with 39-65% WR, while the
+# 30-80 SOL band carried the full +8 SOL upside. >=3x runners had median
+# liq 58 SOL (p75 71 SOL); <1.3x losers had median liq 83 SOL. Cap at
+# ~$27k = ~90 SOL @ $300/SOL (clears the dead-capital band, preserves
+# every confirmed runner including the +2.75 SOL pos=17 winner at 85 SOL).
+# 0 = disabled.
+max_liquidity_usd = 27000
 
 # Maximum percentage held by top 10 wallets combined
 # Phase 3: raised from 65→80. Post-buy at 66-74% were false positives;

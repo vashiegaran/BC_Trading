@@ -9,6 +9,37 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.6 — Max Liquidity Cap (2026-05-01)
+
+**strategy_version**: `v18.6-max-liq-cap`
+
+### Why
+Audit of 280 closed positions on rahwn (research DB) showed initial liquidity is the single cleanest predictor of outcome.
+
+| `initial_liquidity_sol` | n | avg pnl/trade | WR |
+|---|---|---|---|
+| 30–50 | 8 | **+0.122 SOL** | 75% |
+| 50–80 | 102 | **+0.046 SOL** | 70% |
+| 80–150 | 39 | -0.005 SOL | ~50% |
+| >150 | 13 | +0.035 SOL | 54% |
+
+- ≥3x runners (n=44): median liq **58 SOL**, p75 71 SOL.
+- <1.3x losers (n=103): median liq **83 SOL**, p25 80 SOL.
+
+The 80–150 SOL band is dead capital — same hit rate as everything else but no runners. Tightening this cap preserves every confirmed winner (including the +2.75 SOL pos=17 moonbag at 85 SOL liq) while trimming the flat-to-negative tail.
+
+### Code changes
+- [src/config.rs](src/config.rs): add `max_liquidity_usd: u64` to `FiltersConfig` (default 0 = disabled).
+- [src/filters/liquidity.rs](src/filters/liquidity.rs): enforce the cap in all three liquidity-check sites (no-pool fallback, pump-AMM fallback, Raydium pool).
+- [config.toml](config.toml): set `max_liquidity_usd = 27000` (~90 SOL @ $300/SOL).
+
+### Strategy effect
+- Filters out fires with `liquidity_usd > 27_000` at launch.
+- Expected: ~14% fewer entries, ~−0.05 to −0.10 SOL of small losses removed.
+- No exit-side changes.
+
+---
+
 ## v18.5 — Bags Watchworthy Shadow (2026-05-01)
 
 **strategy_version**: `v18.5-bags-watchworthy-shadow`
