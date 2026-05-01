@@ -701,6 +701,7 @@ fn compute_concentration_safety(
 pub fn check_bc_pattern(
     token: &crate::detection::types::GraduatedToken,
     filters_cfg: &crate::config::FiltersConfig,
+    bc_fast_track_score: Option<f64>,
 ) -> Option<String> {
     // 1. Creator rebuy — dev buying back is a manipulation signal, not bullish
     if filters_cfg.reject_creator_rebuy && token.creator_rebuy {
@@ -708,8 +709,18 @@ pub fn check_bc_pattern(
     }
 
     // 2. Buy/sell ratio too low — weak buying pressure on the curve
-    // Skip check for tokens from non-PumpFun sources with no data (ratio = 0)
-    if token.buy_sell_ratio > 0.0 && token.buy_sell_ratio < filters_cfg.min_buy_sell_ratio {
+    // Skip check for tokens from non-PumpFun sources with no data (ratio = 0).
+    // If enabled, let strong BC fast-track candidates bypass this early reject
+    // and continue into minimal enrichment.
+    let fast_track_bypass = filters_cfg.allow_fast_track_buy_sell_ratio_bypass
+        && bc_fast_track_score
+            .map(|score| score >= filters_cfg.bc_fast_track_min_score)
+            .unwrap_or(false);
+
+    if token.buy_sell_ratio > 0.0
+        && token.buy_sell_ratio < filters_cfg.min_buy_sell_ratio
+        && !fast_track_bypass
+    {
         return Some(format!(
             "buy_sell_ratio={:.2} < {:.1}",
             token.buy_sell_ratio, filters_cfg.min_buy_sell_ratio

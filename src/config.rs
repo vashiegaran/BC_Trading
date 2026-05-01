@@ -100,10 +100,51 @@ pub struct DetectionConfig {
     /// ~50 SOL ≈ 60% to graduation, filters out 95% of dead tokens.
     #[serde(default = "default_bc_signal_volume_threshold")]
     pub bc_signal_volume_threshold: f64,
+    /// Shadow-only lane: record repeated same-label mint clusters to
+    /// `bc_paper_trades` without affecting live execution.
+    #[serde(default)]
+    pub label_flow_shadow_enabled: bool,
+    /// Minimum bonding-curve progress before the label-flow shadow lane can
+    /// fire.
+    #[serde(default = "default_label_flow_shadow_min_progress_pct")]
+    pub label_flow_shadow_min_progress_pct: f64,
+    /// Minimum number of prior same-label mints seen in the recent window
+    /// before a token qualifies for the label-flow shadow lane.
+    #[serde(default = "default_label_flow_shadow_min_prior_mints")]
+    pub label_flow_shadow_min_prior_mints: usize,
+    /// Maximum age, in seconds, of the most recent prior same-label mint for
+    /// the label-flow shadow lane.
+    #[serde(default = "default_label_flow_shadow_max_gap_seconds")]
+    pub label_flow_shadow_max_gap_seconds: u64,
+    /// Shadow-only ladder model: record a would-be probe row and later a
+    /// would-be add row if the same mint keeps strengthening.
+    #[serde(default)]
+    pub probe_add_shadow_enabled: bool,
+    /// Minimum bonding-curve progress before the would-be probe row fires.
+    #[serde(default = "default_probe_add_probe_progress_pct")]
+    pub probe_add_probe_progress_pct: f64,
+    /// Minimum bonding-curve progress before the would-be add row can fire.
+    #[serde(default = "default_probe_add_add_progress_pct")]
+    pub probe_add_add_progress_pct: f64,
+    /// Minimum increase in distinct buyers required between the probe and add
+    /// shadow rows.
+    #[serde(default = "default_probe_add_min_unique_buyer_delta")]
+    pub probe_add_min_unique_buyer_delta: usize,
+    /// Minimum volume growth multiplier required between the probe and add
+    /// shadow rows.
+    #[serde(default = "default_probe_add_min_volume_multiplier")]
+    pub probe_add_min_volume_multiplier: f64,
 }
 
 fn default_true() -> bool { true }
 fn default_bc_signal_volume_threshold() -> f64 { 50.0 }
+fn default_label_flow_shadow_min_progress_pct() -> f64 { 30.0 }
+fn default_label_flow_shadow_min_prior_mints() -> usize { 1 }
+fn default_label_flow_shadow_max_gap_seconds() -> u64 { 1_800 }
+fn default_probe_add_probe_progress_pct() -> f64 { 60.0 }
+fn default_probe_add_add_progress_pct() -> f64 { 75.0 }
+fn default_probe_add_min_unique_buyer_delta() -> usize { 10 }
+fn default_probe_add_min_volume_multiplier() -> f64 { 1.5 }
 
 #[derive(Debug, Deserialize)]
 pub struct FiltersConfig {
@@ -133,6 +174,11 @@ pub struct FiltersConfig {
     /// Data: Q4 (>2.3) graduates at 10.9% vs Q1 (<1.1) at 3.2%.
     #[serde(default = "default_min_buy_sell_ratio")]
     pub min_buy_sell_ratio: f64,
+    /// Allow a strong BC fast-track score to bypass the low buy/sell ratio hard
+    /// reject. This keeps `creator_rebuy` hard while rescuing high-conviction
+    /// fast-track names that would otherwise die before minimal enrichment.
+    #[serde(default)]
+    pub allow_fast_track_buy_sell_ratio_bypass: bool,
     /// Maximum sell count on bonding curve. High sells = dump pressure.
     /// Data: graduated tokens median 20 sells vs non-graduated 28.
     #[serde(default = "default_max_bc_sell_count")]

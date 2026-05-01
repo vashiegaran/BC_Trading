@@ -9,6 +9,26 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.3 — Shadow Label-Flow + Probe/Add (2026-05-01)
+
+**strategy_version**: `v18.3-shadow-label-probe`
+
+### Why
+Wallet research kept pointing to two behaviors that the bot could not measure directly in shadow mode: repeated buying of the same simple label across distinct fresh mints, and staged pressing into the same mint only if the curve kept strengthening after an initial probe.
+
+### Code changes
+- [src/detection/pumpfun_ws.rs](src/detection/pumpfun_ws.rs) now keeps a recent normalized-label cache and records two new observe-only `bc_paper_trades` triggers:
+  - `label_flow_shadow` — repeated same-label mint cluster plus healthy early flow
+  - `probe_add_probe` / `probe_add_add` — would-be staged entry ladder for the same mint
+- [src/detection/types.rs](src/detection/types.rs) adds transient watchlist state needed to track recent labels and probe-stage snapshots.
+- [src/config.rs](src/config.rs) and [config.toml](config.toml) add shadow-lane toggles and thresholds.
+
+### Strategy effect
+- No live execution behavior changed.
+- The bot now collects outcome data for both wallet-derived patterns using the existing `bc_paper_trades` shadow pipeline so they can be analyzed before any live rollout.
+
+---
+
 ## v14.1 — Fast-Track-Only + Duplicate-Lane Prune (2026-04-27)
 
 **Cargo version**: 0.3.3 | **strategy_version**: `v14.1-fasttrack-only` | **cutover**: `2026-04-27T03:15:00Z` (after restart)

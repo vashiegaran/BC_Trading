@@ -214,6 +214,15 @@ pub struct WatchlistEntry {
     pub name: String,
     /// Token symbol (ticker) from the newToken event.
     pub symbol: String,
+    /// Normalized label key derived from symbol/name for shadow label-flow tracking.
+    pub normalized_label: String,
+    /// Number of distinct prior mints with the same normalized label seen in the
+    /// recent label window before this token arrived.
+    pub prior_same_label_mints_6h: usize,
+    /// Number of distinct prior creators associated with the same normalized label.
+    pub prior_same_label_creators_6h: usize,
+    /// Seconds since the most recent prior mint with the same normalized label.
+    pub seconds_since_label_seen: Option<i64>,
     /// Cumulative SOL volume traded on the bonding curve.
     pub total_volume_sol: f64,
     /// Number of buy transactions observed.
@@ -248,6 +257,17 @@ pub struct WatchlistEntry {
     /// us the negative class for "tokens that started warming but didn't
     /// reach our 60% threshold". Re-firing is harmless (one-shot flag).
     pub control_recorded: bool,
+    /// Whether the repeated-label shadow lane row has already been written.
+    pub label_flow_shadow_recorded: bool,
+    /// Whether the probe stage of the probe-add shadow ladder has been written.
+    pub probe_add_probe_recorded: bool,
+    /// Whether the add stage of the probe-add shadow ladder has been written.
+    pub probe_add_add_recorded: bool,
+    /// Snapshot metrics captured when the probe-add shadow probe fires.
+    pub probe_add_probe_buy_count: u64,
+    pub probe_add_probe_unique_buyers: usize,
+    pub probe_add_probe_volume_sol: f64,
+    pub probe_add_probe_buy_pressure_pct: f64,
 
     // ── Bonding curve state, updated from each tokenTrade WS event ──
     // PumpPortal includes vSolInBondingCurve, vTokensInBondingCurve and

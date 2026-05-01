@@ -6,7 +6,7 @@ use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
 use solana_transaction_status::UiTransactionEncoding;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -36,6 +36,19 @@ const DEFAULT_SOL_USD: f64 = 150.0;
 /// Pump.fun tokens launch with a fixed 1B token supply.
 const PUMPFUN_TOTAL_SUPPLY_TOKENS: f64 = 1_000_000_000.0;
 
+/// Window used to detect repeated same-label mints arriving close together.
+const RECENT_LABEL_WINDOW_MS: i64 = 6 * 60 * 60 * 1_000;
+
+/// Maximum number of label buckets before pruning oldest buckets.
+const MAX_LABEL_CACHE_SIZE: usize = 10_000;
+
+#[derive(Debug, Clone)]
+struct RecentLabelObservation {
+    mint: String,
+    creator_wallet: Pubkey,
+    seen_at: i64,
+}
+
 fn bc_price_usd_from_market_cap(market_cap_usd: f64) -> f64 {
     if market_cap_usd > 0.0 {
         market_cap_usd / PUMPFUN_TOTAL_SUPPLY_TOKENS
@@ -50,6 +63,228 @@ fn bc_price_usd_from_sol(price_sol_per_token: f64, sol_usd: f64) -> f64 {
     } else {
         0.0
     }
+}
+
+fn normalize_label_component(raw: &str) -> String {
+    raw.chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
+}
+
+fn normalize_token_label(name: &str, symbol: &str) -> String {
+    let normalized_symbol = normalize_label_component(symbol);
+    if !normalized_symbol.is_empty() {
+        return normalized_symbol;
+    }
+    normalize_label_component(name)
+}
+
+fn prune_recent_label_cache(
+    recent_labels: &mut HashMap<String, Vec<RecentLabelObservation>>,
+    now_ms: i64,
+) {
+    recent_labels.retain(|_, observations| {
+        observations.retain(|obs| now_ms - obs.seen_at <= RECENT_LABEL_WINDOW_MS);
+        !observations.is_empty()
+    });
+
+    if recent_labels.len() <= MAX_LABEL_CACHE_SIZE {
+        return;
+    }
+
+    let mut keys_by_latest: Vec<(String, i64)> = recent_labels
+        .iter()
+        .map(|(key, observations)| {
+            let latest_seen = observations.iter().map(|obs| obs.seen_at).max().unwrap_or(0);
+            (key.clone(), latest_seen)
+        })
+        .collect();
+    keys_by_latest.sort_by_key(|(_, latest_seen)| *latest_seen);
+
+    let to_remove = recent_labels.len().saturating_sub(MAX_LABEL_CACHE_SIZE / 2);
+    for (key, _) in keys_by_latest.into_iter().take(to_remove) {
+        recent_labels.remove(&key);
+    }
+}
+
+fn compute_recent_label_signal(
+    recent_labels: &mut HashMap<String, Vec<RecentLabelObservation>>,
+    name: &str,
+    symbol: &str,
+    mint_str: &str,
+    creator_wallet: Pubkey,
+    now_ms: i64,
+) -> (String, usize, usize, Option<i64>) {
+    let normalized_label = normalize_token_label(name, symbol);
+    if normalized_label.is_empty() {
+        return (String::new(), 0, 0, None);
+    }
+
+    prune_recent_label_cache(recent_labels, now_ms);
+
+    let bucket = recent_labels.entry(normalized_label.clone()).or_default();
+    let prior_same_label_mints_6h = bucket
+        .iter()
+        .filter(|obs| obs.mint != mint_str)
+        .map(|obs| obs.mint.clone())
+        .collect::<HashSet<_>>()
+        .len();
+    let prior_same_label_creators_6h = bucket
+        .iter()
+        .filter(|obs| obs.mint != mint_str && obs.creator_wallet != Pubkey::default())
+        .map(|obs| obs.creator_wallet)
+        .collect::<HashSet<_>>()
+        .len();
+    let seconds_since_label_seen = bucket
+        .iter()
+        .filter(|obs| obs.mint != mint_str)
+        .map(|obs| (now_ms - obs.seen_at) / 1_000)
+        .min();
+
+    if !bucket.iter().any(|obs| obs.mint == mint_str) {
+        bucket.push(RecentLabelObservation {
+            mint: mint_str.to_string(),
+            creator_wallet,
+            seen_at: now_ms,
+        });
+    }
+
+    (
+        normalized_label,
+        prior_same_label_mints_6h,
+        prior_same_label_creators_6h,
+        seconds_since_label_seen,
+    )
+}
+
+fn compute_current_buy_sell_ratio(entry: &WatchlistEntry) -> f64 {
+    if entry.sell_count > 0 {
+        entry.buy_count as f64 / entry.sell_count as f64
+    } else if entry.buy_count > 0 {
+        entry.buy_count as f64
+    } else {
+        0.0
+    }
+}
+
+fn compute_current_creator_rebuy(entry: &WatchlistEntry) -> bool {
+    entry.trade_log.iter().any(|&(_, _, is_buy, wallet)| {
+        is_buy && wallet == entry.creator_wallet
+    }) && entry.trade_log.len() > 1
+}
+
+fn compute_current_whale_buy(entry: &WatchlistEntry) -> bool {
+    entry.trade_log.iter().any(|&(_, sol, is_buy, _)| is_buy && sol >= 3.0)
+}
+
+fn compute_current_bc_score(entry: &WatchlistEntry) -> f64 {
+    compute_bc_score(
+        entry.unique_buyers.len(),
+        compute_current_buy_sell_ratio(entry),
+        compute_current_creator_rebuy(entry),
+        compute_current_whale_buy(entry),
+        entry.buy_count,
+        entry.sell_count,
+        entry.total_volume_sol,
+    )
+}
+
+fn maybe_fire_label_flow_shadow(
+    entry: &mut WatchlistEntry,
+    mint_str: &str,
+    supabase: &Arc<SupabaseClient>,
+    cfg: &Arc<AppConfig>,
+    bc_progress_pct: f64,
+) {
+    if !cfg.strategy.detection.label_flow_shadow_enabled || entry.label_flow_shadow_recorded {
+        return;
+    }
+    if bc_progress_pct < cfg.strategy.detection.label_flow_shadow_min_progress_pct {
+        return;
+    }
+    if entry.prior_same_label_mints_6h < cfg.strategy.detection.label_flow_shadow_min_prior_mints {
+        return;
+    }
+    let max_gap = cfg.strategy.detection.label_flow_shadow_max_gap_seconds as i64;
+    if entry.seconds_since_label_seen.map(|gap| gap > max_gap).unwrap_or(true) {
+        return;
+    }
+    if entry.buy_pressure_pct() < cfg.strategy.filters.min_buy_pressure_pct {
+        return;
+    }
+
+    entry.label_flow_shadow_recorded = true;
+    fire_bc_lane(entry, mint_str, supabase, cfg, "label_flow_shadow", false, bc_progress_pct);
+}
+
+fn maybe_fire_probe_add_shadow(
+    entry: &mut WatchlistEntry,
+    mint_str: &str,
+    supabase: &Arc<SupabaseClient>,
+    cfg: &Arc<AppConfig>,
+    bc_progress_pct: f64,
+) {
+    if !cfg.strategy.detection.probe_add_shadow_enabled {
+        return;
+    }
+
+    let creator_rebuy = compute_current_creator_rebuy(entry);
+    let bc_score = compute_current_bc_score(entry);
+    let buy_pressure_pct = entry.buy_pressure_pct();
+
+    if !entry.probe_add_probe_recorded {
+        if bc_progress_pct < cfg.strategy.detection.probe_add_probe_progress_pct {
+            return;
+        }
+        if creator_rebuy
+            || buy_pressure_pct < cfg.strategy.filters.min_buy_pressure_pct
+            || bc_score < cfg.strategy.filters.bc_fast_track_min_score
+        {
+            return;
+        }
+
+        entry.probe_add_probe_recorded = true;
+        entry.probe_add_probe_buy_count = entry.buy_count;
+        entry.probe_add_probe_unique_buyers = entry.unique_buyers.len();
+        entry.probe_add_probe_volume_sol = entry.total_volume_sol;
+        entry.probe_add_probe_buy_pressure_pct = buy_pressure_pct;
+        fire_bc_lane(entry, mint_str, supabase, cfg, "probe_add_probe", false, bc_progress_pct);
+        return;
+    }
+
+    if entry.probe_add_add_recorded {
+        return;
+    }
+    if bc_progress_pct < cfg.strategy.detection.probe_add_add_progress_pct {
+        return;
+    }
+    if creator_rebuy
+        || buy_pressure_pct < cfg.strategy.filters.min_buy_pressure_pct
+        || bc_score < cfg.strategy.filters.bc_fast_track_min_score
+    {
+        return;
+    }
+
+    let unique_buyer_delta = entry
+        .unique_buyers
+        .len()
+        .saturating_sub(entry.probe_add_probe_unique_buyers);
+    let volume_multiplier = if entry.probe_add_probe_volume_sol > 0.0 {
+        entry.total_volume_sol / entry.probe_add_probe_volume_sol
+    } else {
+        0.0
+    };
+
+    if unique_buyer_delta < cfg.strategy.detection.probe_add_min_unique_buyer_delta {
+        return;
+    }
+    if volume_multiplier < cfg.strategy.detection.probe_add_min_volume_multiplier {
+        return;
+    }
+
+    entry.probe_add_add_recorded = true;
+    fire_bc_lane(entry, mint_str, supabase, cfg, "probe_add_add", false, bc_progress_pct);
 }
 
 /// Run the pump.fun WebSocket listener.
@@ -134,6 +369,9 @@ async fn connect_and_listen(tx: &mpsc::Sender<GraduatedToken>, supabase: &Arc<Su
     // Populated by newToken, enriched by tokenTrade, consumed by tokenComplete.
     let mut watchlist: HashMap<String, WatchlistEntry> = HashMap::new();
 
+    // Recent normalized-label activity for repeated same-label mint detection.
+    let mut recent_labels: HashMap<String, Vec<RecentLabelObservation>> = HashMap::new();
+
     // Dedup table for tokenComplete events.
     //
     // pump.fun occasionally emits BOTH a "migrate" event AND a "complete" event
@@ -163,7 +401,7 @@ async fn connect_and_listen(tx: &mpsc::Sender<GraduatedToken>, supabase: &Arc<Su
 
         match msg {
             Message::Text(text) => {
-                if let Err(e) = handle_text_message(&text, tx, &mut watchlist, &mut emitted_complete, COMPLETE_DEDUP_WINDOW_MS, COMPLETE_DEDUP_MAX_ENTRIES, supabase, &ws_write_tx, rpc_url, cfg, bc_cache).await {
+                if let Err(e) = handle_text_message(&text, tx, &mut watchlist, &mut recent_labels, &mut emitted_complete, COMPLETE_DEDUP_WINDOW_MS, COMPLETE_DEDUP_MAX_ENTRIES, supabase, &ws_write_tx, rpc_url, cfg, bc_cache).await {
                     // Log parse errors but keep the connection alive.
                     warn!("Failed to process PumpFun message: {:#}", e);
                 }
@@ -220,6 +458,7 @@ async fn handle_text_message(
     text: &str,
     tx: &mpsc::Sender<GraduatedToken>,
     watchlist: &mut HashMap<String, WatchlistEntry>,
+    recent_labels: &mut HashMap<String, Vec<RecentLabelObservation>>,
     emitted_complete: &mut HashMap<String, i64>,
     complete_dedup_window_ms: i64,
     complete_dedup_max_entries: usize,
@@ -240,7 +479,7 @@ async fn handle_text_message(
     }
 
     match kind {
-        EventKind::NewToken => handle_new_token(&v, watchlist, ws_write_tx).await?,
+        EventKind::NewToken => handle_new_token(&v, watchlist, recent_labels, ws_write_tx).await?,
         EventKind::TokenTrade => handle_token_trade(&v, watchlist, cfg, supabase, bc_cache).await?,
         EventKind::TokenComplete => {
             // ── Dedup tokenComplete: pump.fun can emit migrate+complete for the
@@ -307,6 +546,7 @@ async fn handle_text_message(
 async fn handle_new_token(
     v: &serde_json::Value,
     watchlist: &mut HashMap<String, WatchlistEntry>,
+    recent_labels: &mut HashMap<String, Vec<RecentLabelObservation>>,
     ws_write_tx: &mpsc::Sender<Message>,
 ) -> Result<()> {
     let mint_str = v
@@ -341,6 +581,19 @@ async fn handle_new_token(
         .to_string();
 
     let now = chrono::Utc::now().timestamp_millis();
+    let (
+        normalized_label,
+        prior_same_label_mints_6h,
+        prior_same_label_creators_6h,
+        seconds_since_label_seen,
+    ) = compute_recent_label_signal(
+        recent_labels,
+        &name,
+        &symbol,
+        mint_str,
+        creator_wallet,
+        now,
+    );
 
     // Prune watchlist if it's getting too large (simple eviction: clear oldest half).
     if watchlist.len() >= MAX_WATCHLIST_SIZE {
@@ -367,6 +620,10 @@ async fn handle_new_token(
         initial_buy_sol,
         name,
         symbol,
+        normalized_label: normalized_label.clone(),
+        prior_same_label_mints_6h,
+        prior_same_label_creators_6h,
+        seconds_since_label_seen,
         total_volume_sol: 0.0,
         buy_count: 0,
         sell_count: 0,
@@ -379,10 +636,28 @@ async fn handle_new_token(
         progress_90_recorded: false,
         graduation_recorded: false,
         control_recorded: false,
+        label_flow_shadow_recorded: false,
+        probe_add_probe_recorded: false,
+        probe_add_add_recorded: false,
+        probe_add_probe_buy_count: 0,
+        probe_add_probe_unique_buyers: 0,
+        probe_add_probe_volume_sol: 0.0,
+        probe_add_probe_buy_pressure_pct: 0.0,
         last_v_sol_reserves: 0.0,
         last_v_token_reserves: 0.0,
         last_market_cap_sol: 0.0,
     };
+
+    if prior_same_label_mints_6h > 0 {
+        info!(
+            mint = %mint_str,
+            label = %normalized_label,
+            prior_same_label_mints_6h,
+            prior_same_label_creators_6h,
+            seconds_since_label_seen = ?seconds_since_label_seen,
+            "🏷️ Recent same-label mint cluster detected"
+        );
+    }
 
 
     watchlist.insert(mint_str.to_string(), entry);
@@ -605,6 +880,9 @@ async fn handle_token_trade(
             entry.progress_90_recorded = true;
             fire_bc_lane(entry, mint_str, supabase, cfg, "progress_90pct", true, bc_progress_pct);
         }
+
+        maybe_fire_label_flow_shadow(entry, mint_str, supabase, cfg, bc_progress_pct);
+        maybe_fire_probe_add_shadow(entry, mint_str, supabase, cfg, bc_progress_pct);
     }
 
     Ok(())
@@ -1044,6 +1322,9 @@ async fn handle_token_complete(
             fire_bc_lane(entry, mint_str, supabase, cfg, "progress_90pct", true, bc_progress_pct);
         }
 
+        maybe_fire_label_flow_shadow(entry, mint_str, supabase, cfg, bc_progress_pct);
+        maybe_fire_probe_add_shadow(entry, mint_str, supabase, cfg, bc_progress_pct);
+
         if !entry.graduation_recorded {
             entry.graduation_recorded = true;
             fire_bc_lane(entry, mint_str, supabase, cfg, "graduation_raw", false, bc_progress_pct);
@@ -1056,7 +1337,7 @@ async fn handle_token_complete(
         }
     }
 
-    let (creator_wallet, bonding_curve_volume_sol, buy_pressure_pct, detected_at, time_to_graduate_seconds, unique_buyer_count, buy_count, sell_count, trade_timestamps, token_name, token_symbol, initial_buy_sol, creator_rebuy, buy_sell_ratio) =
+    let (creator_wallet, bonding_curve_volume_sol, buy_pressure_pct, detected_at, time_to_graduate_seconds, unique_buyer_count, buy_count, sell_count, trade_timestamps, token_name, token_symbol, _initial_buy_sol, creator_rebuy, buy_sell_ratio) =
         match watchlist.remove(mint_str) {
             Some(entry) => {
                 let elapsed_secs = (now_ms - entry.detected_at) as f64 / 1_000.0;
@@ -1628,6 +1909,25 @@ fn build_signal_payload(entry: &WatchlistEntry, mint_str: &str) -> serde_json::V
         "buy_sell_ratio": buy_sell_ratio,
         "total_buy_sol": total_buy_sol,
         "total_sell_sol": total_sell_sol,
+        "normalized_label": entry.normalized_label,
+        "label_repeat_active": entry.prior_same_label_mints_6h > 0,
+        "label_repeat_prior_mints_6h": entry.prior_same_label_mints_6h,
+        "label_repeat_prior_creators_6h": entry.prior_same_label_creators_6h,
+        "label_repeat_seconds_since_last_seen": entry.seconds_since_label_seen,
+        "probe_add_probe_buy_count": if entry.probe_add_probe_recorded { Some(entry.probe_add_probe_buy_count) } else { None },
+        "probe_add_probe_unique_buyers": if entry.probe_add_probe_recorded { Some(entry.probe_add_probe_unique_buyers) } else { None },
+        "probe_add_probe_volume_sol": if entry.probe_add_probe_recorded { Some(entry.probe_add_probe_volume_sol) } else { None },
+        "probe_add_probe_buy_pressure_pct": if entry.probe_add_probe_recorded { Some(entry.probe_add_probe_buy_pressure_pct) } else { None },
+        "probe_add_unique_buyer_delta": if entry.probe_add_probe_recorded {
+            Some(entry.unique_buyers.len().saturating_sub(entry.probe_add_probe_unique_buyers))
+        } else {
+            None
+        },
+        "probe_add_volume_multiplier": if entry.probe_add_probe_recorded && entry.probe_add_probe_volume_sol > 0.0 {
+            Some(entry.total_volume_sol / entry.probe_add_probe_volume_sol)
+        } else {
+            None
+        },
     });
 
     // Build compact trade log JSONB (truncate wallet to first 8 chars for space)
@@ -1752,6 +2052,8 @@ async fn write_bonding_curve_signal(supabase: &SupabaseClient, payload: &serde_j
 /// `trigger` distinguishes which signal fired this row:
 ///   - "volume_50sol"   : default 50 SOL volume threshold (≈23% progress)
 ///   - "progress_90pct" : Lane-B trigger when bc_progress_pct crosses 90%
+///   - "label_flow_shadow" : repeated same-label mint cluster + strong early flow
+///   - "probe_add_probe" / "probe_add_add" : shadow-only staged ladder entries
 ///
 /// Returns the inserted row id when available, so callers can PATCH async
 /// API-check results onto the row (used by Lane B for entry_api_checks).

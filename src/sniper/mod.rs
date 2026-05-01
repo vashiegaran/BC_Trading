@@ -87,10 +87,21 @@ pub fn start(
                 "🔬 Sniper enrichment starting"
             );
 
+            let bc_entry = if cfg.strategy.filters.bc_fast_track_enabled
+                && token.source == crate::detection::types::DetectionSource::PumpFun
+            {
+                let map = bc_cache.lock().await;
+                map.get(&mint_str).cloned()
+            } else {
+                None
+            };
+
             // ── Pre-enrichment: bonding curve pattern gate (free — no API calls) ──
             // Only applies to PumpFun-detected tokens that have BC data.
             if token.source == crate::detection::types::DetectionSource::PumpFun {
-                if let Some(reason) = filters::check_bc_pattern(&token, &cfg.strategy.filters) {
+                let bc_score = bc_entry.as_ref().map(|entry| entry.score);
+
+                if let Some(reason) = filters::check_bc_pattern(&token, &cfg.strategy.filters, bc_score) {
                     warn!(
                         mint = %mint_str,
                         reason = %reason,
@@ -130,18 +141,29 @@ pub fn start(
                     });
                     continue;
                 }
+
+                if cfg.strategy.filters.allow_fast_track_buy_sell_ratio_bypass
+                    && token.buy_sell_ratio > 0.0
+                    && token.buy_sell_ratio < cfg.strategy.filters.min_buy_sell_ratio
+                    && bc_score
+                        .map(|score| score >= cfg.strategy.filters.bc_fast_track_min_score)
+                        .unwrap_or(false)
+                {
+                    info!(
+                        mint = %mint_str,
+                        buy_sell_ratio = format!("{:.2}", token.buy_sell_ratio),
+                        bc_score = format!("{:.1}", bc_score.unwrap_or_default()),
+                        threshold = cfg.strategy.filters.bc_fast_track_min_score,
+                        "⚠️ BC PATTERN BYPASS — low buy/sell ratio allowed because BC fast-track score qualifies"
+                    );
+                }
             }
 
             // ── BC Fast-Track: check cache for pre-computed BC score ──
             if cfg.strategy.filters.bc_fast_track_enabled
                 && token.source == crate::detection::types::DetectionSource::PumpFun
             {
-                let bc_entry = {
-                    let map = bc_cache.lock().await;
-                    map.get(&mint_str).cloned()
-                };
-
-                if let Some(bc_entry) = bc_entry {
+                if let Some(bc_entry) = bc_entry.clone() {
                     if bc_entry.score >= cfg.strategy.filters.bc_fast_track_min_score {
                         info!(
                             mint = %mint_str,

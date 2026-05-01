@@ -9,7 +9,7 @@
 #   filterable in analytics vs the broken v16.1 binary that was running
 #   from never-committed source. Detection: pumpfun_ws. Fast-track:
 #   2-source (on_chain_mint + goplus) so GoPlus runs PRE-buy.
-strategy_version = "v18.2-piggyback-shadow"
+strategy_version = "v18.3-shadow-label-probe"
 
 # ============================================================
 # DETECTION
@@ -29,6 +29,23 @@ poll_interval_seconds = 5
 # Data goes to `bonding_curve_signals` Supabase table for backtesting.
 bonding_curve_signals_enabled = true
 bc_signal_volume_threshold = 30.0  # SOL — record when cumulative volume hits this
+
+# ── Wallet-research shadow lanes (observe-only, never trade live) ──
+# label_flow_shadow: repeated same-label mint cluster seen shortly before this
+# token plus healthy curve flow.
+label_flow_shadow_enabled = true
+label_flow_shadow_min_progress_pct = 30.0
+label_flow_shadow_min_prior_mints = 1
+label_flow_shadow_max_gap_seconds = 1800
+
+# probe_add_shadow: shadow-only ladder model. Record a would-be probe once
+# the curve is strong, then a would-be add only if the same mint keeps
+# strengthening.
+probe_add_shadow_enabled = true
+probe_add_probe_progress_pct = 60.0
+probe_add_add_progress_pct = 75.0
+probe_add_min_unique_buyer_delta = 10
+probe_add_min_volume_multiplier = 1.5
 
 
 # ============================================================
@@ -124,6 +141,11 @@ reject_creator_rebuy = true
 # Minimum buy/sell ratio on the bonding curve.
 # Data: ratio > 2.3 graduates at 10.9% vs < 1.1 at 3.2%. Using 1.2 to avoid over-filtering.
 min_buy_sell_ratio = 2.0
+
+# Allow strong BC fast-track candidates to bypass the low buy/sell ratio hard reject.
+# This keeps creator_rebuy hard while rescuing high-conviction names that would
+# otherwise die before minimal enrichment.
+allow_fast_track_buy_sell_ratio_bypass = true
 
 # Maximum sell transactions on bonding curve. High sells = dump pressure.
 # Data: graduated tokens median 20 sells vs non-graduated 28. Using 40 as generous upper bound.
