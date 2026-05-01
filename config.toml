@@ -438,6 +438,19 @@ stale_position_timeout_secs = 1200
 # Set false to revert to v5 polling-only behavior without recompiling.
 enable_helius_price_ws = true
 
+# ── Bags launch monitor (research only) ──
+# Watches the shared Bags authority for fresh launch transactions, extracts the
+# creator-side wallet that funds the launch, then scores whether that mint
+# found real buy-side demand in the first 15 minutes.
+bags_launch_monitor_enabled = true
+bags_launch_poll_interval_secs = 15
+bags_demand_window_secs = 900
+bags_real_demand_min_unique_buyers = 8
+bags_real_demand_min_buy_txs = 6
+bags_real_demand_min_buy_volume_sol = 6.0
+bags_creator_watch_min_launches = 2
+bags_creator_watch_min_demand_rate = 0.5
+
 # ── Enrichment sampler (passive data collection for v6) ──
 # Writes JSONB snapshots to `position_enrichment_snapshots` on schedule
 # (30s/2m/5m/10m/20m/30m/60m) plus pre_dip_death events. Pure logging.

@@ -482,6 +482,39 @@ pub struct MonitoringConfig {
     #[serde(default)]
     pub enable_helius_price_ws: bool,
 
+    // ── Bags launch monitor (research-only) ──
+    /// Poll the shared Bags authority for new launch transactions and record
+    /// creator-side wallets plus early post-launch demand metrics.
+    #[serde(default)]
+    pub bags_launch_monitor_enabled: bool,
+    /// Poll interval, in seconds, for checking new Bags authority signatures.
+    #[serde(default = "default_bags_launch_poll_interval_secs")]
+    pub bags_launch_poll_interval_secs: u64,
+    /// Time window, in seconds, used to judge whether a Bags launch found real
+    /// early demand after birth.
+    #[serde(default = "default_bags_demand_window_secs")]
+    pub bags_demand_window_secs: u64,
+    /// Minimum number of distinct buyers inside the demand window before a
+    /// Bags launch counts as having real demand.
+    #[serde(default = "default_bags_real_demand_min_unique_buyers")]
+    pub bags_real_demand_min_unique_buyers: usize,
+    /// Minimum number of buy transactions inside the demand window before a
+    /// Bags launch counts as having real demand.
+    #[serde(default = "default_bags_real_demand_min_buy_txs")]
+    pub bags_real_demand_min_buy_txs: usize,
+    /// Minimum buy-side SOL volume flowing into the pool inside the demand
+    /// window before a Bags launch counts as having real demand.
+    #[serde(default = "default_bags_real_demand_min_buy_volume_sol")]
+    pub bags_real_demand_min_buy_volume_sol: f64,
+    /// Minimum number of scored launches required before a creator can be
+    /// marked watchworthy.
+    #[serde(default = "default_bags_creator_watch_min_launches")]
+    pub bags_creator_watch_min_launches: usize,
+    /// Minimum share of launches with real demand before a creator can be
+    /// marked watchworthy.
+    #[serde(default = "default_bags_creator_watch_min_demand_rate")]
+    pub bags_creator_watch_min_demand_rate: f64,
+
     // ── Enrichment sampler (passive data collection, v6 prep) ──
     /// Enable scheduled + event-triggered enrichment snapshots written to
     /// `position_enrichment_snapshots`. Pure logging; no strategy change.
@@ -590,6 +623,13 @@ fn default_dip_whale_sell_multiplier() -> f64 { 2.5 }
 fn default_dip_no_trades_timeout_secs() -> f64 { 4.0 }
 fn default_min_hold_before_dip_death() -> u64 { 45 }
 fn default_stale_position_timeout_secs() -> u64 { 1800 }
+fn default_bags_launch_poll_interval_secs() -> u64 { 15 }
+fn default_bags_demand_window_secs() -> u64 { 900 }
+fn default_bags_real_demand_min_unique_buyers() -> usize { 8 }
+fn default_bags_real_demand_min_buy_txs() -> usize { 6 }
+fn default_bags_real_demand_min_buy_volume_sol() -> f64 { 6.0 }
+fn default_bags_creator_watch_min_launches() -> usize { 2 }
+fn default_bags_creator_watch_min_demand_rate() -> f64 { 0.5 }
 fn default_narrative_check_intervals() -> Vec<u64> { vec![120, 300] }
 fn default_moonbag_max_concurrent() -> usize { 20 }
 fn default_moonbag_max_hold_early_hours() -> u64 { 12 }

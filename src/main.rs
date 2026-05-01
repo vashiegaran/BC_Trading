@@ -300,6 +300,9 @@ async fn main() {
     let (detection_rx, bc_cache) = detection::start(Arc::clone(&cfg_arc), Arc::clone(&supabase_arc));
     info!("Detection engine started — listening for new tokens");
 
+    // ── 7a. Start Bags launch monitor (research only) ──
+    monitoring::bags::start(Arc::clone(&cfg_arc), Arc::clone(&supabase_arc));
+
     // ── 7b. Start sniper enrichment pipeline ────────────
     let enriched_rx = sniper::start(
         Arc::clone(&cfg_arc),
