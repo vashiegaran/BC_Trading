@@ -3,23 +3,13 @@
 # Bump this when you change filters/exit params, then add a
 # section to VERSION.md describing what changed.
 # ============================================================
-# v18.6-max-liq-cap (2026-05-01):
-#   Adds max_liquidity_usd = 27000 (~90 SOL) cap. Audit of 280 closed
-#   rahwn positions showed liq 80-150 SOL bucket avg pnl ~ -0.05 SOL
-#   (n=40, 39% WR in the 80-90 bc_score band) while 30-80 SOL band
-#   carried the full +8 SOL upside. Median runner liq = 58 SOL,
-#   median loser liq = 83 SOL. Cap trims dead-capital fires.
-# v18.5-bags-watchworthy-shadow (2026-05-01):
-#   Keeps v18.4 shadow label research and adds a Bags launch monitor,
-#   watchworthy-creator scoreboard, and a research-only Bags shadow lane.
-#   No live execution changes.
 # v17-clean-rebuild (2026-04-29):
 #   Same code as v14.2-runner-protection (commit bd96e94) plus the
 #   moonbag exit-sync fix. Bumped to make the clean rebuild trivially
 #   filterable in analytics vs the broken v16.1 binary that was running
 #   from never-committed source. Detection: pumpfun_ws. Fast-track:
 #   2-source (on_chain_mint + goplus) so GoPlus runs PRE-buy.
-strategy_version = "v18.6-max-liq-cap"
+strategy_version = "v18.3-shadow-label-probe"
 
 # ============================================================
 # DETECTION
@@ -41,16 +31,6 @@ bonding_curve_signals_enabled = true
 bc_signal_volume_threshold = 30.0  # SOL — record when cumulative volume hits this
 
 # ── Wallet-research shadow lanes (observe-only, never trade live) ──
-# launch_label_shadow: shadow a mint-time same-label basket entry. Designed
-# for wallets that hit fresh Pump.fun launches within seconds when the same
-# simple label starts repeating across multiple new mints.
-launch_label_shadow_enabled = true
-launch_label_shadow_max_age_seconds = 30
-launch_label_shadow_max_progress_pct = 25.0
-launch_label_shadow_min_prior_mints = 1
-launch_label_shadow_min_prior_creators = 1
-launch_label_shadow_max_gap_seconds = 180
-
 # label_flow_shadow: repeated same-label mint cluster seen shortly before this
 # token plus healthy curve flow.
 label_flow_shadow_enabled = true
@@ -79,17 +59,6 @@ probe_add_min_volume_multiplier = 1.5
 # v7: lowered from 6000 → 1500 — sniper hard filter now 5 SOL (~$1.7K double-sided).
 # Aligns with sniper filter change: 5-10 SOL range showed 42.9% moon rate.
 min_liquidity_usd = 1500
-
-# Maximum USD value of liquidity at launch.
-# v18.6 (2026-05-01): rahwn audit (280 closed positions) showed 80-150 SOL
-# (one-side) liquidity band averaged ~-0.05 SOL pnl/trade with 39-65% WR,
-# while the 30-80 SOL band carried the full +8 SOL upside. >=3x runners had
-# median initial_liquidity_sol 58 SOL (p75 71 SOL); <1.3x losers had median
-# 83 SOL. liquidity_usd = initial_liquidity_sol * sol_price * 2 (both pool
-# sides), so 90 SOL one-side @ $300/SOL = $54k. Cap preserves pos=17 winner
-# (85 SOL one-side, +2.75 SOL) while trimming the dead tail.
-# 0 = disabled.
-max_liquidity_usd = 54000
 
 # Maximum percentage held by top 10 wallets combined
 # Phase 3: raised from 65→80. Post-buy at 66-74% were false positives;
@@ -458,24 +427,6 @@ stale_position_timeout_secs = 1200
 # Falls back to Jupiter automatically for graduated / Raydium tokens.
 # Set false to revert to v5 polling-only behavior without recompiling.
 enable_helius_price_ws = true
-
-# ── Bags launch monitor (research only) ──
-# Watches the shared Bags authority for fresh launch transactions, extracts the
-# creator-side wallet that funds the launch, then scores whether that mint
-# found real buy-side demand in the first 15 minutes.
-bags_launch_monitor_enabled = true
-bags_launch_poll_interval_secs = 15
-bags_demand_window_secs = 900
-bags_real_demand_min_unique_buyers = 8
-bags_real_demand_min_buy_txs = 6
-bags_real_demand_min_buy_volume_sol = 6.0
-bags_watchworthy_shadow_enabled = true
-bags_watchworthy_shadow_max_age_seconds = 180
-bags_shadow_entry_price_max_wait_secs = 90
-bags_shadow_poll_interval_secs = 60
-bags_shadow_duration_secs = 21600
-bags_creator_watch_min_launches = 2
-bags_creator_watch_min_demand_rate = 0.5
 
 # ── Enrichment sampler (passive data collection for v6) ──
 # Writes JSONB snapshots to `position_enrichment_snapshots` on schedule
