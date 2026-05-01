@@ -175,6 +175,7 @@ fn default_probe_add_add_progress_pct() -> f64 { 75.0 }
 fn default_probe_add_min_unique_buyer_delta() -> usize { 10 }
 fn default_probe_add_min_volume_multiplier() -> f64 { 1.5 }
 fn default_max_liquidity_usd() -> u64 { 0 } // 0 = disabled, must be set explicitly to take effect
+fn default_max_initial_liquidity_sol() -> f64 { 0.0 } // 0 = disabled
 
 #[derive(Debug, Deserialize)]
 pub struct FiltersConfig {
@@ -187,6 +188,14 @@ pub struct FiltersConfig {
     /// 0 = disabled (back-compat).
     #[serde(default = "default_max_liquidity_usd")]
     pub max_liquidity_usd: u64,
+    /// Maximum SOL on the SOL side of the pool at detection time.
+    /// 0 = disabled. Data (rahwn n=282, v18.6 retune): tokens with
+    /// `initial_liquidity_sol > 80` had a >=3x rate of 5.1% vs 26.2% for
+    /// `<= 80`. Tightening to 80 lifts the moonbag rate from 16.0% baseline
+    /// to 26.2% on the full corpus and from 7.7% to 11.1% on the realistic-
+    /// fills (v18.x) slice.
+    #[serde(default = "default_max_initial_liquidity_sol")]
+    pub max_initial_liquidity_sol: f64,
     pub max_top_holder_pct: f64,
     pub max_dev_hold_pct: f64,
     pub max_token_age_seconds: u64,

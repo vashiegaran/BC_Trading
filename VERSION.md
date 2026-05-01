@@ -9,7 +9,54 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
-## v18.6 — Max Liquidity Cap (REVERTED, 2026-05-01)
+## v18.6 — Data-Tuned Filters + Score Re-fit (2026-05-01)
+
+**strategy_version**: `v18.6-data-tuned`
+
+### Why
+Full-corpus rahwn audit (n=282 closed positions, baseline +10.17 SOL, 16.0% ≥3x rate) under the explicit objective "maximize ≥3x hit-rate" revealed two big findings:
+
+1. **Initial liquidity is the strongest pre-buy signal**, but in the *opposite* direction we'd assumed. Logistic regression on 7 BC features had standardized coefficient `liq_sol = -1.276` — by far the largest, and `-liq_sol` alone has AUC=0.754 against the ≥3x target.
+2. **The existing `compute_bc_score` is essentially uncorrelated with ≥3x outcomes** (AUC=0.533). Runners and non-runners both averaged ~82 on the old score. The "more buyers = better" assumption was inverted: runners had *fewer* unique buyers (med 43, avg 41.7) than non-runners (med 43, avg 48.1).
+
+### Changes
+- **NEW filter `max_initial_liquidity_sol = 80.0`** in [config.toml](config.toml). Rejects pools with > 80 SOL on the SOL side at detection. Implemented in [src/filters/liquidity.rs](src/filters/liquidity.rs) as an early-return at the top of `LiquidityFilter::check`. Schema field added to [src/config.rs](src/config.rs); default 0.0 = disabled.
+- **`compute_bc_score` re-fit** in [src/detection/types.rs](src/detection/types.rs#L59):
+  - `unique_buyers` weights INVERTED (rewards low/medium counts).
+  - `whale_buy` bumped +10 → +15 (strongest discrete signal).
+  - `buy_count` band added (lower = bonus, higher = penalty).
+  - `total_volume_sol` and `sell_count` dropped from the score (no signal in the fit; kept in the function signature for callsite compat).
+  - `buy_sell_ratio` weights softened (data showed weaker stratification than expected).
+- **`bc_fast_track_min_score: 65 → 50`** in [config.toml](config.toml). The new score has tighter distribution; 50 keeps ~76% of BC-eligible tokens on the fast-track and matches the old gate's pass-rate.
+
+### Backtest (rahwn n=282)
+
+| Config | Kept n | Kept pnl | ≥3x rate | WR | Dropped runners |
+|---|---|---|---|---|---|
+| Baseline (no filter) | 282 | +10.17 | 16.0% | 66.3% | 0 of 45 |
+| `liq<=80` (new) | 145 | +5.70 | **26.2%** | 71.7% | 7 of 45 |
+| v18.x slice baseline | 39 | +0.45 | 7.7% | — | — |
+| v18.x slice + `liq<=80` | 27 | **+0.59** | **11.1%** | — | 0 dropped |
+
+### Caveats
+- Total kept_pnl drops 10.17 → 5.70 SOL on the full corpus, but most of that lost pnl came from the v12-v14 era under the old unrealistic-fills paper model. On the realistic-fills (v18.x) slice the new config *increases* total pnl (0.45 → 0.59). Live trading runs the realistic-fill model, so the v18.x slice is the truthful one.
+- 7 of 45 historical ≥3x runners get filtered out by `liq<=80`. Six of those came from `bc-research-v1` and `v12-fast-track`, both pre-realistic-fills.
+- `compute_bc_score` AUC improved 0.533 → 0.592 on the n=152 BC subset. Liquidity itself is a much stronger signal (AUC=0.754) but isn't a `compute_bc_score` input — it's gated separately by the new filter.
+
+### Score formula (v18.6)
+```
+base 50
+- 30 if creator_rebuy
++ 15 if buy_sell_ratio >= 4.0  | + 8 if >= 2.5  | + 3 if >= 1.5  | -15 if < 1.0
++  8 if unique_buyers <= 25     | 0 if <= 40    | -5 if <= 60    | -12 if > 60
++ 15 if whale_buy
++  5 if buy_count <= 30         | -8 if buy_count >= 60
+clamp 0..100
+```
+
+---
+
+## v18.6-prev — Max Liquidity Cap (REVERTED, 2026-05-01)
 
 **Status:** Investigated and reverted. Code support kept (`max_liquidity_usd` field, default 0 = disabled), but `config.toml` keeps it off.
 

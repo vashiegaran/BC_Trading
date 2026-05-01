@@ -96,6 +96,23 @@ impl LiquidityFilter {
         rpc: &RpcClient,
         backup_rpc: &RpcClient,
     ) -> (FilterResult, Option<f64>) {
+        // 0. Hard cap on initial pool SOL side. Set in `[filters]` as
+        //    `max_initial_liquidity_sol`. 0 = disabled. Rejects high-liq
+        //    pools that statistically miss >=3x runners (rahwn data v18.6).
+        let max_init_sol = cfg.strategy.filters.max_initial_liquidity_sol;
+        if max_init_sol > 0.0 && initial_liquidity_sol > max_init_sol {
+            return (
+                FilterResult::fail(
+                    CHECK_NAME,
+                    &format!(
+                        "initial_liquidity_sol_{:.1}_above_max_{:.1}",
+                        initial_liquidity_sol, max_init_sol
+                    ),
+                ),
+                None,
+            );
+        }
+
         // 1. Get SOL price in USD (from background cache)
         let sol_price_usd = {
             let cached = self.sol_price_cache.read().await;

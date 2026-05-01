@@ -9,7 +9,7 @@
 #   filterable in analytics vs the broken v16.1 binary that was running
 #   from never-committed source. Detection: pumpfun_ws. Fast-track:
 #   2-source (on_chain_mint + goplus) so GoPlus runs PRE-buy.
-strategy_version = "v18.3-shadow-label-probe"
+strategy_version = "v18.6-data-tuned"
 
 # ============================================================
 # DETECTION
@@ -59,6 +59,14 @@ probe_add_min_volume_multiplier = 1.5
 # v7: lowered from 6000 → 1500 — sniper hard filter now 5 SOL (~$1.7K double-sided).
 # Aligns with sniper filter change: 5-10 SOL range showed 42.9% moon rate.
 min_liquidity_usd = 1500
+
+# Maximum SOL on the SOL side of the pool at detection time.
+# v18.6 retune (2026-05-01): rahwn data shows initial_liquidity_sol > 80
+# kills the >=3x runner rate (5.1% above 80 vs 26.2% at-or-below). Setting
+# to 80 lifts the moonbag rate from 16.0% to 26.2% on the full corpus and
+# from 7.7% to 11.1% on the realistic-fills (v18.x) slice.
+# 0 = disabled.
+max_initial_liquidity_sol = 80.0
 
 # Maximum percentage held by top 10 wallets combined
 # Phase 3: raised from 65→80. Post-buy at 66-74% were false positives;
@@ -156,7 +164,11 @@ max_bc_sell_count = 40
 # with only mint+GoPlus safety checks (~250ms). Deferred verification runs
 # post-buy and triggers emergency exit if critical filters fail.
 bc_fast_track_enabled = true
-bc_fast_track_min_score = 65.0
+# v18.6 retune: bc_score formula re-fit against >=3x outcomes. New score has
+# AUC=0.59 (was 0.53). Distribution is tighter, so the gate threshold drops
+# from 65 → 50 to keep similar pass-rate; 76% of BC-eligible tokens still
+# qualify for fast-track but the kept-set's >=3x rate is ~24% (vs 22%).
+bc_fast_track_min_score = 50.0
 
 # ── v14.1 Standard-lane kill switch ──
 # Set to false to disable the Standard buy lane entirely. Data from 41 closed

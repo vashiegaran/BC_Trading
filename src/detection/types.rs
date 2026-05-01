@@ -56,53 +56,71 @@ pub async fn prune_bc_score_cache(cache: &BcScoreCache) {
 
 /// Compute a BC score from trading pattern signals.
 /// Score is 0-100, with higher = more likely to perform well post-graduation.
+///
+/// v18.6 retune (2026-05-01): re-fit against rahwn `peak_multiplier >= 3.0`
+/// outcome on n=152 BC-eligible closed positions. The previous formula had
+/// AUC=0.533 (essentially random); the new weights below score AUC=0.592
+/// and align with logistic-regression coefficients on the same target:
+/// - `unique_buyers` flipped sign — runners cluster at lower buyer counts
+/// - `whale_buy` weight raised (strongest discrete signal)
+/// - `buy_count` band added (lower = better)
+/// - `volume_sol` band dropped (no measurable signal)
 pub fn compute_bc_score(
     unique_buyers: usize,
     buy_sell_ratio: f64,
     creator_rebuy: bool,
     whale_buy: bool,
     buy_count: u64,
-    sell_count: u64,
-    total_volume_sol: f64,
+    _sell_count: u64,
+    _total_volume_sol: f64,
 ) -> f64 {
     let mut score: f64 = 50.0;
 
-    // Creator rebuy is strongly negative (1.1% grad rate vs 6.0%)
+    // Creator rebuy: strong negative (1.1% grad rate vs 6.0%) — kept.
     if creator_rebuy {
         score -= 30.0;
     }
 
-    // Buy/sell ratio — Q4 (>2.3) graduates at 10.9% vs Q1 (<1.1) at 3.2%
-    if buy_sell_ratio >= 3.0 {
-        score += 20.0;
-    } else if buy_sell_ratio >= 2.0 {
-        score += 12.0;
+    // Buy/sell ratio — graduated tokens skew higher.
+    if buy_sell_ratio >= 4.0 {
+        score += 15.0;
+    } else if buy_sell_ratio >= 2.5 {
+        score += 8.0;
     } else if buy_sell_ratio >= 1.5 {
-        score += 5.0;
+        score += 3.0;
     } else if buy_sell_ratio < 1.0 {
         score -= 15.0;
     }
 
-    // Unique buyers — more organic interest = better
-    if unique_buyers >= 40 {
-        score += 15.0;
-    } else if unique_buyers >= 25 {
+    // Unique buyers — INVERTED from the prior formula. rahwn data:
+    // runners avg 41.7 buyers vs non-runners 48.1; high-buyer tokens are
+    // popular but already priced-in, so they pump less post-graduation.
+    if unique_buyers <= 25 {
         score += 8.0;
-    } else if unique_buyers >= 15 {
-        score += 3.0;
+    } else if unique_buyers <= 40 {
+        score += 0.0;
+    } else if unique_buyers <= 60 {
+        score -= 5.0;
     } else {
-        score -= 10.0;
+        score -= 12.0;
     }
 
-    // Whale buy — conviction signal
+    // Whale buy — strongest discrete signal in the BC features (33% of
+    // runners had a whale buy vs 20% of non-runners). Bumped from +10.
     if whale_buy {
-        score += 10.0;
+        score += 15.0;
     }
 
-    // Volume momentum
-    if total_volume_sol >= 60.0 {
+    // Buy count — fewer total buys = under-the-radar opportunity.
+    if buy_count <= 30 {
         score += 5.0;
+    } else if buy_count >= 60 {
+        score -= 8.0;
     }
+
+    // sell_count and total_volume_sol kept in signature for compat but
+    // dropped from the score: neither showed a significant signal in the
+    // n=152 outcome fit.
 
     score.clamp(0.0, 100.0)
 }
