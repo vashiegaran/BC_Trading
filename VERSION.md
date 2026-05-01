@@ -9,6 +9,29 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.5 — Bags Watchworthy Shadow (2026-05-01)
+
+**strategy_version**: `v18.5-bags-watchworthy-shadow`
+
+### Why
+The Bags creator monitor is now strong enough to produce a real research lane: detect fresh Bags launches, recover the creator-side funding wallet at birth, score which creators repeatedly attract real early demand, and shadow only the launches from those already-proven creators.
+
+### Code changes
+- [src/monitoring/bags.rs](src/monitoring/bags.rs) adds a background Bags monitor that:
+  - polls the shared Bags authority for new launch transactions,
+  - extracts the creator-side wallet from the launch transaction,
+  - stores launch and demand metrics in `bags_launches` / `bags_creator_stats`, and
+  - fires a new research-only shadow lane `bags_watchworthy_shadow` when a fresh launch belongs to a creator already marked `watchworthy`.
+- [src/config.rs](src/config.rs) and [config.toml](config.toml) add Bags shadow-lane controls for max launch age, entry-price wait, poll cadence, and tracking duration.
+- [migrations/027_bags_launch_monitor.sql](migrations/027_bags_launch_monitor.sql) remains the base launch-monitor schema; [migrations/028_bags_shadow_entries.sql](migrations/028_bags_shadow_entries.sql) adds a dedicated table for watchworthy Bags shadow entries and their outcome metrics.
+- [scripts/bags_creator_report.py](scripts/bags_creator_report.py) ranks creators by demand rate and sample size, and summarizes recent watchworthy-shadow rows.
+
+### Strategy effect
+- No live execution behavior changed.
+- The repo can now collect a dedicated observe-only corpus for fresh Bags launches from historically productive creator wallets, separate from Pump.fun lanes.
+
+---
+
 ## v18.4 — Shadow Launch-Label Basket (2026-05-01)
 
 **strategy_version**: `v18.4-shadow-launch-label`

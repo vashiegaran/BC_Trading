@@ -514,6 +514,24 @@ pub struct MonitoringConfig {
     /// marked watchworthy.
     #[serde(default = "default_bags_creator_watch_min_demand_rate")]
     pub bags_creator_watch_min_demand_rate: f64,
+    /// Enable a research-only shadow lane that fires only when a fresh Bags
+    /// launch comes from a creator already marked watchworthy.
+    #[serde(default)]
+    pub bags_watchworthy_shadow_enabled: bool,
+    /// Maximum age, in seconds, from launch discovery for the watchworthy
+    /// Bags shadow lane to still fire.
+    #[serde(default = "default_bags_watchworthy_shadow_max_age_seconds")]
+    pub bags_watchworthy_shadow_max_age_seconds: u64,
+    /// Maximum time, in seconds, to wait for a non-zero entry price before a
+    /// Bags shadow row is marked price-unavailable.
+    #[serde(default = "default_bags_shadow_entry_price_max_wait_secs")]
+    pub bags_shadow_entry_price_max_wait_secs: u64,
+    /// Poll interval, in seconds, for Bags shadow outcome tracking.
+    #[serde(default = "default_bags_shadow_poll_interval_secs")]
+    pub bags_shadow_poll_interval_secs: u64,
+    /// Total duration, in seconds, to track Bags shadow outcomes.
+    #[serde(default = "default_bags_shadow_duration_secs")]
+    pub bags_shadow_duration_secs: u64,
 
     // ── Enrichment sampler (passive data collection, v6 prep) ──
     /// Enable scheduled + event-triggered enrichment snapshots written to
@@ -630,6 +648,10 @@ fn default_bags_real_demand_min_buy_txs() -> usize { 6 }
 fn default_bags_real_demand_min_buy_volume_sol() -> f64 { 6.0 }
 fn default_bags_creator_watch_min_launches() -> usize { 2 }
 fn default_bags_creator_watch_min_demand_rate() -> f64 { 0.5 }
+fn default_bags_watchworthy_shadow_max_age_seconds() -> u64 { 180 }
+fn default_bags_shadow_entry_price_max_wait_secs() -> u64 { 90 }
+fn default_bags_shadow_poll_interval_secs() -> u64 { 60 }
+fn default_bags_shadow_duration_secs() -> u64 { 21_600 }
 fn default_narrative_check_intervals() -> Vec<u64> { vec![120, 300] }
 fn default_moonbag_max_concurrent() -> usize { 20 }
 fn default_moonbag_max_hold_early_hours() -> u64 { 12 }

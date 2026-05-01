@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{TimeZone, Utc};
@@ -12,6 +13,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::AppConfig;
 use crate::logger::SupabaseClient;
+use crate::monitoring::price::PriceFetcher;
 
 const BAGS_AUTHORITY: &str = "BAGSB9TpGrZxQbEsrEznv5jXXdwyP6AXerN8aVRiAmcv";
 const BAGS_PROGRAM: &str = "dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN";
@@ -19,6 +21,8 @@ const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
 const MAX_SIGNATURE_PAGE_SIZE: usize = 100;
 const MAX_SIGNATURE_PAGES: usize = 4;
 const MAX_PENDING_EVALS_PER_LOOP: usize = 12;
+const SHADOW_PRICE_15M_SECS: u64 = 900;
+const SHADOW_PRICE_1H_SECS: u64 = 3600;
 
 #[derive(Debug, Clone, Deserialize)]
 struct SignatureInfo {
@@ -101,6 +105,34 @@ struct CreatorStatsRow {
     updated_at: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct CreatorStatsLookupRow {
+    watchworthy: bool,
+    launch_count: i32,
+    demand_launch_count: i32,
+    demand_rate: f64,
+}
+
+#[derive(Debug, Clone)]
+struct ShadowTrigger {
+    mint: String,
+    symbol: Option<String>,
+    name: Option<String>,
+    launch_signature: String,
+    creator_wallet: String,
+    launch_at_ts: i64,
+    launch_count_at_entry: i32,
+    demand_launch_count_at_entry: i32,
+    demand_rate_at_entry: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ShadowTrackerConfig {
+    max_wait_secs: u64,
+    poll_interval_secs: u64,
+    duration_secs: u64,
+}
+
 pub fn start(cfg: Arc<AppConfig>, supabase: Arc<SupabaseClient>) {
     if !cfg.strategy.monitoring.bags_launch_monitor_enabled {
         info!("Bags launch monitor disabled");
@@ -112,6 +144,12 @@ pub fn start(cfg: Arc<AppConfig>, supabase: Arc<SupabaseClient>) {
             return;
         }
 
+        let shadow_table_ready = if cfg.strategy.monitoring.bags_watchworthy_shadow_enabled {
+            ensure_table_ready(&supabase, "bags_shadow_entries", "id").await
+        } else {
+            false
+        };
+
         let rpc_client = match Client::builder().timeout(Duration::from_secs(30)).build() {
             Ok(client) => client,
             Err(e) => {
@@ -120,13 +158,24 @@ pub fn start(cfg: Arc<AppConfig>, supabase: Arc<SupabaseClient>) {
             }
         };
 
+        let price_fetcher = Arc::new(PriceFetcher::new(
+            cfg.env.birdeye_api_key.clone(),
+            cfg.strategy.monitoring.price_timeout_secs,
+            cfg.strategy.execution.api_request_timeout_secs,
+            cfg.strategy.execution.max_retries,
+            cfg.strategy.monitoring.max_sane_price_usd,
+            cfg.strategy.monitoring.max_price_change_ratio,
+        ));
+
         log_event(
             &supabase,
             "bags_monitor_started",
             &format!(
-                "poll_interval={}s demand_window={}s",
+                "poll_interval={}s demand_window={}s shadow_enabled={} shadow_table_ready={}",
                 cfg.strategy.monitoring.bags_launch_poll_interval_secs,
-                cfg.strategy.monitoring.bags_demand_window_secs
+                cfg.strategy.monitoring.bags_demand_window_secs,
+                cfg.strategy.monitoring.bags_watchworthy_shadow_enabled,
+                shadow_table_ready,
             ),
         )
         .await;
@@ -137,6 +186,8 @@ pub fn start(cfg: Arc<AppConfig>, supabase: Arc<SupabaseClient>) {
                 &cfg,
                 &supabase,
                 &rpc_client,
+                &price_fetcher,
+                shadow_table_ready,
                 &mut last_seen_signature,
             )
             .await
@@ -155,31 +206,32 @@ pub fn start(cfg: Arc<AppConfig>, supabase: Arc<SupabaseClient>) {
 }
 
 async fn ensure_tables_ready(supabase: &SupabaseClient) -> bool {
-    let launch_url = format!("{}/bags_launches?select=id&limit=1", supabase.base_url);
-    let stats_url = format!("{}/bags_creator_stats?select=creator_wallet&limit=1", supabase.base_url);
+    ensure_table_ready(supabase, "bags_launches", "id").await
+        && ensure_table_ready(supabase, "bags_creator_stats", "creator_wallet").await
+}
 
-    for (name, url) in [("bags_launches", launch_url), ("bags_creator_stats", stats_url)] {
-        match supabase.client.get(&url).send().await {
-            Ok(resp) if resp.status().is_success() => {}
-            Ok(resp) => {
-                let body = resp.text().await.unwrap_or_default();
-                warn!(table = name, body = %body, "bags_monitor: table missing or inaccessible; run migration 027 and restart");
-                return false;
-            }
-            Err(e) => {
-                warn!(table = name, error = %e, "bags_monitor: table readiness check failed");
-                return false;
-            }
+async fn ensure_table_ready(supabase: &SupabaseClient, table: &str, column: &str) -> bool {
+    let url = format!("{}/{}?select={}&limit=1", supabase.base_url, table, column);
+    match supabase.client.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => true,
+        Ok(resp) => {
+            let body = resp.text().await.unwrap_or_default();
+            warn!(table, body = %body, "bags_monitor: table missing or inaccessible; run the matching migration and restart");
+            false
+        }
+        Err(e) => {
+            warn!(table, error = %e, "bags_monitor: table readiness check failed");
+            false
         }
     }
-
-    true
 }
 
 async fn poll_once(
     cfg: &AppConfig,
     supabase: &SupabaseClient,
     rpc_client: &Client,
+    price_fetcher: &Arc<PriceFetcher>,
+    shadow_table_ready: bool,
     last_seen_signature: &mut Option<String>,
 ) -> Result<()> {
     let new_signatures = fetch_new_signatures(
@@ -196,6 +248,9 @@ async fn poll_once(
     for sig in &new_signatures {
         if let Some(launch) = detect_launch(rpc_client, &cfg.env.solana_rpc_url, sig).await? {
             upsert_launch(supabase, &launch).await?;
+            if shadow_table_ready {
+                maybe_fire_watchworthy_shadow(cfg, supabase, price_fetcher, &launch).await?;
+            }
             log_event(
                 supabase,
                 "bags_launch_detected",
@@ -430,6 +485,248 @@ async fn upsert_launch(supabase: &SupabaseClient, launch: &DetectedLaunch) -> Re
     Ok(())
 }
 
+async fn maybe_fire_watchworthy_shadow(
+    cfg: &AppConfig,
+    supabase: &SupabaseClient,
+    price_fetcher: &Arc<PriceFetcher>,
+    launch: &DetectedLaunch,
+) -> Result<()> {
+    if !cfg.strategy.monitoring.bags_watchworthy_shadow_enabled {
+        return Ok(());
+    }
+
+    let age_secs = Utc::now().timestamp().saturating_sub(launch.launch_at_ts);
+    if age_secs > cfg.strategy.monitoring.bags_watchworthy_shadow_max_age_seconds as i64 {
+        return Ok(());
+    }
+
+    let existing_url = format!(
+        "{}/bags_shadow_entries?select=id&mint=eq.{}&limit=1",
+        supabase.base_url,
+        launch.mint,
+    );
+    let existing_resp = supabase
+        .client
+        .get(&existing_url)
+        .send()
+        .await
+        .context("bags_monitor: query existing shadow entry")?;
+    if !existing_resp.status().is_success() {
+        let status = existing_resp.status();
+        let body = existing_resp.text().await.unwrap_or_default();
+        return Err(anyhow!("bags_monitor: existing shadow query failed: HTTP {} — {}", status, body));
+    }
+    let existing_rows: Vec<Value> = existing_resp
+        .json()
+        .await
+        .context("bags_monitor: decode existing shadow rows")?;
+    if !existing_rows.is_empty() {
+        return Ok(());
+    }
+
+    let stats = fetch_creator_stats_snapshot(supabase, &launch.creator_wallet).await?;
+    let Some(stats) = stats else {
+        return Ok(());
+    };
+    if !stats.watchworthy {
+        return Ok(());
+    }
+
+    let trigger = ShadowTrigger {
+        mint: launch.mint.clone(),
+        symbol: launch.symbol.clone(),
+        name: launch.name.clone(),
+        launch_signature: launch.launch_signature.clone(),
+        creator_wallet: launch.creator_wallet.clone(),
+        launch_at_ts: launch.launch_at_ts,
+        launch_count_at_entry: stats.launch_count,
+        demand_launch_count_at_entry: stats.demand_launch_count,
+        demand_rate_at_entry: stats.demand_rate,
+    };
+
+    insert_shadow_entry(supabase, &trigger).await?;
+    log_event(
+        supabase,
+        "bags_watchworthy_shadow_fired",
+        &format!(
+            "mint={} creator={} launches={} demand_rate={:.2}",
+            trigger.mint,
+            trigger.creator_wallet,
+            trigger.launch_count_at_entry,
+            trigger.demand_rate_at_entry,
+        ),
+    )
+    .await;
+
+    let tracker_cfg = ShadowTrackerConfig {
+        max_wait_secs: cfg.strategy.monitoring.bags_shadow_entry_price_max_wait_secs,
+        poll_interval_secs: cfg.strategy.monitoring.bags_shadow_poll_interval_secs,
+        duration_secs: cfg.strategy.monitoring.bags_shadow_duration_secs,
+    };
+    let supabase_clone = supabase.clone();
+    let price_fetcher = Arc::clone(price_fetcher);
+    tokio::spawn(async move {
+        if let Err(e) = track_shadow_entry(tracker_cfg, supabase_clone, price_fetcher, trigger).await {
+            warn!(error = %e, "bags_monitor: shadow tracker failed");
+        }
+    });
+
+    Ok(())
+}
+
+async fn fetch_creator_stats_snapshot(
+    supabase: &SupabaseClient,
+    creator_wallet: &str,
+) -> Result<Option<CreatorStatsLookupRow>> {
+    let url = format!(
+        "{}/bags_creator_stats?select=watchworthy,launch_count,demand_launch_count,demand_rate&creator_wallet=eq.{}&limit=1",
+        supabase.base_url,
+        creator_wallet,
+    );
+    let resp = supabase
+        .client
+        .get(&url)
+        .send()
+        .await
+        .context("bags_monitor: fetch creator stats snapshot")?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("bags_monitor: creator stats snapshot failed: HTTP {} — {}", status, body));
+    }
+    let rows: Vec<CreatorStatsLookupRow> = resp
+        .json()
+        .await
+        .context("bags_monitor: decode creator stats snapshot")?;
+    Ok(rows.into_iter().next())
+}
+
+async fn insert_shadow_entry(supabase: &SupabaseClient, trigger: &ShadowTrigger) -> Result<()> {
+    let url = format!("{}/bags_shadow_entries", supabase.base_url);
+    let launch_at = Utc
+        .timestamp_opt(trigger.launch_at_ts, 0)
+        .single()
+        .unwrap_or_else(Utc::now)
+        .to_rfc3339();
+    let payload = json!({
+        "mint": trigger.mint,
+        "symbol": trigger.symbol,
+        "name": trigger.name,
+        "entry_trigger": "bags_watchworthy_shadow",
+        "launch_signature": trigger.launch_signature,
+        "launch_at": launch_at,
+        "creator_wallet": trigger.creator_wallet,
+        "creator_launch_count_at_entry": trigger.launch_count_at_entry,
+        "creator_demand_launch_count_at_entry": trigger.demand_launch_count_at_entry,
+        "creator_demand_rate_at_entry": trigger.demand_rate_at_entry,
+        "status": "pending",
+        "status_message": "Waiting for initial price",
+        "updated_at": Utc::now().to_rfc3339(),
+    });
+
+    let resp = supabase
+        .client
+        .post(&url)
+        .json(&payload)
+        .send()
+        .await
+        .context("bags_monitor: insert bags_shadow_entries")?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("bags_monitor: insert bags_shadow_entries failed: HTTP {} — {}", status, body));
+    }
+
+    Ok(())
+}
+
+async fn track_shadow_entry(
+    tracker_cfg: ShadowTrackerConfig,
+    supabase: SupabaseClient,
+    price_fetcher: Arc<PriceFetcher>,
+    trigger: ShadowTrigger,
+) -> Result<()> {
+    let launch_age_secs = Utc::now().timestamp().saturating_sub(trigger.launch_at_ts).max(0) as u64;
+    let mut waited = Duration::from_secs(launch_age_secs.min(tracker_cfg.max_wait_secs));
+    let max_wait = Duration::from_secs(tracker_cfg.max_wait_secs);
+    let retry_sleep = Duration::from_secs(10);
+    let patch_url = format!("{}/bags_shadow_entries?mint=eq.{}", supabase.base_url, trigger.mint);
+
+    let mut entry_price_usd = 0.0;
+    while waited <= max_wait {
+        let price = price_fetcher.get_price(&trigger.mint).await;
+        if price > 0.0 {
+            entry_price_usd = price;
+            break;
+        }
+        sleep(retry_sleep).await;
+        waited += retry_sleep;
+    }
+
+    if entry_price_usd <= 0.0 {
+        let payload = json!({
+            "status": "price_unavailable",
+            "status_message": "Could not resolve non-zero entry price in time",
+            "completed_at": Utc::now().to_rfc3339(),
+            "updated_at": Utc::now().to_rfc3339(),
+        });
+        let _ = supabase.client.patch(&patch_url).json(&payload).send().await;
+        return Ok(());
+    }
+
+    let payload = json!({
+        "entry_price_usd": entry_price_usd,
+        "status": "tracking",
+        "status_message": "Tracking 15m/1h/peak outcomes",
+        "updated_at": Utc::now().to_rfc3339(),
+    });
+    let _ = supabase.client.patch(&patch_url).json(&payload).send().await;
+
+    let started = Instant::now();
+    let mut price_15m_usd: Option<f64> = None;
+    let mut price_1h_usd: Option<f64> = None;
+    let mut peak_price_usd = entry_price_usd;
+
+    loop {
+        let elapsed = started.elapsed().as_secs();
+        if elapsed >= tracker_cfg.duration_secs {
+            break;
+        }
+
+        sleep(Duration::from_secs(tracker_cfg.poll_interval_secs)).await;
+        let price = price_fetcher.get_price(&trigger.mint).await;
+        if price <= 0.0 {
+            continue;
+        }
+
+        if price > peak_price_usd {
+            peak_price_usd = price;
+        }
+        let now_elapsed = started.elapsed().as_secs();
+        if price_15m_usd.is_none() && now_elapsed >= SHADOW_PRICE_15M_SECS {
+            price_15m_usd = Some(price);
+        }
+        if price_1h_usd.is_none() && now_elapsed >= SHADOW_PRICE_1H_SECS {
+            price_1h_usd = Some(price);
+        }
+    }
+
+    let final_payload = json!({
+        "price_15m_usd": price_15m_usd,
+        "price_1h_usd": price_1h_usd,
+        "peak_price_usd": peak_price_usd,
+        "peak_multiplier": peak_price_usd / entry_price_usd,
+        "tracked_secs": tracker_cfg.duration_secs as i64,
+        "status": "completed",
+        "status_message": "Shadow tracking complete",
+        "completed_at": Utc::now().to_rfc3339(),
+        "updated_at": Utc::now().to_rfc3339(),
+    });
+    let _ = supabase.client.patch(&patch_url).json(&final_payload).send().await;
+
+    Ok(())
+}
+
 async fn score_pending_launches(
     cfg: &AppConfig,
     supabase: &SupabaseClient,
@@ -485,6 +782,7 @@ async fn score_pending_launches(
             && demand.buy_volume_sol >= cfg.strategy.monitoring.bags_real_demand_min_buy_volume_sol;
 
         patch_launch_demand(supabase, &launch.mint, &demand, has_real_demand, cfg).await?;
+    patch_shadow_demand(supabase, &launch.mint, &demand, has_real_demand).await?;
         creators_to_refresh.insert(launch.creator_wallet.clone());
 
         log_event(
@@ -1011,4 +1309,37 @@ async fn log_event(supabase: &SupabaseClient, event_type: &str, message: &str) {
         "message": message,
     });
     let _ = supabase.client.post(&url).json(&payload).send().await;
+}
+
+async fn patch_shadow_demand(
+    supabase: &SupabaseClient,
+    mint: &str,
+    demand: &DemandStats,
+    has_real_demand: bool,
+) -> Result<()> {
+    let url = format!("{}/bags_shadow_entries?mint=eq.{}", supabase.base_url, mint);
+    let payload = json!({
+        "demand_trade_count": demand.trade_count as i32,
+        "demand_buy_tx_count": demand.buy_tx_count as i32,
+        "demand_unique_buyers": demand.unique_buyers.len() as i32,
+        "demand_buy_volume_sol": demand.buy_volume_sol,
+        "demand_peak_single_buy_sol": demand.peak_single_buy_sol,
+        "has_real_demand": has_real_demand,
+        "updated_at": Utc::now().to_rfc3339(),
+    });
+
+    let resp = supabase
+        .client
+        .patch(&url)
+        .json(&payload)
+        .send()
+        .await
+        .context("bags_monitor: patch bags_shadow_entries")?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("bags_monitor: patch bags_shadow_entries failed: HTTP {} — {}", status, body));
+    }
+
+    Ok(())
 }

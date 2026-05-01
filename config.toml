@@ -3,13 +3,17 @@
 # Bump this when you change filters/exit params, then add a
 # section to VERSION.md describing what changed.
 # ============================================================
+# v18.5-bags-watchworthy-shadow (2026-05-01):
+#   Keeps v18.4 shadow label research and adds a Bags launch monitor,
+#   watchworthy-creator scoreboard, and a research-only Bags shadow lane.
+#   No live execution changes.
 # v17-clean-rebuild (2026-04-29):
 #   Same code as v14.2-runner-protection (commit bd96e94) plus the
 #   moonbag exit-sync fix. Bumped to make the clean rebuild trivially
 #   filterable in analytics vs the broken v16.1 binary that was running
 #   from never-committed source. Detection: pumpfun_ws. Fast-track:
 #   2-source (on_chain_mint + goplus) so GoPlus runs PRE-buy.
-strategy_version = "v18.4-shadow-launch-label"
+strategy_version = "v18.5-bags-watchworthy-shadow"
 
 # ============================================================
 # DETECTION
@@ -448,6 +452,11 @@ bags_demand_window_secs = 900
 bags_real_demand_min_unique_buyers = 8
 bags_real_demand_min_buy_txs = 6
 bags_real_demand_min_buy_volume_sol = 6.0
+bags_watchworthy_shadow_enabled = true
+bags_watchworthy_shadow_max_age_seconds = 180
+bags_shadow_entry_price_max_wait_secs = 90
+bags_shadow_poll_interval_secs = 60
+bags_shadow_duration_secs = 21600
 bags_creator_watch_min_launches = 2
 bags_creator_watch_min_demand_rate = 0.5
 
