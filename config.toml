@@ -9,7 +9,7 @@
 #   filterable in analytics vs the broken v16.1 binary that was running
 #   from never-committed source. Detection: pumpfun_ws. Fast-track:
 #   2-source (on_chain_mint + goplus) so GoPlus runs PRE-buy.
-strategy_version = "v18.0-realistic-fills"
+strategy_version = "v18.1-moonbag-filter"
 
 # ============================================================
 # DETECTION
@@ -225,6 +225,15 @@ paper_exit_delay_ms = 2000
 # in earlier paper datasets.
 paper_realistic_fills = true
 paper_max_pool_fill_pct = 5.0
+
+# v18.1-moonbag-filter (data-driven, n=265):
+#   - 30-60 SOL liq band: 90% hit 2x, 48% hit 3x, ROI +143%
+#   - 60-80 SOL liq band: 46% hit 2x, 16% hit 3x, ROI +57%
+#   - 80-90 SOL liq band:  12% hit 2x,  2% hit 3x, ROI +21%  ← death zone (~46% of trades)
+# Drop death-zone entries to lift portfolio ROI from +56% to +88%.
+moonbag_liq_min_sol = 0.0          # 0 disables; realistic-fill cap covers the floor
+moonbag_liq_max_sol = 80.0         # reject pools >= 80 SOL (death zone)
+moonbag_vol_24h_usd_max = 0.0      # 0 = disabled; set to 50000 to also reject already-discovered tokens
 
 
 # ============================================================

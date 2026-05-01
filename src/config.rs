@@ -219,12 +219,29 @@ pub struct ExecutionConfig {
     /// much for a real fill). Only applies when `paper_realistic_fills=true`.
     #[serde(default = "default_paper_max_pool_fill_pct")]
     pub paper_max_pool_fill_pct: f64,
+    /// Moonbag-targeting filter: minimum pool liquidity (SOL) at entry.
+    /// Below this, paper-fill cap usually rejects anyway. 0 = disabled.
+    #[serde(default = "default_moonbag_liq_min_sol")]
+    pub moonbag_liq_min_sol: f64,
+    /// Moonbag-targeting filter: maximum pool liquidity (SOL) at entry.
+    /// Backtest (n=265): liq>=80 SOL = 1.6% hit-3x rate; cutting that band
+    /// alone lifts portfolio ROI from +56% to +88%. 0 = disabled.
+    #[serde(default = "default_moonbag_liq_max_sol")]
+    pub moonbag_liq_max_sol: f64,
+    /// Moonbag-targeting filter: maximum 24h USD volume at entry.
+    /// Tokens with >$50k 24h volume are already discovered — moon rate drops.
+    /// Read from `sniper_features.be_volume_24h_usd`. 0 = disabled.
+    #[serde(default = "default_moonbag_vol_24h_usd_max")]
+    pub moonbag_vol_24h_usd_max: f64,
 }
 
 fn default_paper_slippage_bps() -> u64 { 0 }
 fn default_paper_exit_delay_ms() -> u64 { 0 }
 fn default_paper_realistic_fills() -> bool { true }
 fn default_paper_max_pool_fill_pct() -> f64 { 5.0 }
+fn default_moonbag_liq_min_sol() -> f64 { 0.0 }
+fn default_moonbag_liq_max_sol() -> f64 { 0.0 }
+fn default_moonbag_vol_24h_usd_max() -> f64 { 0.0 }
 fn default_priority_fee_max_lamports() -> u64 { 1_000_000 }
 fn default_priority_level() -> String { "veryHigh".to_string() }
 fn default_max_entry_price_move_pct() -> f64 { 50.0 }

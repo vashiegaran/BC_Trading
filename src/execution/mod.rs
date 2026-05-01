@@ -473,6 +473,80 @@ async fn execute_paper_trade(
         "📐 Dynamic position size computed"
     );
 
+    // ── Moonbag-targeting filter ───────────────────────────────────────
+    // Backtest on n=265 closed paper trades (ex-anomaly):
+    //   liq 30-60 SOL : 90% hit 2x, 48% hit 3x, +143% ROI
+    //   liq 60-80 SOL : 46% hit 2x, 16% hit 3x,  +57% ROI
+    //   liq 80-90 SOL : 12% hit 2x,  2% hit 3x,  +21% ROI  (death zone, ~46% of trades)
+    //   vol_24h<$50k  : combined w/ liq<60 → 100% win, 75% hit 3x (n=4 small)
+    let liq_max = cfg.strategy.execution.moonbag_liq_max_sol;
+    if liq_max > 0.0 && token.event.initial_liquidity_sol >= liq_max {
+        warn!(
+            mint = %mint_str,
+            initial_liquidity_sol = token.event.initial_liquidity_sol,
+            cap = liq_max,
+            "⏭️ Moonbag filter: pool too deep — skipping (death-zone liquidity)"
+        );
+        log_system_event(
+            supabase,
+            "moonbag_filter_skip",
+            &format!(
+                "Mint: {} — liq {:.2} SOL >= cap {:.2} (death zone)",
+                mint_str, token.event.initial_liquidity_sol, liq_max
+            ),
+        )
+        .await;
+        return Ok(None);
+    }
+    let liq_min = cfg.strategy.execution.moonbag_liq_min_sol;
+    if liq_min > 0.0 && token.event.initial_liquidity_sol < liq_min && token.event.initial_liquidity_sol > 0.0 {
+        warn!(
+            mint = %mint_str,
+            initial_liquidity_sol = token.event.initial_liquidity_sol,
+            floor = liq_min,
+            "⏭️ Moonbag filter: pool too thin — skipping"
+        );
+        log_system_event(
+            supabase,
+            "moonbag_filter_skip",
+            &format!(
+                "Mint: {} — liq {:.2} SOL < floor {:.2}",
+                mint_str, token.event.initial_liquidity_sol, liq_min
+            ),
+        )
+        .await;
+        return Ok(None);
+    }
+    let vol_max = cfg.strategy.execution.moonbag_vol_24h_usd_max;
+    if vol_max > 0.0 {
+        let vol_24h = token
+            .event
+            .sniper_features
+            .as_ref()
+            .and_then(|v| v.get("be_volume_24h_usd"))
+            .and_then(|v| v.as_f64());
+        if let Some(v) = vol_24h {
+            if v >= vol_max {
+                warn!(
+                    mint = %mint_str,
+                    be_volume_24h_usd = v,
+                    cap = vol_max,
+                    "⏭️ Moonbag filter: 24h volume too high — already discovered"
+                );
+                log_system_event(
+                    supabase,
+                    "moonbag_filter_skip",
+                    &format!(
+                        "Mint: {} — vol_24h ${:.0} >= cap ${:.0}",
+                        mint_str, v, vol_max
+                    ),
+                )
+                .await;
+                return Ok(None);
+            }
+        }
+    }
+
     // ── Realistic-fill guard: reject buys that would consume too much of the
     // pool. Without this, paper trades into <$1 liquidity pools "fill" 0.05 SOL
     // and produce fictional 50x outcomes that no real tx could ever achieve.
