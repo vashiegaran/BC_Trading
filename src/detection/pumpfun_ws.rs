@@ -190,6 +190,55 @@ fn compute_current_bc_score(entry: &WatchlistEntry) -> f64 {
     )
 }
 
+fn maybe_fire_launch_label_shadow(
+    entry: &mut WatchlistEntry,
+    mint_str: &str,
+    supabase: &Arc<SupabaseClient>,
+    cfg: &Arc<AppConfig>,
+    now_ms: i64,
+    bc_progress_pct: f64,
+    is_buy: bool,
+) {
+    if !cfg.strategy.detection.launch_label_shadow_enabled
+        || entry.launch_label_shadow_recorded
+    {
+        return;
+    }
+    if !is_buy {
+        return;
+    }
+
+    let token_age_secs = ((now_ms - entry.detected_at).max(0) as f64) / 1_000.0;
+    if token_age_secs > cfg.strategy.detection.launch_label_shadow_max_age_seconds as f64 {
+        return;
+    }
+    if bc_progress_pct > cfg.strategy.detection.launch_label_shadow_max_progress_pct {
+        return;
+    }
+    if entry.prior_same_label_mints_6h
+        < cfg.strategy.detection.launch_label_shadow_min_prior_mints
+    {
+        return;
+    }
+    if entry.prior_same_label_creators_6h
+        < cfg.strategy.detection.launch_label_shadow_min_prior_creators
+    {
+        return;
+    }
+
+    let max_gap = cfg.strategy.detection.launch_label_shadow_max_gap_seconds as i64;
+    if entry
+        .seconds_since_label_seen
+        .map(|gap| gap > max_gap)
+        .unwrap_or(true)
+    {
+        return;
+    }
+
+    entry.launch_label_shadow_recorded = true;
+    fire_bc_lane(entry, mint_str, supabase, cfg, "launch_label_shadow", false, bc_progress_pct);
+}
+
 fn maybe_fire_label_flow_shadow(
     entry: &mut WatchlistEntry,
     mint_str: &str,
@@ -636,6 +685,7 @@ async fn handle_new_token(
         progress_90_recorded: false,
         graduation_recorded: false,
         control_recorded: false,
+        launch_label_shadow_recorded: false,
         label_flow_shadow_recorded: false,
         probe_add_probe_recorded: false,
         probe_add_add_recorded: false,
@@ -858,6 +908,8 @@ async fn handle_token_trade(
     if entry.last_v_sol_reserves > 0.0 {
         let bc_progress_pct = (((entry.last_v_sol_reserves - 30.0) / 85.0) * 100.0)
             .clamp(0.0, 100.0);
+
+        maybe_fire_launch_label_shadow(entry, mint_str, supabase, cfg, now, bc_progress_pct, is_buy);
 
         // v14.1 counterfactual control — record once when warming starts.
         // Gives us a negative-class sample of tokens that crossed 30% but
@@ -2050,6 +2102,7 @@ async fn write_bonding_curve_signal(supabase: &SupabaseClient, payload: &serde_j
 /// have been observed) plus an optional pump.fun REST enrichment.
 ///
 /// `trigger` distinguishes which signal fired this row:
+///   - "launch_label_shadow" : mint-time same-label basket proxy
 ///   - "volume_50sol"   : default 50 SOL volume threshold (≈23% progress)
 ///   - "progress_90pct" : Lane-B trigger when bc_progress_pct crosses 90%
 ///   - "label_flow_shadow" : repeated same-label mint cluster + strong early flow

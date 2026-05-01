@@ -9,7 +9,7 @@
 #   filterable in analytics vs the broken v16.1 binary that was running
 #   from never-committed source. Detection: pumpfun_ws. Fast-track:
 #   2-source (on_chain_mint + goplus) so GoPlus runs PRE-buy.
-strategy_version = "v18.3-shadow-label-probe"
+strategy_version = "v18.4-shadow-launch-label"
 
 # ============================================================
 # DETECTION
@@ -31,6 +31,16 @@ bonding_curve_signals_enabled = true
 bc_signal_volume_threshold = 30.0  # SOL — record when cumulative volume hits this
 
 # ── Wallet-research shadow lanes (observe-only, never trade live) ──
+# launch_label_shadow: shadow a mint-time same-label basket entry. Designed
+# for wallets that hit fresh Pump.fun launches within seconds when the same
+# simple label starts repeating across multiple new mints.
+launch_label_shadow_enabled = true
+launch_label_shadow_max_age_seconds = 30
+launch_label_shadow_max_progress_pct = 25.0
+launch_label_shadow_min_prior_mints = 1
+launch_label_shadow_min_prior_creators = 1
+launch_label_shadow_max_gap_seconds = 180
+
 # label_flow_shadow: repeated same-label mint cluster seen shortly before this
 # token plus healthy curve flow.
 label_flow_shadow_enabled = true

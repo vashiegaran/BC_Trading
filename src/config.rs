@@ -100,6 +100,30 @@ pub struct DetectionConfig {
     /// ~50 SOL ≈ 60% to graduation, filters out 95% of dead tokens.
     #[serde(default = "default_bc_signal_volume_threshold")]
     pub bc_signal_volume_threshold: f64,
+    /// Shadow-only lane: record a would-be mint-time entry when a brand-new
+    /// token arrives into a very recent same-label cluster.
+    #[serde(default)]
+    pub launch_label_shadow_enabled: bool,
+    /// Maximum age, in seconds, from token creation for the mint-time launch
+    /// label shadow lane.
+    #[serde(default = "default_launch_label_shadow_max_age_seconds")]
+    pub launch_label_shadow_max_age_seconds: u64,
+    /// Maximum bonding-curve progress for the mint-time launch label shadow
+    /// lane. Keeps the lane focused on first-seconds launch entries.
+    #[serde(default = "default_launch_label_shadow_max_progress_pct")]
+    pub launch_label_shadow_max_progress_pct: f64,
+    /// Minimum number of prior same-label mints seen in the recent window
+    /// before a token qualifies for the mint-time launch label shadow lane.
+    #[serde(default = "default_launch_label_shadow_min_prior_mints")]
+    pub launch_label_shadow_min_prior_mints: usize,
+    /// Minimum number of distinct prior creators across the same-label mint
+    /// cluster before the mint-time launch label shadow lane can fire.
+    #[serde(default = "default_launch_label_shadow_min_prior_creators")]
+    pub launch_label_shadow_min_prior_creators: usize,
+    /// Maximum age, in seconds, of the most recent prior same-label mint for
+    /// the mint-time launch label shadow lane.
+    #[serde(default = "default_launch_label_shadow_max_gap_seconds")]
+    pub launch_label_shadow_max_gap_seconds: u64,
     /// Shadow-only lane: record repeated same-label mint clusters to
     /// `bc_paper_trades` without affecting live execution.
     #[serde(default)]
@@ -138,6 +162,11 @@ pub struct DetectionConfig {
 
 fn default_true() -> bool { true }
 fn default_bc_signal_volume_threshold() -> f64 { 50.0 }
+fn default_launch_label_shadow_max_age_seconds() -> u64 { 30 }
+fn default_launch_label_shadow_max_progress_pct() -> f64 { 25.0 }
+fn default_launch_label_shadow_min_prior_mints() -> usize { 1 }
+fn default_launch_label_shadow_min_prior_creators() -> usize { 1 }
+fn default_launch_label_shadow_max_gap_seconds() -> u64 { 180 }
 fn default_label_flow_shadow_min_progress_pct() -> f64 { 30.0 }
 fn default_label_flow_shadow_min_prior_mints() -> usize { 1 }
 fn default_label_flow_shadow_max_gap_seconds() -> u64 { 1_800 }

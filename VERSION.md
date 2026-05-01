@@ -9,6 +9,24 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.4 — Shadow Launch-Label Basket (2026-05-01)
+
+**strategy_version**: `v18.4-shadow-launch-label`
+
+### Why
+Reverse engineering on `clukz.sol` pointed to an even earlier pattern than the existing label-flow lane: the wallet was buying within seconds of mint when a fresh simple label started repeating across multiple brand-new Pump.fun mints.
+
+### Code changes
+- [src/detection/pumpfun_ws.rs](src/detection/pumpfun_ws.rs) adds `launch_label_shadow`, a new observe-only `bc_paper_trades` trigger that fires on the first seconds of trading when a mint belongs to a very recent same-label, multi-creator launch cluster.
+- [src/detection/types.rs](src/detection/types.rs) adds a one-shot watchlist flag so the mint-time shadow lane records only once per mint.
+- [src/config.rs](src/config.rs) and [config.toml](config.toml) add launch-window thresholds: token age, max BC progress, prior mint count, prior creator count, and label recency.
+
+### Strategy effect
+- No live execution behavior changed.
+- The bot can now collect outcome data for a mint-time same-label basket proxy, which is the strongest on-chain subset of the `clukz.sol` method that can be shadowed without access to the wallet's private off-chain discovery source.
+
+---
+
 ## v18.3 — Shadow Label-Flow + Probe/Add (2026-05-01)
 
 **strategy_version**: `v18.3-shadow-label-probe`

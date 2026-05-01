@@ -257,6 +257,9 @@ pub struct WatchlistEntry {
     /// us the negative class for "tokens that started warming but didn't
     /// reach our 60% threshold". Re-firing is harmless (one-shot flag).
     pub control_recorded: bool,
+    /// Whether the mint-time same-label launch shadow lane row has already
+    /// been written.
+    pub launch_label_shadow_recorded: bool,
     /// Whether the repeated-label shadow lane row has already been written.
     pub label_flow_shadow_recorded: bool,
     /// Whether the probe stage of the probe-add shadow ladder has been written.
