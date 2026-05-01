@@ -9,7 +9,7 @@
 #   filterable in analytics vs the broken v16.1 binary that was running
 #   from never-committed source. Detection: pumpfun_ws. Fast-track:
 #   2-source (on_chain_mint + goplus) so GoPlus runs PRE-buy.
-strategy_version = "v18.1-moonbag-filter"
+strategy_version = "v18.2-piggyback-shadow"
 
 # ============================================================
 # DETECTION
@@ -506,16 +506,18 @@ cto_moderate_momentum = 0.4
 
 
 # --- Re-entry shadow-mode tracking -----------------------------
-# When a position closes (moonbag sold to zero), watch the mint for up to
-# window_seconds and log every would-be re-entry to reentry_candidates.
-# SHADOW MODE ONLY: no trades are executed. Used to validate gate + narrative
-# correlation before enabling live re-entry.
+# v18.2 piggyback-shadow: track only moonbag exits (peak >= 3x), watch the mint
+# for window_seconds, log every dip-and-recovery to reentry_candidates.
+# SHADOW MODE — no trades. Goal: collect 50+ post-moonbag price tracks so we
+# can backtest whether dip re-entry has edge before flipping to live.
 [reentry]
-enabled = false                     # narrative-based reentry disabled (Option B backtest showed no signal)
-shadow_mode = true                  # if re-enabled later, start in shadow
+enabled = true                      # piggyback shadow data collection ON
+shadow_mode = true                  # NEVER place trades from this watcher
+require_narrative = false           # dip-only — skip OpenAI/X calls per tick
+min_peak_multiplier_to_track = 3.0  # only track 3x+ moonbags
 window_seconds = 21600              # 6h watch window after exit
-min_dip_pct = 0.15                  # require =15% dip from exit price
-min_narrative_score = 60            # 0..100 scale (matches NarrativeResult.score)
+min_dip_pct = 0.15                  # require ≥15% dip from exit price
+min_narrative_score = 60            # unused when require_narrative=false
 check_interval_seconds = 90         # re-evaluate all tracked mints every 90s
 outcome_interval_seconds = 300      # backfill +30m/+2h/+6h prices every 5m
 enqueue_lookback_seconds = 300      # scan newly-closed positions over last 5m

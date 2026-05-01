@@ -52,6 +52,15 @@ pub struct ReentryConfig {
     /// Should be ≥ 2 × check_interval_seconds.
     #[serde(default = "default_reentry_enqueue_lookback_seconds")]
     pub enqueue_lookback_seconds: u64,
+    /// Piggyback gate: only track exits whose `peak_multiplier` met this floor.
+    /// 0 = track all closed positions (legacy). 3.0 = moonbag-only.
+    #[serde(default = "default_reentry_min_peak_multiplier")]
+    pub min_peak_multiplier_to_track: f64,
+    /// When false, the narrative gate is auto-passed (dip-only piggyback).
+    /// Use this to collect post-moonbag-exit price data without burning OpenAI/X
+    /// credits on every tick.
+    #[serde(default = "default_true")]
+    pub require_narrative: bool,
 }
 
 impl Default for ReentryConfig {
@@ -65,6 +74,8 @@ impl Default for ReentryConfig {
             check_interval_seconds: default_reentry_check_interval_seconds(),
             outcome_interval_seconds: default_reentry_outcome_interval_seconds(),
             enqueue_lookback_seconds: default_reentry_enqueue_lookback_seconds(),
+            min_peak_multiplier_to_track: default_reentry_min_peak_multiplier(),
+            require_narrative: true,
         }
     }
 }
@@ -75,6 +86,7 @@ fn default_reentry_min_narrative_score() -> u8 { 60 }            // 0..100 scale
 fn default_reentry_check_interval_seconds() -> u64 { 90 }
 fn default_reentry_outcome_interval_seconds() -> u64 { 300 }     // 5m
 fn default_reentry_enqueue_lookback_seconds() -> u64 { 300 }     // 5m
+fn default_reentry_min_peak_multiplier() -> f64 { 3.0 }          // moonbag-only by default
 
 #[derive(Debug, Deserialize)]
 pub struct DetectionConfig {

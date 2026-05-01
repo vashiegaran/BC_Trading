@@ -67,6 +67,8 @@ struct ClosedPositionRow {
     exit_time: Option<DateTime<Utc>>,
     #[serde(default)]
     closed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    peak_multiplier: Option<f64>,
 }
 
 // ── Row shape for outcome backfill ───────────────────────────
@@ -247,7 +249,7 @@ async fn enqueue_new_closed(
         .to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
 
     let url = format!(
-        "{}/positions?status=eq.closed&closed_at=gte.{}&select=id,mint,symbol,name,exit_price_usd,pnl_pct,exit_reason,exit_time,closed_at&order=closed_at.desc&limit=100",
+        "{}/positions?status=eq.closed&closed_at=gte.{}&select=id,mint,symbol,name,exit_price_usd,pnl_pct,exit_reason,exit_time,closed_at,peak_multiplier&order=closed_at.desc&limit=100",
         supabase.base_url, cutoff
     );
 
@@ -282,6 +284,21 @@ async fn enqueue_new_closed(
         let pnl_pct = row.pnl_pct.unwrap_or(0.0);
         let profitable = pnl_pct >= 0.0;
 
+        // Piggyback gate: only track exits that hit the moonbag peak floor.
+        let peak = row.peak_multiplier.unwrap_or(0.0);
+        let peak_floor = cfg.strategy.reentry.min_peak_multiplier_to_track;
+        if peak_floor > 0.0 && peak < peak_floor {
+            seen_positions.insert(row.id);
+            debug!(
+                mint = %row.mint,
+                position_id = row.id,
+                peak,
+                floor = peak_floor,
+                "Re-entry watcher: skipped (peak below moonbag floor)"
+            );
+            continue;
+        }
+
         tracked.insert(
             row.mint.clone(),
             TrackedExit {
@@ -302,6 +319,7 @@ async fn enqueue_new_closed(
         info!(
             mint = %row.mint,
             position_id = row.id,
+            peak,
             exit_pnl_pct = pnl_pct,
             profitable = profitable,
             "Re-entry watcher: enqueued closed position"
@@ -344,10 +362,15 @@ async fn evaluate_candidate(
     gates.window = true; // already guarded by caller
     gates.dip = dip_pct >= cfg.strategy.reentry.min_dip_pct;
 
-    // 2. Narrative score — only if keys available and dip gate passed
-    // (skip expensive LLM call on every tick when dip isn't even there yet).
+    // 2. Narrative score — only if keys available, dip gate passed, AND
+    // require_narrative is true. When require_narrative=false (dip-only
+    // piggyback shadow), auto-pass the narrative gates so we can collect
+    // post-moonbag-exit price data without burning OpenAI/X credits per tick.
     let mut narrative_result: Option<NarrativeResult> = None;
-    if gates.dip {
+    if !cfg.strategy.reentry.require_narrative {
+        gates.narrative_available = true;
+        gates.narrative_threshold = true;
+    } else if gates.dip {
         if let (Some(openai), Some(x_bearer), Some(birdeye)) = (
             cfg.env.openai_api_key.as_deref(),
             cfg.env.x_api_bearer_token.as_deref(),
