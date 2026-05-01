@@ -9,34 +9,26 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
-## v18.6 — Max Liquidity Cap (2026-05-01)
+## v18.6 — Max Liquidity Cap (REVERTED, 2026-05-01)
 
-**strategy_version**: `v18.6-max-liq-cap`
+**Status:** Investigated and reverted. Code support kept (`max_liquidity_usd` field, default 0 = disabled), but `config.toml` keeps it off.
 
-### Why
-Audit of 280 closed positions on rahwn (research DB) showed initial liquidity is the single cleanest predictor of outcome.
+### Why reverted
+Initial 2D `bc_score × liquidity` grid suggested the 80–150 SOL one-side band was dead capital. A full-population cumulative simulation across 283 closed rahwn positions showed every candidate cap is strictly worse than no cap:
 
-| `initial_liquidity_sol` | n | avg pnl/trade | WR |
+| Cap (SOL one-side) | Kept | Total pnl | Dropped pnl |
 |---|---|---|---|
-| 30–50 | 8 | **+0.122 SOL** | 75% |
-| 50–80 | 102 | **+0.046 SOL** | 70% |
-| 80–150 | 39 | -0.005 SOL | ~50% |
-| >150 | 13 | +0.035 SOL | 54% |
+| ≤ 70 ($42k) | 97 | +4.89 | **+5.28 lost** |
+| ≤ 80 ($48k) | 146 | +5.70 | **+4.46 lost** |
+| ≤ 90 ($54k) | 270 | +9.72 | **+0.45 lost** |
+| no cap | 283 | **+10.17** | 0 |
 
-- ≥3x runners (n=44): median liq **58 SOL**, p75 71 SOL.
-- <1.3x losers (n=103): median liq **83 SOL**, p25 80 SOL.
+The 2D grid was misleading because only ~50% of positions have `bc_score`; the full 80–150 SOL band actually earned +4.5 SOL net.
 
-The 80–150 SOL band is dead capital — same hit rate as everything else but no runners. Tightening this cap preserves every confirmed winner (including the +2.75 SOL pos=17 moonbag at 85 SOL liq) while trimming the flat-to-negative tail.
-
-### Code changes
-- [src/config.rs](src/config.rs): add `max_liquidity_usd: u64` to `FiltersConfig` (default 0 = disabled).
-- [src/filters/liquidity.rs](src/filters/liquidity.rs): enforce the cap in all three liquidity-check sites (no-pool fallback, pump-AMM fallback, Raydium pool).
-- [config.toml](config.toml): set `max_liquidity_usd = 27000` (~90 SOL @ $300/SOL).
-
-### Strategy effect
-- Filters out fires with `liquidity_usd > 27_000` at launch.
-- Expected: ~14% fewer entries, ~−0.05 to −0.10 SOL of small losses removed.
-- No exit-side changes.
+### Code state
+- [src/config.rs](src/config.rs) keeps `max_liquidity_usd: u64` field (default 0 = disabled) for future experiments.
+- [src/filters/liquidity.rs](src/filters/liquidity.rs) keeps the no-op cap check (only fires when value > 0).
+- [config.toml](config.toml) sets `max_liquidity_usd = 0`. `strategy_version` reverted to `v18.5-bags-watchworthy-shadow`.
 
 ---
 

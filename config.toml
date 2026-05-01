@@ -82,13 +82,14 @@ min_liquidity_usd = 1500
 
 # Maximum USD value of liquidity at launch.
 # v18.6 (2026-05-01): rahwn audit (280 closed positions) showed 80-150 SOL
-# liquidity band averaged ~-0.05 SOL pnl/trade with 39-65% WR, while the
-# 30-80 SOL band carried the full +8 SOL upside. >=3x runners had median
-# liq 58 SOL (p75 71 SOL); <1.3x losers had median liq 83 SOL. Cap at
-# ~$27k = ~90 SOL @ $300/SOL (clears the dead-capital band, preserves
-# every confirmed runner including the +2.75 SOL pos=17 winner at 85 SOL).
+# (one-side) liquidity band averaged ~-0.05 SOL pnl/trade with 39-65% WR,
+# while the 30-80 SOL band carried the full +8 SOL upside. >=3x runners had
+# median initial_liquidity_sol 58 SOL (p75 71 SOL); <1.3x losers had median
+# 83 SOL. liquidity_usd = initial_liquidity_sol * sol_price * 2 (both pool
+# sides), so 90 SOL one-side @ $300/SOL = $54k. Cap preserves pos=17 winner
+# (85 SOL one-side, +2.75 SOL) while trimming the dead tail.
 # 0 = disabled.
-max_liquidity_usd = 27000
+max_liquidity_usd = 54000
 
 # Maximum percentage held by top 10 wallets combined
 # Phase 3: raised from 65→80. Post-buy at 66-74% were false positives;
