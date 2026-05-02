@@ -26,6 +26,7 @@ use crate::execution::jupiter::JupiterClient;
 use crate::filters::types::{FilteredToken, FilterSummary};
 use crate::logger::SupabaseClient;
 use crate::narrative::{self, NarrativeContext, NarrativeResult};
+use crate::sniper::log_pipeline_latency;
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 use tokio::sync::mpsc;
@@ -494,33 +495,80 @@ async fn evaluate_candidate(
     //
     // Hard-capped by `max_reentries_per_mint` so we never spam the same mint
     // (live `reentry_candidates` shows attempt counts up to 17 per mint).
+    //
+    // Every branch below also writes a `pipeline_latency` row tagged with a
+    // `reentry_*` outcome so the inject path is observable end-to-end.
+    // Without this, a failed try_send / shadow_mode skip / cap skip leaves
+    // no trace anywhere except a tracing log line.
     let max_per_mint = cfg.strategy.reentry.max_reentries_per_mint.max(1);
-    if !cfg.strategy.reentry.shadow_mode
-        && would_enter_permissive
-        && attempt_num <= max_per_mint
-    {
-        match build_synthetic_filtered_token(exit, current_price) {
-            Ok(ft) => match filter_tx.try_send(ft) {
-                Ok(()) => info!(
-                    mint = %exit.mint,
-                    attempt = attempt_num,
-                    cap = max_per_mint,
-                    "🔁⚡ Re-entry injected into execution pipeline"
-                ),
-                Err(e) => warn!(mint = %exit.mint, "Re-entry inject failed: {}", e),
-            },
-            Err(e) => warn!(mint = %exit.mint, "Synthetic FilteredToken build failed: {}", e),
+
+    // Helper to log a pipeline_latency row for the inject outcome.
+    let log_inject = |outcome: &str, reason: Option<String>| {
+        let mut timing = PipelineTiming::new(Utc::now().timestamp_millis());
+        timing.outcome = Some(outcome.to_string());
+        timing.rejection_stage = Some("reentry_inject".to_string());
+        timing.rejection_reason = reason;
+        let payload = timing.to_json(&exit.mint);
+        let supabase_bg = supabase.clone();
+        tokio::spawn(async move {
+            log_pipeline_latency(&supabase_bg, &payload).await;
+        });
+    };
+
+    if cfg.strategy.reentry.shadow_mode {
+        if would_enter_permissive {
+            log_inject(
+                "reentry_skipped_shadow",
+                Some(format!("attempt={}", attempt_num)),
+            );
         }
-    } else if !cfg.strategy.reentry.shadow_mode
-        && would_enter_permissive
-        && attempt_num > max_per_mint
-    {
+    } else if !would_enter_permissive {
+        log_inject(
+            "reentry_blocked_gates",
+            Some(block_reason.clone().unwrap_or_else(|| "gates_failed".to_string())),
+        );
+    } else if attempt_num > max_per_mint {
+        log_inject(
+            "reentry_skipped_cap",
+            Some(format!("attempt={} cap={}", attempt_num, max_per_mint)),
+        );
         debug!(
             mint = %exit.mint,
             attempt = attempt_num,
             cap = max_per_mint,
             "Re-entry: would enter but per-mint cap reached — skipping injection"
         );
+    } else {
+        match build_synthetic_filtered_token(exit, current_price) {
+            Ok(ft) => match filter_tx.try_send(ft) {
+                Ok(()) => {
+                    info!(
+                        mint = %exit.mint,
+                        attempt = attempt_num,
+                        cap = max_per_mint,
+                        "🔁⚡ Re-entry injected into execution pipeline"
+                    );
+                    log_inject(
+                        "reentry_injected",
+                        Some(format!("attempt={}", attempt_num)),
+                    );
+                }
+                Err(e) => {
+                    warn!(mint = %exit.mint, "Re-entry inject failed: {}", e);
+                    log_inject(
+                        "reentry_inject_failed",
+                        Some(format!("try_send: {}", e)),
+                    );
+                }
+            },
+            Err(e) => {
+                warn!(mint = %exit.mint, "Synthetic FilteredToken build failed: {}", e);
+                log_inject(
+                    "reentry_inject_failed",
+                    Some(format!("build_synthetic: {}", e)),
+                );
+            }
+        }
     }
 
     Ok(narrative_score.map(|s| s as u8))
