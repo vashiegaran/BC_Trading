@@ -198,20 +198,27 @@ impl TradingState {
     ///
     /// On trade failure, callers MUST invoke [`release_reservation`] to clear
     /// the pending marker. On success, [`record_buy`] consumes the reservation.
-    pub async fn try_reserve_for_mint(&self, mint: &str) -> bool {
+    ///
+    /// `bypass_cooldown` skips the post-exit re-buy cooldown. Intended for
+    /// re-entry watcher injections, which have their own gates (peak floor,
+    /// dip threshold, per-mint cap) that already prevent the WS-echo cases
+    /// the cooldown was added to defend against.
+    pub async fn try_reserve_for_mint(&self, mint: &str, bypass_cooldown: bool) -> bool {
         let mut inner = self.inner.write().await;
         if inner.open_mints.contains(mint) || inner.pending_mints.contains(mint) {
             return false;
         }
-        if let Some(exit_time) = inner.recently_exited.get(mint) {
-            let elapsed = exit_time.elapsed().as_secs();
-            if elapsed < Self::REBUY_COOLDOWN_SECS {
-                info!(
-                    mint = mint,
-                    cooldown_remaining = Self::REBUY_COOLDOWN_SECS - elapsed,
-                    "🕐 Re-buy cooldown active — skipping mint"
-                );
-                return false;
+        if !bypass_cooldown {
+            if let Some(exit_time) = inner.recently_exited.get(mint) {
+                let elapsed = exit_time.elapsed().as_secs();
+                if elapsed < Self::REBUY_COOLDOWN_SECS {
+                    info!(
+                        mint = mint,
+                        cooldown_remaining = Self::REBUY_COOLDOWN_SECS - elapsed,
+                        "🕐 Re-buy cooldown active — skipping mint"
+                    );
+                    return false;
+                }
             }
         }
         inner.pending_mints.insert(mint.to_string());

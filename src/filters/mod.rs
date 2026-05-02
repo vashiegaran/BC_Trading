@@ -262,6 +262,7 @@ pub fn start(
                     rugcheck_score: None,
                     filter_price_usd: None,
                     pipeline_timing: timing,
+                    is_reentry: false,
                 };
 
                 if tx.send(filtered).await.is_err() {

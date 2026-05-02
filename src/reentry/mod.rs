@@ -589,6 +589,7 @@ fn build_synthetic_filtered_token(
         // the dipped price, not chasing.
         filter_price_usd: Some(current_price_usd),
         pipeline_timing: PipelineTiming::default(),
+        is_reentry: true,
     })
 }
 

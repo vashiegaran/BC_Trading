@@ -162,7 +162,7 @@ pub fn start(
             // either had called record_buy. The reservation is consumed by
             // record_buy on success, or released on every failure path below.
             let dedup_start = Instant::now();
-            if !trading_state.try_reserve_for_mint(&mint_str).await {
+            if !trading_state.try_reserve_for_mint(&mint_str, token.is_reentry).await {
                 warn!(mint = %mint_str, "⏭️ Skipping — mint already open or reserved (dedup)");
                 timing.outcome = Some("rejected_precheck".to_string());
                 timing.rejection_stage = Some("precheck".to_string());

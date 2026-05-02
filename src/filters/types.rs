@@ -86,6 +86,11 @@ pub struct FilteredToken {
     pub filter_price_usd: Option<f64>,
     /// Accumulated pipeline timing data (carried from GraduatedToken).
     pub pipeline_timing: PipelineTiming,
+    /// True when this token was injected by the re-entry watcher (not the
+    /// detection → filter pipeline). Causes the dedup gate to bypass the
+    /// post-exit cooldown — the watcher's own peak/dip/cap gates provide the
+    /// equivalent protection. Open-position dedup still applies.
+    pub is_reentry: bool,
 }
 
 // ─── RugCheck API response types ────────────────────────────
