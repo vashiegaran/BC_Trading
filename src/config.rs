@@ -61,6 +61,11 @@ pub struct ReentryConfig {
     /// credits on every tick.
     #[serde(default = "default_true")]
     pub require_narrative: bool,
+    /// Hard cap on how many re-entry buys may be injected per origin mint within
+    /// the watch window. Subsequent qualifying ticks still log to
+    /// `reentry_candidates` but skip injection. 1 = re-enter at most once.
+    #[serde(default = "default_reentry_max_per_mint")]
+    pub max_reentries_per_mint: u16,
 }
 
 impl Default for ReentryConfig {
@@ -76,6 +81,7 @@ impl Default for ReentryConfig {
             enqueue_lookback_seconds: default_reentry_enqueue_lookback_seconds(),
             min_peak_multiplier_to_track: default_reentry_min_peak_multiplier(),
             require_narrative: true,
+            max_reentries_per_mint: default_reentry_max_per_mint(),
         }
     }
 }
@@ -87,6 +93,7 @@ fn default_reentry_check_interval_seconds() -> u64 { 90 }
 fn default_reentry_outcome_interval_seconds() -> u64 { 300 }     // 5m
 fn default_reentry_enqueue_lookback_seconds() -> u64 { 300 }     // 5m
 fn default_reentry_min_peak_multiplier() -> f64 { 3.0 }          // moonbag-only by default
+fn default_reentry_max_per_mint() -> u16 { 1 }                   // at most 1 re-entry / mint
 
 #[derive(Debug, Deserialize)]
 pub struct DetectionConfig {

@@ -9,6 +9,33 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.6-paper-reentry — Re-entry wired into paper execution (2026-05-02)
+
+**strategy_version**: `v18.6-paper-reentry`
+
+### Why
+Re-entry watcher was running pure-shadow since v18.2 (536 `reentry_candidates` rows collected, 170 `shadow_log` price tracks, post-moonbag dip patterns observed). Time to inject the same dip signal into the execution pipeline as a paper buy and measure realized PnL instead of just curves.
+
+### Changes
+- `[reentry] shadow_mode = false` in [config.toml](config.toml) — qualifying ticks now build a synthetic `FilteredToken` and push it onto `filter_tx`. With `PAPER_TRADE=true` (env), execution records it as a paper buy in `positions` (is_paper_trade=true).
+- **NEW** `[reentry] max_reentries_per_mint = 1` (cap) in [config.toml](config.toml) and [src/config.rs](src/config.rs). Live `reentry_candidates` showed up to **17 attempts on a single mint** in a 6h window — without the cap, flipping shadow_mode would have spammed paper buys. The cap gates only injection; subsequent dips still log to `reentry_candidates` for analysis.
+- Inject site updated in [src/reentry/mod.rs](src/reentry/mod.rs) — only fires when `attempt_num <= max_reentries_per_mint`. Refreshed module + config doc-comments to drop the "shadow only" claim.
+
+### Trigger conditions (effective gates)
+| Gate | Value |
+|---|---|
+| `min_peak_multiplier_to_track` | 3.0x (only track ≥3x moonbags) |
+| `window_seconds` | 21600 (6h) |
+| `min_dip_pct` | 15% below moonbag exit price |
+| `require_narrative` | false (dip-only) |
+| `max_reentries_per_mint` | 1 |
+
+### How to monitor
+- New paper positions stamped `strategy_version = v18.6-paper-reentry` and `entry_tier = reentry`.
+- Cross-reference `positions.sniper_features.reentry_origin_position_id` ↔ `reentry_candidates.position_id` to walk back to the moonbag that triggered each re-entry.
+
+---
+
 ## v18.6 — Data-Tuned Filters + Score Re-fit (2026-05-01)
 
 **strategy_version**: `v18.6-data-tuned`

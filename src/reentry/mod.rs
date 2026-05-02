@@ -1,4 +1,4 @@
-//! Re-entry shadow watcher.
+//! Re-entry watcher.
 //!
 //! Polls Supabase for newly-closed positions, tracks each closed mint for
 //! `window_seconds` after its exit, and periodically evaluates whether a
@@ -6,9 +6,10 @@
 //! `reentry_candidates`. A separate loop backfills realized-price outcomes
 //! at +30m / +2h / +6h so we can later correlate score & gates vs. PnL.
 //!
-//! SHADOW MODE: this module never places a trade. It only logs data.
-//! When config `shadow_mode=false` is eventually flipped, the execution
-//! wiring will be added here (TODO: not yet implemented).
+//! When `reentry.shadow_mode = false` AND gates pass, the watcher injects a
+//! synthetic `FilteredToken` onto `filter_tx` so the execution engine treats
+//! it like any other buy. With `PAPER_TRADE=true`, the result is a paper
+//! re-entry recorded in `positions`. Hard-capped by `max_reentries_per_mint`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -490,18 +491,36 @@ async fn evaluate_candidate(
     // When shadow_mode=false and gates pass, build a synthetic FilteredToken
     // and push it onto the filter→execution channel. With PAPER_TRADE=true
     // this becomes a paper-trade re-entry; with PAPER_TRADE=false a real one.
-    if !cfg.strategy.reentry.shadow_mode && would_enter_permissive {
+    //
+    // Hard-capped by `max_reentries_per_mint` so we never spam the same mint
+    // (live `reentry_candidates` shows attempt counts up to 17 per mint).
+    let max_per_mint = cfg.strategy.reentry.max_reentries_per_mint.max(1);
+    if !cfg.strategy.reentry.shadow_mode
+        && would_enter_permissive
+        && attempt_num <= max_per_mint
+    {
         match build_synthetic_filtered_token(exit, current_price) {
             Ok(ft) => match filter_tx.try_send(ft) {
                 Ok(()) => info!(
                     mint = %exit.mint,
                     attempt = attempt_num,
+                    cap = max_per_mint,
                     "🔁⚡ Re-entry injected into execution pipeline"
                 ),
                 Err(e) => warn!(mint = %exit.mint, "Re-entry inject failed: {}", e),
             },
             Err(e) => warn!(mint = %exit.mint, "Synthetic FilteredToken build failed: {}", e),
         }
+    } else if !cfg.strategy.reentry.shadow_mode
+        && would_enter_permissive
+        && attempt_num > max_per_mint
+    {
+        debug!(
+            mint = %exit.mint,
+            attempt = attempt_num,
+            cap = max_per_mint,
+            "Re-entry: would enter but per-mint cap reached — skipping injection"
+        );
     }
 
     Ok(narrative_score.map(|s| s as u8))

@@ -9,7 +9,7 @@
 #   filterable in analytics vs the broken v16.1 binary that was running
 #   from never-committed source. Detection: pumpfun_ws. Fast-track:
 #   2-source (on_chain_mint + goplus) so GoPlus runs PRE-buy.
-strategy_version = "v18.6-data-tuned"
+strategy_version = "v18.6-paper-reentry"
 
 # ============================================================
 # DETECTION
@@ -539,14 +539,16 @@ cto_moderate_recovery_pct = 30.0
 cto_moderate_momentum = 0.4
 
 
-# --- Re-entry shadow-mode tracking -----------------------------
-# v18.2 piggyback-shadow: track only moonbag exits (peak >= 3x), watch the mint
-# for window_seconds, log every dip-and-recovery to reentry_candidates.
-# SHADOW MODE — no trades. Goal: collect 50+ post-moonbag price tracks so we
-# can backtest whether dip re-entry has edge before flipping to live.
+# --- Re-entry (post-moonbag) ----------------------------------
+# v18.6-paper-reentry: track moonbag exits (peak ≥ 3x), watch the mint for
+# window_seconds, fire a paper-trade re-entry on the first ≥15% dip.
 [reentry]
-enabled = true                      # piggyback shadow data collection ON
-shadow_mode = true                  # NEVER place trades from this watcher
+# v18.6-paper-reentry: shadow_mode=false → re-entries injected into the
+# execution pipeline. With PAPER_TRADE=true (env), every fire becomes a
+# paper buy in `positions` (is_paper_trade=true). max_reentries_per_mint
+# caps spam — without it the same mint could fire 17+ times in a 6h window.
+enabled = true
+shadow_mode = false                 # PAPER re-entry live — buys flow via filter_tx
 require_narrative = false           # dip-only — skip OpenAI/X calls per tick
 min_peak_multiplier_to_track = 3.0  # only track 3x+ moonbags
 window_seconds = 21600              # 6h watch window after exit
@@ -555,3 +557,4 @@ min_narrative_score = 60            # unused when require_narrative=false
 check_interval_seconds = 90         # re-evaluate all tracked mints every 90s
 outcome_interval_seconds = 300      # backfill +30m/+2h/+6h prices every 5m
 enqueue_lookback_seconds = 300      # scan newly-closed positions over last 5m
+max_reentries_per_mint = 1          # hard cap: re-enter at most once per origin mint
