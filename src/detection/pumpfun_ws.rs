@@ -36,6 +36,16 @@ const DEFAULT_SOL_USD: f64 = 150.0;
 /// Pump.fun tokens launch with a fixed 1B token supply.
 const PUMPFUN_TOTAL_SUPPLY_TOKENS: f64 = 1_000_000_000.0;
 
+/// Plain first-minute flow shadow lane. These thresholds are intentionally
+/// simple and use only live Pump.fun launch/trade-flow data.
+const FLOW_SHADOW_MAX_AGE_MS: i64 = 60_000;
+const FLOW_SHADOW_MIN_BUY_COUNT: u64 = 10;
+const FLOW_SHADOW_MIN_UNIQUE_BUYERS: usize = 8;
+const FLOW_SHADOW_MIN_BUY_VOLUME_SOL: f64 = 7.0;
+const FLOW_SHADOW_MIN_LARGEST_BUY_SOL: f64 = 1.0;
+const FLOW_SHADOW_MIN_BUY_PRESSURE_PCT: f64 = 70.0;
+const FLOW_SHADOW_MIN_SCORE: f64 = 60.0;
+
 /// Window used to detect repeated same-label mints arriving close together.
 const RECENT_LABEL_WINDOW_MS: i64 = 6 * 60 * 60 * 1_000;
 
@@ -686,6 +696,7 @@ async fn handle_new_token(
         graduation_recorded: false,
         control_recorded: false,
         launch_label_shadow_recorded: false,
+        first_minute_flow_shadow_recorded: false,
         label_flow_shadow_recorded: false,
         probe_add_probe_recorded: false,
         probe_add_add_recorded: false,
@@ -833,6 +844,12 @@ async fn handle_token_trade(
         }
     }
 
+    maybe_fire_first_minute_flow_shadow(entry, mint_str, supabase, cfg, now);
+
+    if cfg.strategy.entry_skeleton_mode {
+        return Ok(());
+    }
+
     // ── Check if we should record a bonding curve signal row ──
     if cfg.strategy.detection.bonding_curve_signals_enabled
         && !entry.signal_recorded
@@ -940,6 +957,174 @@ async fn handle_token_trade(
     Ok(())
 }
 
+// ─── Plain first-minute flow shadow lane ─────────────────────────────
+
+fn maybe_fire_first_minute_flow_shadow(
+    entry: &mut WatchlistEntry,
+    mint_str: &str,
+    supabase: &Arc<SupabaseClient>,
+    cfg: &Arc<AppConfig>,
+    now_ms: i64,
+) {
+    if !cfg.strategy.detection.first_minute_flow_shadow_enabled
+        || entry.first_minute_flow_shadow_recorded
+    {
+        return;
+    }
+
+    let token_age_ms = now_ms.saturating_sub(entry.detected_at);
+    if token_age_ms > FLOW_SHADOW_MAX_AGE_MS {
+        return;
+    }
+
+    let mut buy_volume_sol = 0.0;
+    let mut sell_volume_sol = 0.0;
+    let mut largest_buy_sol = 0.0;
+    for &(_, sol, is_buy, _) in &entry.trade_log {
+        if is_buy {
+            buy_volume_sol += sol;
+            if sol > largest_buy_sol {
+                largest_buy_sol = sol;
+            }
+        } else {
+            sell_volume_sol += sol;
+        }
+    }
+
+    let buy_pressure_pct = entry.buy_pressure_pct();
+    let unique_buyers = entry.unique_buyers.len();
+
+    if entry.buy_count < FLOW_SHADOW_MIN_BUY_COUNT
+        || unique_buyers < FLOW_SHADOW_MIN_UNIQUE_BUYERS
+        || buy_volume_sol < FLOW_SHADOW_MIN_BUY_VOLUME_SOL
+        || largest_buy_sol < FLOW_SHADOW_MIN_LARGEST_BUY_SOL
+        || buy_pressure_pct < FLOW_SHADOW_MIN_BUY_PRESSURE_PCT
+    {
+        return;
+    }
+
+    let flow_score = score_first_minute_flow(
+        token_age_ms,
+        entry.buy_count,
+        entry.sell_count,
+        unique_buyers,
+        buy_volume_sol,
+        largest_buy_sol,
+        buy_pressure_pct,
+    );
+    if flow_score < FLOW_SHADOW_MIN_SCORE {
+        return;
+    }
+
+    entry.first_minute_flow_shadow_recorded = true;
+
+    let bc_progress_pct = if entry.last_v_sol_reserves > 0.0 {
+        Some((((entry.last_v_sol_reserves - 30.0) / 85.0) * 100.0).clamp(0.0, 100.0))
+    } else {
+        None
+    };
+    let signal_at = chrono::Utc::now();
+    let detected_at = (signal_at - chrono::Duration::milliseconds(token_age_ms)).to_rfc3339();
+    let strategy_version = cfg
+        .strategy
+        .strategy_version
+        .clone()
+        .unwrap_or_else(|| "entry-skeleton".to_string());
+
+    let payload = serde_json::json!({
+        "mint": mint_str,
+        "name": entry.name,
+        "symbol": entry.symbol,
+        "creator_wallet": entry.creator_wallet.to_string(),
+        "detected_at": detected_at,
+        "signal_at": signal_at.to_rfc3339(),
+        "token_age_ms": token_age_ms,
+        "buy_count": entry.buy_count as i64,
+        "sell_count": entry.sell_count as i64,
+        "unique_buyers": unique_buyers as i64,
+        "buy_volume_sol": buy_volume_sol,
+        "sell_volume_sol": sell_volume_sol,
+        "total_volume_sol": buy_volume_sol + sell_volume_sol,
+        "largest_buy_sol": largest_buy_sol,
+        "buy_pressure_pct": buy_pressure_pct,
+        "bc_progress_pct": bc_progress_pct,
+        "virtual_sol_reserves": entry.last_v_sol_reserves,
+        "virtual_token_reserves": entry.last_v_token_reserves,
+        "market_cap_sol": entry.last_market_cap_sol,
+        "flow_score": flow_score,
+        "trigger_reason": "first_minute_flow_v1",
+        "strategy_version": strategy_version,
+        "is_shadow": true,
+    });
+
+    info!(
+        mint = %mint_str,
+        age_ms = token_age_ms,
+        buy_count = entry.buy_count,
+        sell_count = entry.sell_count,
+        unique_buyers,
+        buy_volume_sol = format!("{:.3}", buy_volume_sol),
+        largest_buy_sol = format!("{:.3}", largest_buy_sol),
+        score = format!("{:.1}", flow_score),
+        "🧩 First-minute flow shadow candidate"
+    );
+
+    let supabase_c = Arc::clone(supabase);
+    let mint_for_log = mint_str.to_string();
+    tokio::spawn(async move {
+        write_first_minute_flow_shadow(&supabase_c, &mint_for_log, &payload).await;
+    });
+}
+
+fn score_first_minute_flow(
+    token_age_ms: i64,
+    buy_count: u64,
+    sell_count: u64,
+    unique_buyers: usize,
+    buy_volume_sol: f64,
+    largest_buy_sol: f64,
+    buy_pressure_pct: f64,
+) -> f64 {
+    let age_secs = token_age_ms as f64 / 1_000.0;
+    let mut score: f64 = 0.0;
+
+    score += if age_secs <= 10.0 { 25.0 } else if age_secs <= 20.0 { 20.0 } else if age_secs <= 45.0 { 12.0 } else { 5.0 };
+    score += if buy_count >= 40 { 20.0 } else if buy_count >= 25 { 15.0 } else if buy_count >= 15 { 10.0 } else { 5.0 };
+    score += if unique_buyers >= 25 { 20.0 } else if unique_buyers >= 15 { 15.0 } else if unique_buyers >= 10 { 10.0 } else { 5.0 };
+    score += if buy_volume_sol >= 25.0 { 20.0 } else if buy_volume_sol >= 15.0 { 15.0 } else if buy_volume_sol >= 10.0 { 10.0 } else { 5.0 };
+    score += if largest_buy_sol >= 3.0 { 10.0 } else if largest_buy_sol >= 1.5 { 7.0 } else { 4.0 };
+    score += if buy_pressure_pct >= 90.0 { 8.0 } else if buy_pressure_pct >= 80.0 { 5.0 } else { 2.0 };
+
+    if sell_count == 0 {
+        score += 5.0;
+    } else if sell_count * 4 <= buy_count {
+        score += 2.0;
+    }
+
+    score.min(100.0)
+}
+
+async fn write_first_minute_flow_shadow(
+    supabase: &SupabaseClient,
+    mint: &str,
+    payload: &serde_json::Value,
+) {
+    let url = format!("{}/first_minute_flow_shadow", supabase.base_url);
+    match supabase.client.post(&url).json(payload).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            info!(mint = %mint, "First-minute flow shadow row written");
+        }
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            warn!(mint = %mint, http_status = %status, "first_minute_flow_shadow INSERT failed: {}", body);
+        }
+        Err(e) => {
+            warn!(mint = %mint, "first_minute_flow_shadow INSERT error: {}", e);
+        }
+    }
+}
+
 /// Fire one v14 paper-trade lane: compute score, build signal payload, INSERT
 /// to bc_paper_trades, and optionally run a GoPlus check that PATCHes
 /// entry_api_checks. Spawned to avoid blocking the WS event loop.
@@ -952,6 +1137,11 @@ fn fire_bc_lane(
     run_goplus: bool,
     bc_progress_pct: f64,
 ) {
+    if cfg.strategy.entry_skeleton_mode {
+        debug!(mint = %mint_str, lane = lane, "Entry skeleton mode — BC paper-entry lane disabled");
+        return;
+    }
+
     let whale_buy = entry.trade_log.iter().any(|&(_, sol, is_buy, _)| is_buy && sol >= 3.0);
     let cr = entry.trade_log.iter().any(|&(_, _, is_buy, wallet)| {
         is_buy && wallet == entry.creator_wallet
@@ -1117,6 +1307,15 @@ async fn handle_token_complete(
         .get("mint")
         .and_then(|m| m.as_str())
         .ok_or_else(|| anyhow::anyhow!("tokenComplete: missing 'mint' field"))?;
+
+    if cfg.strategy.entry_skeleton_mode {
+        watchlist.remove(mint_str);
+        debug!(
+            mint = %mint_str,
+            "Entry skeleton mode — ignoring graduation event; no pool lookup, historical fetch, or downstream signal"
+        );
+        return Ok(());
+    }
 
     // Pool address from the graduation payload — try several field names.
     let mut pool_address: Option<Pubkey> = ["pool", "poolAddress", "pool_address"]
@@ -1354,7 +1553,9 @@ async fn handle_token_complete(
     //   - graduation_goplus  : GoPlus check PATCHed onto entry_api_checks
     // Plus retroactive fires for any progress band the token skipped past
     // between WS events (rare, but keeps the buckets comparable).
-    if let Some(entry) = watchlist.get_mut(mint_str) {
+    if cfg.strategy.entry_skeleton_mode {
+        debug!(mint = %mint_str, "Entry skeleton mode — graduation paper-entry lanes disabled");
+    } else if let Some(entry) = watchlist.get_mut(mint_str) {
         let bc_progress_pct = if entry.last_v_sol_reserves > 0.0 {
             (((entry.last_v_sol_reserves - 30.0) / 85.0) * 100.0).clamp(0.0, 100.0)
         } else {

@@ -278,6 +278,9 @@ pub struct WatchlistEntry {
     /// Whether the mint-time same-label launch shadow lane row has already
     /// been written.
     pub launch_label_shadow_recorded: bool,
+    /// Whether the plain first-minute flow shadow lane row has already been
+    /// written. This is observe-only and never enters trades.
+    pub first_minute_flow_shadow_recorded: bool,
     /// Whether the repeated-label shadow lane row has already been written.
     pub label_flow_shadow_recorded: bool,
     /// Whether the probe stage of the probe-add shadow ladder has been written.

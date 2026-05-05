@@ -9,7 +9,11 @@
 #   filterable in analytics vs the broken v16.1 binary that was running
 #   from never-committed source. Detection: pumpfun_ws. Fast-track:
 #   2-source (on_chain_mint + goplus) so GoPlus runs PRE-buy.
-strategy_version = "v18.6-paper-reentry"
+strategy_version = "entry-skeleton"
+
+# Temporary redesign mode: keep data-source skeletons online, but do not run
+# old sniper/filter/execution or old bonding-curve paper-entry lanes.
+entry_skeleton_mode = true
 
 # ============================================================
 # DETECTION
@@ -27,13 +31,18 @@ poll_interval_seconds = 5
 # ── Bonding curve signal recording (data collection only, no trading) ──
 # Records trade patterns for tokens approaching graduation (~60%+ progress).
 # Data goes to `bonding_curve_signals` Supabase table for backtesting.
-bonding_curve_signals_enabled = true
+bonding_curve_signals_enabled = false
 bc_signal_volume_threshold = 30.0  # SOL — record when cumulative volume hits this
+
+# ── New plain on-chain shadow lane ──
+# First-minute Pump.fun flow detector. Uses only live launch/trade flow data;
+# no Twitter, Telegram, DexScreener, Birdeye, GoPlus, or paid APIs.
+first_minute_flow_shadow_enabled = true
 
 # ── Wallet-research shadow lanes (observe-only, never trade live) ──
 # label_flow_shadow: repeated same-label mint cluster seen shortly before this
 # token plus healthy curve flow.
-label_flow_shadow_enabled = true
+label_flow_shadow_enabled = false
 label_flow_shadow_min_progress_pct = 30.0
 label_flow_shadow_min_prior_mints = 1
 label_flow_shadow_max_gap_seconds = 1800
@@ -41,7 +50,7 @@ label_flow_shadow_max_gap_seconds = 1800
 # probe_add_shadow: shadow-only ladder model. Record a would-be probe once
 # the curve is strong, then a would-be add only if the same mint keeps
 # strengthening.
-probe_add_shadow_enabled = true
+probe_add_shadow_enabled = false
 probe_add_probe_progress_pct = 60.0
 probe_add_add_progress_pct = 75.0
 probe_add_min_unique_buyer_delta = 10
@@ -163,7 +172,7 @@ max_bc_sell_count = 40
 # Tokens with strong bonding curve scores skip full 2s enrichment and buy
 # with only mint+GoPlus safety checks (~250ms). Deferred verification runs
 # post-buy and triggers emergency exit if critical filters fail.
-bc_fast_track_enabled = true
+bc_fast_track_enabled = false
 # v18.6 retune: bc_score formula re-fit against >=3x outcomes. New score has
 # AUC=0.59 (was 0.53). Distribution is tighter, so the gate threshold drops
 # from 65 → 50 to keep similar pass-rate; 76% of BC-eligible tokens still
@@ -438,15 +447,15 @@ stale_position_timeout_secs = 1200
 # serve cached prices instead of polling Jupiter for every monitor tick.
 # Falls back to Jupiter automatically for graduated / Raydium tokens.
 # Set false to revert to v5 polling-only behavior without recompiling.
-enable_helius_price_ws = true
+enable_helius_price_ws = false
 
 # ── Enrichment sampler (passive data collection for v6) ──
 # Writes JSONB snapshots to `position_enrichment_snapshots` on schedule
 # (30s/2m/5m/10m/20m/30m/60m) plus pre_dip_death events. Pure logging.
-enrichment_sampler_enabled = true
+enrichment_sampler_enabled = false
 # Tier 3: at T+1h post-exit, check if token pumped ≥3× entry and log the
 # enrichment snapshot so we can quantify missed moonbags.
-enrichment_post_exit_check_enabled = true
+enrichment_post_exit_check_enabled = false
 
 # ── Narrative moonbag system ──
 # Enable OpenAI-powered narrative detection for moonbag promotion.
@@ -547,8 +556,8 @@ cto_moderate_momentum = 0.4
 # execution pipeline. With PAPER_TRADE=true (env), every fire becomes a
 # paper buy in `positions` (is_paper_trade=true). max_reentries_per_mint
 # caps spam — without it the same mint could fire 17+ times in a 6h window.
-enabled = true
-shadow_mode = false                 # PAPER re-entry live — buys flow via filter_tx
+enabled = false
+shadow_mode = true                  # disabled during first-minute flow shadow pivot
 require_narrative = false           # dip-only — skip OpenAI/X calls per tick
 min_peak_multiplier_to_track = 3.0  # only track 3x+ moonbags
 window_seconds = 21600              # 6h watch window after exit

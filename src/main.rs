@@ -13,7 +13,7 @@ mod sniper;
 /// Falls back to a manual marker so you can always tell which build you're running.
 macro_rules! compile_time_stamp {
     () => {
-        "2026-03-16-v7 | dynamicSlippage_range, strip_quoteBps, dynamicCU"
+        "2026-05-04-entry-skeleton | old entry pipeline disabled"
     };
 }
 
@@ -22,12 +22,11 @@ use execution::types::PositionOpened;
 use execution::wallet::BotWallet;
 use logger::SupabaseClient;
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_sdk::native_token::lamports_to_sol;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 /// Global shutdown flag — set by Ctrl+C handler.
@@ -179,18 +178,17 @@ async fn main() {
 
     info!("Config loaded successfully");
 
-    // ── 3. Load wallet (SAFETY Rule 1: never log private key) ──
-    let wallet = BotWallet::from_env(&cfg.env.wallet_private_key)
-        .expect("Failed to load wallet from WALLET_PRIVATE_KEY");
-    let pubkey = wallet.pubkey();
-    let wallet = Arc::new(wallet);
+    // ── 3. Shadow runtime identity ───────────────────────
+    // First-minute flow shadow mode does not need a trading wallet or private
+    // key. Keep a process lock so duplicate shadow collectors do not double-log.
+    let runtime_id = "entry-skeleton-flow-shadow";
 
-    // ── 3b. Single-instance lock (per-wallet) ──────────────
+    // ── 3b. Single-instance lock (per-runtime) ────────────
     // MUST come before any Supabase writes / state hydration so we don't
     // double-write startup events or compete with another instance for
     // the same TradingState. The lock is held for the entire process
     // lifetime via this binding; do NOT drop it.
-    let _instance_lock = acquire_single_instance_lock(&pubkey.to_string());
+    let _instance_lock = acquire_single_instance_lock(runtime_id);
 
     // Build version compiled into the binary at compile time
     const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -198,7 +196,7 @@ async fn main() {
 
     println!("═══════════════════════════════════════════════════");
     println!("  Build version  : {} (built {})", BUILD_VERSION, BUILD_TIMESTAMP);
-    println!("  Wallet address : {}", pubkey);
+    println!("  Runtime        : {}", runtime_id);
     println!("  Paper trade    : {}", cfg.env.paper_trade);
     println!("  Network        : {}", cfg.env.solana_network);
 
@@ -211,16 +209,15 @@ async fn main() {
 
     info!("Supabase client initialized");
 
-    // ── 4b. Auto-cleanup stale records ──────────────────
-    cleanup_old_records(&supabase).await;
-    info!("Startup cleanup complete");
+    // ── 4b. Auto-cleanup disabled in shadow-only mode ─────
+    info!("Startup cleanup disabled — first-minute flow shadow only");
 
     // ── 5. Log startup event to Supabase system_events ──
     let startup_payload = serde_json::json!({
         "event_type": "startup",
         "message": format!(
-            "Bot started. Build: {}. Wallet: {}. Network: {}. Paper trade: {}.",
-            BUILD_TIMESTAMP, pubkey, cfg.env.solana_network, cfg.env.paper_trade
+            "Bot started in ENTRY SKELETON mode. Build: {}. Runtime: {}. Network: {}. Paper trade: {}.",
+            BUILD_TIMESTAMP, runtime_id, cfg.env.solana_network, cfg.env.paper_trade
         ),
     });
 
@@ -242,150 +239,31 @@ async fn main() {
         }
     }
 
-    // ── 6. Check wallet SOL balance via RPC ─────────────
-    let rpc = RpcClient::new(cfg.env.solana_rpc_url.clone());
-    let mut startup_balance_sol: Option<f64> = None;
-
-    match rpc.get_balance(&pubkey).await {
-        Ok(lamports) => {
-            let sol = lamports_to_sol(lamports);
-            startup_balance_sol = Some(sol);
-            println!("  SOL balance    : {:.4} SOL", sol);
-            info!("Wallet SOL balance: {:.4} SOL", sol);
-
-            if sol < cfg.strategy.risk.min_sol_balance {
-                if cfg.env.paper_trade {
-                    warn!(
-                        "⚠️ SOL balance ({:.4}) is below min_sol_balance ({:.4}) — continuing in paper mode",
-                        sol, cfg.strategy.risk.min_sol_balance
-                    );
-                } else {
-                    panic!(
-                        "REFUSING TO START: SOL balance ({:.4}) is below min_sol_balance ({:.4}). \
-                         Top up the wallet before running in live mode.",
-                        sol, cfg.strategy.risk.min_sol_balance
-                    );
-                }
-            }
-        }
-        Err(e) => {
-            error!("Failed to fetch SOL balance from RPC: {}", e);
-            println!("  SOL balance    : ERROR — {}", e);
-        }
-    }
-
-    // Log startup balance to Supabase system_events
-    if let Some(bal) = startup_balance_sol {
-        let balance_payload = serde_json::json!({
-            "event_type": "startup_balance",
-            "message": format!("Starting SOL balance: {:.4}", bal),
-        });
-        let balance_url = format!("{}/system_events", supabase.base_url);
-        let _ = supabase.client.post(&balance_url).json(&balance_payload).send().await;
-    }
+    // ── 6. Wallet/balance checks disabled ────────────────
+    // This process does not trade, so it does not need wallet loading or SOL
+    // balance checks.
+    info!("Wallet loading and SOL balance checks disabled — shadow-only runtime");
 
     println!("═══════════════════════════════════════════════════");
 
     let cfg_arc = Arc::new(cfg);
     let supabase_arc = Arc::new(supabase);
 
-    // ── 6b. Initialize in-memory trading state ──────────
-    let trading_state = execution::state::TradingState::new();
-    trading_state.hydrate_from_supabase(&supabase_arc, cfg_arc.env.paper_trade).await;
-
-    // ── 6c. Recover rejected-token trackers interrupted by restart ──
-    sniper::tracker::recover_pending_trackers(Arc::clone(&supabase_arc)).await;
-
     // ── 7. Start detection engine ───────────────────────
-    let (detection_rx, bc_cache) = detection::start(Arc::clone(&cfg_arc), Arc::clone(&supabase_arc));
+    let (detection_rx, _bc_cache) = detection::start(Arc::clone(&cfg_arc), Arc::clone(&supabase_arc));
     info!("Detection engine started — listening for new tokens");
 
-    // ── 7a. Start Bags launch monitor (research only) ──
-    monitoring::bags::start(Arc::clone(&cfg_arc), Arc::clone(&supabase_arc));
+    // ── 7a. External research monitors disabled ─────────
+    // New pivot is plain on-chain/Pump.fun trade-flow shadow only: no Bags,
+    // DexScreener, Birdeye, GoPlus, Twitter, Telegram, or news APIs.
+    info!("External research monitors disabled — running plain flow shadow only");
 
-    // ── 7b. Start sniper enrichment pipeline ────────────
-    let enriched_rx = sniper::start(
-        Arc::clone(&cfg_arc),
-        detection_rx,
-        Arc::clone(&supabase_arc),
-        bc_cache,
-    );
-    info!("Sniper enrichment pipeline started — enriching & hard-filtering tokens");
-
-    // ── 8. Start filter engine ──────────────────────────
-    let (filter_tx, filter_rx) = filters::start(
-        Arc::clone(&cfg_arc),
-        enriched_rx,
-        Arc::clone(&supabase_arc),
-        Arc::clone(&wallet),
-    );
-    info!("Filter engine started — screening graduated tokens");
-
-    // ── 9. Start execution engine ───────────────────────
-    let (position_rx, alert_rx) = execution::start(
-        Arc::clone(&cfg_arc),
-        filter_rx,
-        Arc::clone(&supabase_arc),
-        Arc::clone(&wallet),
-        Arc::clone(&trading_state),
-    );
-    info!("Execution engine started — {} mode",
-        if cfg_arc.env.paper_trade { "PAPER" } else { "LIVE" }
-    );
-
-    // ── 10. Start moonbag tracker ──────────────────────
-    let (moonbag_tx, moonbag_rx) = mpsc::channel::<monitoring::moonbag::MoonbagCommand>(50);
-
-    // ── 10b. Start monitoring engine ─────────────────
-    let (exit_rx, confirm_tx, recovery_tx, exit_tx_for_moonbag) = monitoring::start(
-        Arc::clone(&cfg_arc),
-        position_rx,
-        Arc::clone(&supabase_arc),
-        Arc::clone(&trading_state),
-        alert_rx,
-        moonbag_tx.clone(),
-    );
-    info!("Monitoring engine started — watching open positions");
-
-    // ── 10c. Spawn moonbag tracker task ──────────────
-    {
-        let mb_cfg = Arc::clone(&cfg_arc);
-        let mb_supa = Arc::clone(&supabase_arc);
-        tokio::spawn(async move {
-            monitoring::moonbag::run_moonbag_tracker(
-                moonbag_rx,
-                exit_tx_for_moonbag,
-                mb_cfg,
-                mb_supa,
-            ).await;
-        });
-        info!("Moonbag tracker started — {} max concurrent",
-            cfg_arc.strategy.monitoring.moonbag_max_concurrent
-        );
-    }
-
-    // ── 11. Start exit engine ───────────────────────────
-    exit::start(
-        Arc::clone(&cfg_arc),
-        exit_rx,
-        Arc::clone(&supabase_arc),
-        Arc::clone(&wallet),
-        confirm_tx,
-        Arc::clone(&trading_state),
-    );
-    info!("Exit engine started — ready to process exit signals");
-
-    // ── 11a. Start re-entry shadow watcher (post-moonbag exit) ──
-    reentry::start(Arc::clone(&cfg_arc), Arc::clone(&supabase_arc), filter_tx.clone());
-
-    // ── 11b. Recover stuck positions from previous runs ─
-    recover_stuck_positions(
-        &cfg_arc,
-        &supabase_arc,
-        &wallet,
-        &recovery_tx,
-    )
-    .await;
+    // ── 7b. Entry skeleton ─────────────────────────────
+    // Old entry stack intentionally disabled while the new entry design is
+    // discussed: sniper enrichment, filters, execution, monitoring, exits,
+    // re-entry, and stuck-position recovery are not started from main.
+    start_entry_skeleton(detection_rx);
+    info!("Entry skeleton active — old entry/trading engines are disabled");
 
     // ── 12. Register Ctrl+C handler (SAFETY Rule 8) ─────
     let shutdown_supabase = Arc::clone(&supabase_arc);
@@ -400,10 +278,9 @@ async fn main() {
         // Log shutdown event to Supabase
         log_shutdown_event(&shutdown_supabase).await;
 
-        // Give monitoring tasks time to fire exit signals for open positions
-        // before the process exits. 10s is enough for paper; increase for live
-        // if positions need time to send real transactions.
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        // Entry skeleton has no trading/exits to flush; keep a short grace
+        // period for research/logging tasks to finish their current write.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
         info!("Shutdown complete. Goodbye!");
         std::process::exit(0);
@@ -411,7 +288,7 @@ async fn main() {
 
     // ── 13. Keep main alive ─────────────────────────────
     // The bot runs until Ctrl+C or all channels close.
-    info!("🚀 All engines running. Press Ctrl+C to shut down.");
+    info!("🚀 Research engines + entry skeleton running. Press Ctrl+C to shut down.");
 
     // Park the main task — engines run in their own spawned tasks.
     // We use a sleep loop so that the Ctrl+C handler can do
@@ -422,6 +299,31 @@ async fn main() {
             break;
         }
     }
+}
+
+// ─── Entry skeleton ────────────────────────────────────────
+
+/// Drain detection events without starting the old entry pipeline.
+///
+/// This keeps Pump.fun detection/research channels healthy while guaranteeing
+/// no sniper, filter, execution, monitoring, exit, or re-entry logic can place
+/// paper/live trades from this process.
+fn start_entry_skeleton(mut detection_rx: mpsc::Receiver<detection::types::GraduatedToken>) {
+    tokio::spawn(async move {
+        info!("Entry skeleton started — draining graduated tokens only");
+
+        while let Some(token) = detection_rx.recv().await {
+            info!(
+                mint = %token.mint,
+                symbol = %token.symbol,
+                name = %token.name,
+                source = ?token.source,
+                "🧩 Entry skeleton observed token — no entry action taken"
+            );
+        }
+
+        warn!("Entry skeleton channel closed");
+    });
 }
 
 // ─── Startup recovery for stuck positions ────────────────────

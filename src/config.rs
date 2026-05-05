@@ -10,6 +10,10 @@ pub struct TomlConfig {
     /// Strategy version tag stamped into every position row (e.g. "v1").
     #[serde(default)]
     pub strategy_version: Option<String>,
+    /// Temporary redesign mode: keep source skeletons online while disabling
+    /// old entry, paper-entry, execution, exit, and re-entry paths.
+    #[serde(default)]
+    pub entry_skeleton_mode: bool,
     pub detection: DetectionConfig,
     pub filters: FiltersConfig,
     pub execution: ExecutionConfig,
@@ -107,6 +111,10 @@ pub struct DetectionConfig {
     /// ~50 SOL ≈ 60% to graduation, filters out 95% of dead tokens.
     #[serde(default = "default_bc_signal_volume_threshold")]
     pub bc_signal_volume_threshold: f64,
+    /// Observe-only first-minute Pump.fun flow detector. Uses only launch/trade
+    /// flow data and writes to `first_minute_flow_shadow`.
+    #[serde(default)]
+    pub first_minute_flow_shadow_enabled: bool,
     /// Shadow-only lane: record a would-be mint-time entry when a brand-new
     /// token arrives into a very recent same-label cluster.
     #[serde(default)]
@@ -832,7 +840,11 @@ impl AppConfig {
         let solana_rpc_url = require_env("SOLANA_RPC_URL");
         let solana_ws_url = require_env("SOLANA_WS_URL");
         let solana_rpc_backup_url = require_env("SOLANA_RPC_BACKUP_URL");
-        let wallet_private_key = require_env("WALLET_PRIVATE_KEY");
+        let wallet_private_key = if strategy.entry_skeleton_mode {
+            optional_env("WALLET_PRIVATE_KEY").unwrap_or_default()
+        } else {
+            require_env("WALLET_PRIVATE_KEY")
+        };
         let supabase_url = require_env("SUPABASE_URL");
         let supabase_service_key = require_env("SUPABASE_SERVICE_KEY");
         let detection_method = require_env("DETECTION_METHOD");
