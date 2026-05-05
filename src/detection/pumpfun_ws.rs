@@ -442,6 +442,70 @@ async fn connect_and_listen(tx: &mpsc::Sender<GraduatedToken>, supabase: &Arc<Su
         debug!("PumpFun WS writer task exiting");
     });
 
+    // ── Wallet-graph parent-account-trade reconciliation ────────────
+    // Periodically diff the proven-parent roster against our current set of
+    // `subscribeAccountTrade` keys and (un)subscribe deltas. This catches
+    // every parent buy/sell regardless of mint freshness, even on mints that
+    // were created before the bot started or have already been pruned from
+    // the local watchlist.
+    {
+        let ws_write_tx_for_acct = ws_write_tx.clone();
+        tokio::spawn(async move {
+            let mut subscribed: std::collections::HashSet<String> = std::collections::HashSet::new();
+            // Small initial delay so the wallet-graph monitor has a chance to
+            // load its first roster before we ask for it.
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            loop {
+                let active: std::collections::HashSet<String> =
+                    crate::monitoring::wallet_graph::active_parent_wallets()
+                        .await
+                        .into_iter()
+                        .collect();
+
+                let to_add: Vec<String> = active.difference(&subscribed).cloned().collect();
+                let to_remove: Vec<String> = subscribed.difference(&active).cloned().collect();
+
+                if !to_add.is_empty() {
+                    let keys_json = serde_json::to_string(&to_add).unwrap_or_else(|_| "[]".into());
+                    let payload = format!(
+                        r#"{{"method":"subscribeAccountTrade","keys":{}}}"#,
+                        keys_json
+                    );
+                    if ws_write_tx_for_acct
+                        .send(Message::Text(payload))
+                        .await
+                        .is_err()
+                    {
+                        debug!("WS writer channel closed; exiting parent-account-trade reconciler");
+                        return;
+                    }
+                    info!(added = to_add.len(), "Subscribed to proven-parent account trades");
+                }
+
+                if !to_remove.is_empty() {
+                    let keys_json =
+                        serde_json::to_string(&to_remove).unwrap_or_else(|_| "[]".into());
+                    let payload = format!(
+                        r#"{{"method":"unsubscribeAccountTrade","keys":{}}}"#,
+                        keys_json
+                    );
+                    if ws_write_tx_for_acct
+                        .send(Message::Text(payload))
+                        .await
+                        .is_err()
+                    {
+                        debug!("WS writer channel closed; exiting parent-account-trade reconciler");
+                        return;
+                    }
+                    info!(removed = to_remove.len(), "Unsubscribed from proven-parent account trades");
+                }
+
+                subscribed = active;
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            }
+        });
+    }
+
     // In-memory watchlist: mint (base58 string) → WatchlistEntry.
     // Populated by newToken, enriched by tokenTrade, consumed by tokenComplete.
     let mut watchlist: HashMap<String, WatchlistEntry> = HashMap::new();
@@ -786,7 +850,12 @@ async fn handle_token_trade(
     let entry = match watchlist.get_mut(mint_str) {
         Some(e) => e,
         None => {
-            debug!(mint = mint_str, "tokenTrade for unknown mint — skipping");
+            // Not in our watchlist (mint pre-dates this bot session, or was
+            // pruned). We still want to record wallet-graph observations from
+            // `subscribeAccountTrade` events on proven parents — derive the
+            // minimal context directly from the WS payload and dispatch it.
+            observe_external_trade_for_wallet_graph(v).await;
+            debug!(mint = mint_str, "tokenTrade for unknown mint — skipping local enrichment");
             return Ok(());
         }
     };
@@ -1020,6 +1089,86 @@ async fn handle_token_trade(
     }
 
     Ok(())
+}
+
+// ─── Wallet-graph fallthrough for un-watched mints ───────────────────────────
+
+/// Dispatch `observe_pumpfun_trade` for trade events whose mint is not in the
+/// local watchlist (typically arriving via `subscribeAccountTrade` on proven
+/// parent wallets). Reserve / volume fields are taken from the WS payload;
+/// per-mint flow aggregates that depend on a `WatchlistEntry` (buy_count,
+/// unique_buyers, etc.) are reported as zero / unknown.
+async fn observe_external_trade_for_wallet_graph(v: &serde_json::Value) {
+    let Some(mint) = v.get("mint").and_then(|m| m.as_str()) else {
+        return;
+    };
+    let Some(trader) = v.get("traderPublicKey").and_then(|t| t.as_str()) else {
+        return;
+    };
+    if Pubkey::from_str(trader).is_err() {
+        return;
+    }
+
+    let tx_type = v.get("txType").and_then(|t| t.as_str()).unwrap_or("");
+    let is_buy = match tx_type {
+        "buy" => true,
+        "sell" => false,
+        _ => return,
+    };
+
+    let sol_amount = v.get("solAmount").and_then(|a| a.as_f64()).unwrap_or(0.0);
+    let v_sol = v
+        .get("vSolInBondingCurve")
+        .and_then(|x| x.as_f64())
+        .unwrap_or(0.0);
+    let v_tok = v
+        .get("vTokensInBondingCurve")
+        .and_then(|x| x.as_f64())
+        .unwrap_or(0.0);
+    let market_cap = v
+        .get("marketCapSol")
+        .and_then(|x| x.as_f64())
+        .unwrap_or(0.0);
+    let bc_progress_pct = if v_sol > 0.0 {
+        Some((((v_sol - 30.0) / 85.0) * 100.0).clamp(0.0, 100.0))
+    } else {
+        None
+    };
+
+    let name = v
+        .get("name")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let symbol = v
+        .get("symbol")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string();
+
+    crate::monitoring::wallet_graph::observe_pumpfun_trade(
+        crate::monitoring::wallet_graph::PumpfunTradeContext {
+            mint: mint.to_string(),
+            trader_wallet: trader.to_string(),
+            name,
+            symbol,
+            token_age_ms: 0,
+            is_buy,
+            amount_sol: sol_amount,
+            buy_count: 0,
+            sell_count: 0,
+            unique_buyers: 0,
+            buy_volume_sol: if is_buy { sol_amount } else { 0.0 },
+            sell_volume_sol: if is_buy { 0.0 } else { sol_amount },
+            largest_buy_sol: if is_buy { sol_amount } else { 0.0 },
+            buy_pressure_pct: 0.0,
+            bc_progress_pct,
+            virtual_sol_reserves: v_sol,
+            virtual_token_reserves: v_tok,
+            market_cap_sol: market_cap,
+        },
+    )
+    .await;
 }
 
 // ─── Plain first-minute flow shadow lane ─────────────────────────────

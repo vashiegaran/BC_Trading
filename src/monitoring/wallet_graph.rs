@@ -205,6 +205,20 @@ pub fn start(cfg: Arc<AppConfig>, supabase: Arc<SupabaseClient>) {
     info!("Proven-wallet graph shadow monitor task spawned");
 }
 
+/// Snapshot of currently-active proven parent wallets.
+///
+/// Returned in arbitrary order. Used by the PumpPortal WebSocket listener to
+/// keep `subscribeAccountTrade` subscriptions in sync with the live roster.
+/// Returns an empty `Vec` when the wallet-graph monitor is disabled or has
+/// not yet finished its initial roster load.
+pub async fn active_parent_wallets() -> Vec<String> {
+    let Some(state) = WALLET_GRAPH.get().cloned() else {
+        return Vec::new();
+    };
+    let inner = state.inner.read().await;
+    inner.parents.keys().cloned().collect()
+}
+
 pub async fn observe_pumpfun_create(ctx: PumpfunCreateContext) {
     let Some(state) = WALLET_GRAPH.get().cloned() else {
         return;
