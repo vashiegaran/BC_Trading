@@ -21,6 +21,8 @@ const RPC_TIMEOUT_SECS: u64 = 25;
 const MAX_EMITTED_SIGNAL_KEYS: usize = 50_000;
 const CONVERGENCE_WINDOW_MS: i64 = 15 * 60 * 1000;
 const MAX_CONVERGENCE_MINTS: usize = 20_000;
+const RETENTION_CHECKPOINTS_MS: [i64; 2] = [5 * 60 * 1000, 10 * 60 * 1000];
+const RETENTION_ADD_GRACE_MS: i64 = 15 * 1000;
 const SYSTEM_PROGRAM: &str = "11111111111111111111111111111111";
 const TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const TOKEN_2022_PROGRAM: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
@@ -84,8 +86,15 @@ struct ConvergenceTouch {
     parent_score: f64,
     edge_score: Option<f64>,
     amount_sol: f64,
+    sold_sol: f64,
+    buy_count: u64,
+    sell_count: u64,
     first_seen_ms: i64,
     last_seen_ms: i64,
+    first_sell_ms: Option<i64>,
+    last_sell_ms: Option<i64>,
+    buy_events: Vec<TradeAmount>,
+    sell_events: Vec<TradeAmount>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -94,6 +103,36 @@ struct MintConvergenceState {
     last_seen_ms: i64,
     parents: HashMap<String, ConvergenceTouch>,
     children: HashMap<String, ConvergenceTouch>,
+    retention_by_reason: HashMap<String, RetentionCheckpointState>,
+    latest_flow: Option<ConvergenceFlowSnapshot>,
+}
+
+#[derive(Debug, Clone)]
+struct TradeAmount {
+    at_ms: i64,
+    amount_sol: f64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RetentionCheckpointState {
+    signal_ms: i64,
+    emitted_checkpoints_ms: HashSet<i64>,
+}
+
+#[derive(Debug, Clone)]
+struct ConvergenceFlowSnapshot {
+    token_age_ms: i64,
+    buy_count: u64,
+    sell_count: u64,
+    unique_buyers: usize,
+    buy_volume_sol: f64,
+    sell_volume_sol: f64,
+    largest_buy_sol: f64,
+    buy_pressure_pct: f64,
+    bc_progress_pct: Option<f64>,
+    virtual_sol_reserves: f64,
+    virtual_token_reserves: f64,
+    market_cap_sol: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -306,16 +345,13 @@ pub async fn observe_pumpfun_create(ctx: PumpfunCreateContext) {
 }
 
 pub async fn observe_pumpfun_trade(ctx: PumpfunTradeContext) {
-    if !ctx.is_buy {
-        return;
-    }
-
     let Some(state) = WALLET_GRAPH.get().cloned() else {
         return;
     };
 
     let mut pending: Vec<(String, Value)> = Vec::new();
     let mut convergence_pending: Vec<Value> = Vec::new();
+    let mut retention_pending: Vec<Value> = Vec::new();
     let mut child_activity: Option<(String, String, String)> = None;
 
     {
@@ -328,34 +364,41 @@ pub async fn observe_pumpfun_trade(ctx: PumpfunTradeContext) {
         }
         prune_convergence_state(&mut inner, now_ms);
 
-        if let Some(parent) = inner.parents.get(&ctx.trader_wallet).cloned() {
-            inner.parent_mint_touches.insert(parent_mint_key(&parent.wallet, &ctx.mint));
-            record_parent_convergence_touch(&mut inner, &ctx, &parent, now_ms);
-            maybe_queue_trade_signal(
-                &state,
-                &mut inner,
-                &mut pending,
-                "PROVEN_PARENT_BOUGHT_NEW_MINT",
-                &ctx,
-                &parent,
-                None,
-                None,
-                10.0,
-            );
+        let mut watched_trade = false;
 
-            let cluster_key = parent_mint_key(&parent.wallet, &ctx.mint);
-            if inner.child_mint_touches.contains_key(&cluster_key) {
+        if let Some(parent) = inner.parents.get(&ctx.trader_wallet).cloned() {
+            watched_trade = true;
+            if ctx.is_buy {
+                inner.parent_mint_touches.insert(parent_mint_key(&parent.wallet, &ctx.mint));
+                record_parent_convergence_touch(&mut inner, &ctx, &parent, now_ms);
                 maybe_queue_trade_signal(
                     &state,
                     &mut inner,
                     &mut pending,
-                    "PARENT_CHILD_SAME_MINT",
+                    "PROVEN_PARENT_BOUGHT_NEW_MINT",
                     &ctx,
                     &parent,
                     None,
                     None,
-                    18.0,
+                    10.0,
                 );
+
+                let cluster_key = parent_mint_key(&parent.wallet, &ctx.mint);
+                if inner.child_mint_touches.contains_key(&cluster_key) {
+                    maybe_queue_trade_signal(
+                        &state,
+                        &mut inner,
+                        &mut pending,
+                        "PARENT_CHILD_SAME_MINT",
+                        &ctx,
+                        &parent,
+                        None,
+                        None,
+                        18.0,
+                    );
+                }
+            } else {
+                record_parent_convergence_sell(&mut inner, &ctx, &parent, now_ms);
             }
         }
 
@@ -365,62 +408,74 @@ pub async fn observe_pumpfun_trade(ctx: PumpfunTradeContext) {
                 label: child.parent_label.clone(),
                 parent_score: child.parent_score,
             };
-            record_child_convergence_touch(&mut inner, &ctx, &child, now_ms);
-            let cluster_key = parent_mint_key(&child.parent_wallet, &ctx.mint);
-            let child_count = {
-                let children = inner.child_mint_touches.entry(cluster_key.clone()).or_default();
-                children.insert(child.wallet.clone());
-                children.len()
-            };
+            watched_trade = true;
+            if ctx.is_buy {
+                record_child_convergence_touch(&mut inner, &ctx, &child, now_ms);
+                let cluster_key = parent_mint_key(&child.parent_wallet, &ctx.mint);
+                let child_count = {
+                    let children = inner.child_mint_touches.entry(cluster_key.clone()).or_default();
+                    children.insert(child.wallet.clone());
+                    children.len()
+                };
 
-            maybe_queue_trade_signal(
-                &state,
-                &mut inner,
-                &mut pending,
-                "PROVEN_CHILD_BOUGHT_NEW_MINT",
-                &ctx,
-                &parent,
-                Some(&child),
-                Some(child_count),
-                16.0,
-            );
-
-            if child_count >= 2 {
                 maybe_queue_trade_signal(
                     &state,
                     &mut inner,
                     &mut pending,
-                    "MULTI_CHILD_SAME_MINT",
-                    &ctx,
-                    &parent,
-                    None,
-                    Some(child_count),
-                    24.0,
-                );
-            }
-
-            if inner.parent_mint_touches.contains(&cluster_key) {
-                maybe_queue_trade_signal(
-                    &state,
-                    &mut inner,
-                    &mut pending,
-                    "PARENT_CHILD_SAME_MINT",
+                    "PROVEN_CHILD_BOUGHT_NEW_MINT",
                     &ctx,
                     &parent,
                     Some(&child),
                     Some(child_count),
-                    22.0,
+                    16.0,
                 );
-            }
 
-            child_activity = Some((child.wallet.clone(), ctx.mint.clone(), "buy".to_string()));
+                if child_count >= 2 {
+                    maybe_queue_trade_signal(
+                        &state,
+                        &mut inner,
+                        &mut pending,
+                        "MULTI_CHILD_SAME_MINT",
+                        &ctx,
+                        &parent,
+                        None,
+                        Some(child_count),
+                        24.0,
+                    );
+                }
+
+                if inner.parent_mint_touches.contains(&cluster_key) {
+                    maybe_queue_trade_signal(
+                        &state,
+                        &mut inner,
+                        &mut pending,
+                        "PARENT_CHILD_SAME_MINT",
+                        &ctx,
+                        &parent,
+                        Some(&child),
+                        Some(child_count),
+                        22.0,
+                    );
+                }
+
+                child_activity = Some((child.wallet.clone(), ctx.mint.clone(), "buy".to_string()));
+            } else {
+                record_child_convergence_sell(&mut inner, &ctx, &child, now_ms);
+            }
         }
 
-        maybe_queue_convergence_signals(&state, &inner, &mut convergence_pending, &ctx);
+        if watched_trade {
+            update_convergence_flow_snapshot(&mut inner, &ctx);
+        }
+        if ctx.is_buy {
+            maybe_queue_convergence_signals(&state, &mut inner, &mut convergence_pending, &ctx, now_ms);
+        }
+        maybe_queue_due_retention_snapshots(&state, &mut inner, &mut retention_pending, now_ms);
     }
 
     flush_signal_writes(state.clone(), pending).await;
     flush_convergence_writes(state.clone(), convergence_pending).await;
+    flush_retention_writes(state.clone(), retention_pending).await;
     if let Some((wallet, mint, action)) = child_activity {
         write_child_activity(&state, &wallet, &mint, &action).await;
     }
@@ -440,7 +495,7 @@ pub async fn observe_pumpfun_graduation(ctx: PumpfunGraduationContext) {
 
 async fn run_loop(state: WalletGraphState) {
     if !ensure_tables_ready(&state.supabase).await {
-        warn!("Proven-wallet graph tables are missing; run migrations 031 and 032 before deploying this lane");
+        warn!("Proven-wallet graph tables are missing; run migrations 031, 032, and 033 before deploying this lane");
         return;
     }
 
@@ -489,6 +544,9 @@ async fn run_loop(state: WalletGraphState) {
             warn!(error = %e, "wallet_graph: parent funding poll failed");
         }
 
+        let retention_pending = collect_due_retention_snapshots(&state).await;
+        flush_retention_writes(state.clone(), retention_pending).await;
+
         sleep(poll_interval).await;
     }
 }
@@ -500,6 +558,7 @@ async fn ensure_tables_ready(supabase: &SupabaseClient) -> bool {
         && ensure_table_ready(supabase, "wallet_linked_mint_signals", "id").await
         && ensure_table_ready(supabase, "wallet_graph_outcomes", "id").await
         && ensure_table_ready(supabase, "wallet_convergence_signals", "id").await
+        && ensure_table_ready(supabase, "wallet_convergence_retention_snapshots", "id").await
 }
 
 async fn ensure_table_ready(supabase: &SupabaseClient, table: &str, column: &str) -> bool {
@@ -1062,7 +1121,12 @@ fn record_parent_convergence_touch(
         .entry(parent.wallet.clone())
         .and_modify(|touch| {
             touch.amount_sol += ctx.amount_sol.max(0.0);
+            touch.buy_count += 1;
             touch.last_seen_ms = now_ms;
+            touch.buy_events.push(TradeAmount {
+                at_ms: now_ms,
+                amount_sol: ctx.amount_sol.max(0.0),
+            });
         })
         .or_insert_with(|| ConvergenceTouch {
             wallet: parent.wallet.clone(),
@@ -1070,9 +1134,42 @@ fn record_parent_convergence_touch(
             parent_score: parent.parent_score,
             edge_score: None,
             amount_sol: ctx.amount_sol.max(0.0),
+            sold_sol: 0.0,
+            buy_count: 1,
+            sell_count: 0,
             first_seen_ms: now_ms,
             last_seen_ms: now_ms,
+            first_sell_ms: None,
+            last_sell_ms: None,
+            buy_events: vec![TradeAmount {
+                at_ms: now_ms,
+                amount_sol: ctx.amount_sol.max(0.0),
+            }],
+            sell_events: Vec::new(),
         });
+}
+
+fn record_parent_convergence_sell(
+    inner: &mut WalletGraphInner,
+    ctx: &PumpfunTradeContext,
+    parent: &ProvenParent,
+    now_ms: i64,
+) {
+    let Some(state) = inner.convergence_by_mint.get_mut(&ctx.mint) else {
+        return;
+    };
+    let Some(touch) = state.parents.get_mut(&parent.wallet) else {
+        return;
+    };
+
+    touch.sold_sol += ctx.amount_sol.max(0.0);
+    touch.sell_count += 1;
+    touch.first_sell_ms.get_or_insert(now_ms);
+    touch.last_sell_ms = Some(now_ms);
+    touch.sell_events.push(TradeAmount {
+        at_ms: now_ms,
+        amount_sol: ctx.amount_sol.max(0.0),
+    });
 }
 
 fn record_child_convergence_touch(
@@ -1097,7 +1194,12 @@ fn record_child_convergence_touch(
         .entry(child.wallet.clone())
         .and_modify(|touch| {
             touch.amount_sol += ctx.amount_sol.max(0.0);
+            touch.buy_count += 1;
             touch.last_seen_ms = now_ms;
+            touch.buy_events.push(TradeAmount {
+                at_ms: now_ms,
+                amount_sol: ctx.amount_sol.max(0.0),
+            });
         })
         .or_insert_with(|| ConvergenceTouch {
             wallet: child.wallet.clone(),
@@ -1105,46 +1207,116 @@ fn record_child_convergence_touch(
             parent_score: child.parent_score,
             edge_score: Some(child.edge_score),
             amount_sol: ctx.amount_sol.max(0.0),
+            sold_sol: 0.0,
+            buy_count: 1,
+            sell_count: 0,
             first_seen_ms: now_ms,
             last_seen_ms: now_ms,
+            first_sell_ms: None,
+            last_sell_ms: None,
+            buy_events: vec![TradeAmount {
+                at_ms: now_ms,
+                amount_sol: ctx.amount_sol.max(0.0),
+            }],
+            sell_events: Vec::new(),
         });
+}
+
+fn record_child_convergence_sell(
+    inner: &mut WalletGraphInner,
+    ctx: &PumpfunTradeContext,
+    child: &DerivedChild,
+    now_ms: i64,
+) {
+    let Some(state) = inner.convergence_by_mint.get_mut(&ctx.mint) else {
+        return;
+    };
+    let Some(touch) = state.children.get_mut(&child.wallet) else {
+        return;
+    };
+
+    touch.sold_sol += ctx.amount_sol.max(0.0);
+    touch.sell_count += 1;
+    touch.first_sell_ms.get_or_insert(now_ms);
+    touch.last_sell_ms = Some(now_ms);
+    touch.sell_events.push(TradeAmount {
+        at_ms: now_ms,
+        amount_sol: ctx.amount_sol.max(0.0),
+    });
+}
+
+fn update_convergence_flow_snapshot(inner: &mut WalletGraphInner, ctx: &PumpfunTradeContext) {
+    let Some(state) = inner.convergence_by_mint.get_mut(&ctx.mint) else {
+        return;
+    };
+
+    state.latest_flow = Some(ConvergenceFlowSnapshot {
+        token_age_ms: ctx.token_age_ms,
+        buy_count: ctx.buy_count,
+        sell_count: ctx.sell_count,
+        unique_buyers: ctx.unique_buyers,
+        buy_volume_sol: ctx.buy_volume_sol,
+        sell_volume_sol: ctx.sell_volume_sol,
+        largest_buy_sol: ctx.largest_buy_sol,
+        buy_pressure_pct: ctx.buy_pressure_pct,
+        bc_progress_pct: ctx.bc_progress_pct,
+        virtual_sol_reserves: ctx.virtual_sol_reserves,
+        virtual_token_reserves: ctx.virtual_token_reserves,
+        market_cap_sol: ctx.market_cap_sol,
+    });
 }
 
 fn maybe_queue_convergence_signals(
     state: &WalletGraphState,
-    inner: &WalletGraphInner,
+    inner: &mut WalletGraphInner,
     pending: &mut Vec<Value>,
     ctx: &PumpfunTradeContext,
+    now_ms: i64,
 ) {
-    let Some(convergence) = inner.convergence_by_mint.get(&ctx.mint) else {
+    let Some(convergence) = inner.convergence_by_mint.get_mut(&ctx.mint) else {
         return;
     };
 
-    let parent_count = convergence.parents.len();
-    let child_count = convergence.children.len();
+    let cutoff_ms = now_ms - CONVERGENCE_WINDOW_MS;
+    let parent_count = convergence
+        .parents
+        .values()
+        .filter(|touch| touch.last_seen_ms >= cutoff_ms)
+        .count();
+    let child_count = convergence
+        .children
+        .values()
+        .filter(|touch| touch.last_seen_ms >= cutoff_ms)
+        .count();
+    let mut reasons = Vec::new();
 
     if parent_count >= 2 {
-        pending.push(build_convergence_payload(
-            state,
-            ctx,
-            convergence,
-            "TWO_PARENTS_SAME_MINT",
-        ));
+        reasons.push("TWO_PARENTS_SAME_MINT");
     }
     if parent_count >= 1 && child_count >= 1 {
-        pending.push(build_convergence_payload(
-            state,
-            ctx,
-            convergence,
-            "PARENT_CHILD_SAME_MINT",
-        ));
+        reasons.push("PARENT_CHILD_SAME_MINT");
     }
     if child_count >= 2 {
+        reasons.push("MULTI_CHILD_SAME_MINT");
+    }
+
+    for reason in reasons {
+        let signal_ms = {
+            let checkpoint = convergence
+                .retention_by_reason
+                .entry(reason.to_string())
+                .or_insert_with(|| RetentionCheckpointState {
+                    signal_ms: now_ms,
+                    emitted_checkpoints_ms: HashSet::new(),
+                });
+            checkpoint.signal_ms
+        };
         pending.push(build_convergence_payload(
             state,
             ctx,
             convergence,
-            "MULTI_CHILD_SAME_MINT",
+            reason,
+            signal_ms,
         ));
     }
 }
@@ -1154,6 +1326,7 @@ fn build_convergence_payload(
     ctx: &PumpfunTradeContext,
     convergence: &MintConvergenceState,
     reason: &str,
+    signal_ms: i64,
 ) -> Value {
     let parent_count = convergence.parents.len();
     let child_count = convergence.children.len();
@@ -1222,7 +1395,7 @@ fn build_convergence_payload(
         "dedupe_key": dedupe_key,
         "mint": ctx.mint,
         "signal_reason": reason,
-        "signal_at": Utc::now().to_rfc3339(),
+        "signal_at": ms_to_rfc3339(signal_ms),
         "first_seen_at": ms_to_rfc3339(convergence.first_seen_ms),
         "last_seen_at": ms_to_rfc3339(convergence.last_seen_ms),
         "parent_count": parent_count as i32,
@@ -1250,11 +1423,279 @@ fn build_convergence_payload(
     })
 }
 
+async fn collect_due_retention_snapshots(state: &WalletGraphState) -> Vec<Value> {
+    let now_ms = Utc::now().timestamp_millis();
+    let mut pending = Vec::new();
+    let mut inner = state.inner.write().await;
+    prune_convergence_state(&mut inner, now_ms);
+    maybe_queue_due_retention_snapshots(state, &mut inner, &mut pending, now_ms);
+    pending
+}
+
+fn maybe_queue_due_retention_snapshots(
+    state: &WalletGraphState,
+    inner: &mut WalletGraphInner,
+    pending: &mut Vec<Value>,
+    now_ms: i64,
+) {
+    for (mint, convergence) in inner.convergence_by_mint.iter_mut() {
+        let mut due: Vec<(String, i64, i64)> = Vec::new();
+        for (reason, checkpoint) in &convergence.retention_by_reason {
+            for checkpoint_ms in RETENTION_CHECKPOINTS_MS {
+                if now_ms.saturating_sub(checkpoint.signal_ms) >= checkpoint_ms
+                    && !checkpoint.emitted_checkpoints_ms.contains(&checkpoint_ms)
+                {
+                    due.push((reason.clone(), checkpoint.signal_ms, checkpoint_ms));
+                }
+            }
+        }
+
+        for (reason, signal_ms, checkpoint_ms) in due {
+            pending.push(build_retention_payload(
+                state,
+                mint,
+                &reason,
+                convergence,
+                signal_ms,
+                checkpoint_ms,
+                now_ms,
+            ));
+            if let Some(checkpoint) = convergence.retention_by_reason.get_mut(&reason) {
+                checkpoint.emitted_checkpoints_ms.insert(checkpoint_ms);
+            }
+        }
+    }
+}
+
+fn build_retention_payload(
+    state: &WalletGraphState,
+    mint: &str,
+    signal_reason: &str,
+    convergence: &MintConvergenceState,
+    signal_ms: i64,
+    checkpoint_ms: i64,
+    now_ms: i64,
+) -> Value {
+    let parent_count = convergence.parents.len();
+    let child_count = convergence.children.len();
+    let total_wallet_count = parent_count + child_count;
+    let watched_buy_sol: f64 = convergence
+        .parents
+        .values()
+        .chain(convergence.children.values())
+        .map(|touch| touch.amount_sol)
+        .sum();
+    let watched_sell_sol: f64 = convergence
+        .parents
+        .values()
+        .chain(convergence.children.values())
+        .map(|touch| touch.sold_sol)
+        .sum();
+    let watched_net_sol = (watched_buy_sol - watched_sell_sol).max(0.0);
+    let aggregate_sell_through_pct = sell_through_pct(watched_buy_sol, watched_sell_sol);
+    let added_buy_sol_after_signal: f64 = convergence
+        .parents
+        .values()
+        .chain(convergence.children.values())
+        .map(|touch| post_signal_buy_sol(touch, signal_ms))
+        .sum();
+    let added_wallet_count = convergence
+        .parents
+        .values()
+        .chain(convergence.children.values())
+        .filter(|touch| post_signal_buy_sol(touch, signal_ms) > 0.0)
+        .count();
+    let retained_wallet_count = convergence
+        .parents
+        .values()
+        .chain(convergence.children.values())
+        .filter(|touch| touch.amount_sol > 0.0 && sell_through_pct(touch.amount_sol, touch.sold_sol) < 75.0)
+        .count();
+    let exited_wallet_count = convergence
+        .parents
+        .values()
+        .chain(convergence.children.values())
+        .filter(|touch| touch.amount_sol > 0.0 && sell_through_pct(touch.amount_sol, touch.sold_sol) >= 75.0)
+        .count();
+    let retention_reason = classify_retention_snapshot(
+        checkpoint_ms,
+        aggregate_sell_through_pct,
+        added_buy_sol_after_signal,
+    );
+    let flow = convergence.latest_flow.as_ref();
+    let retention_score = score_retention_snapshot(
+        parent_count,
+        child_count,
+        total_wallet_count,
+        retained_wallet_count,
+        aggregate_sell_through_pct,
+        added_buy_sol_after_signal,
+        flow.and_then(|snapshot| snapshot.bc_progress_pct),
+        checkpoint_ms,
+    );
+    let parent_wallets: Vec<Value> = convergence
+        .parents
+        .values()
+        .map(|touch| retention_wallet_payload(touch, signal_ms))
+        .collect();
+    let child_wallets: Vec<Value> = convergence
+        .children
+        .values()
+        .map(|touch| retention_wallet_payload(touch, signal_ms))
+        .collect();
+    let checkpoint_secs = checkpoint_ms / 1_000;
+
+    json!({
+        "dedupe_key": format!("wallet_convergence_retention:{}:{}:{}", signal_reason, checkpoint_secs, mint),
+        "convergence_dedupe_key": format!("wallet_convergence:{}:{}", signal_reason, mint),
+        "mint": mint,
+        "signal_reason": signal_reason,
+        "retention_reason": retention_reason,
+        "checkpoint_secs": checkpoint_secs as i32,
+        "signal_at": ms_to_rfc3339(signal_ms),
+        "checked_at": ms_to_rfc3339(now_ms),
+        "parent_count": parent_count as i32,
+        "child_count": child_count as i32,
+        "watched_buy_sol": watched_buy_sol,
+        "watched_sell_sol": watched_sell_sol,
+        "watched_net_sol": watched_net_sol,
+        "sell_through_pct": aggregate_sell_through_pct,
+        "retained_wallet_count": retained_wallet_count as i32,
+        "exited_wallet_count": exited_wallet_count as i32,
+        "added_wallet_count": added_wallet_count as i32,
+        "added_buy_sol_after_signal": added_buy_sol_after_signal,
+        "retention_score": retention_score,
+        "bc_progress_pct": flow.and_then(|snapshot| snapshot.bc_progress_pct),
+        "virtual_sol_reserves": flow.map(|snapshot| snapshot.virtual_sol_reserves),
+        "virtual_token_reserves": flow.map(|snapshot| snapshot.virtual_token_reserves),
+        "market_cap_sol": flow.map(|snapshot| snapshot.market_cap_sol),
+        "parent_wallets": parent_wallets,
+        "child_wallets": child_wallets,
+        "raw_context": json!({
+            "event": "wallet_convergence_retention_checkpoint",
+            "token_age_ms": flow.map(|snapshot| snapshot.token_age_ms),
+            "buy_count": flow.map(|snapshot| snapshot.buy_count),
+            "sell_count": flow.map(|snapshot| snapshot.sell_count),
+            "unique_buyers": flow.map(|snapshot| snapshot.unique_buyers),
+            "buy_volume_sol": flow.map(|snapshot| snapshot.buy_volume_sol),
+            "sell_volume_sol": flow.map(|snapshot| snapshot.sell_volume_sol),
+            "largest_buy_sol": flow.map(|snapshot| snapshot.largest_buy_sol),
+            "buy_pressure_pct": flow.map(|snapshot| snapshot.buy_pressure_pct),
+        }),
+        "strategy_version": strategy_version(state),
+        "is_shadow": true,
+        "updated_at": Utc::now().to_rfc3339(),
+    })
+}
+
+fn retention_wallet_payload(touch: &ConvergenceTouch, signal_ms: i64) -> Value {
+    json!({
+        "wallet": touch.wallet,
+        "parent_wallet": touch.parent_wallet,
+        "parent_score": touch.parent_score,
+        "edge_score": touch.edge_score,
+        "buy_sol": touch.amount_sol,
+        "sell_sol": touch.sold_sol,
+        "net_sol": (touch.amount_sol - touch.sold_sol).max(0.0),
+        "sell_through_pct": sell_through_pct(touch.amount_sol, touch.sold_sol),
+        "buy_count": touch.buy_count,
+        "sell_count": touch.sell_count,
+        "added_buy_sol_after_signal": post_signal_buy_sol(touch, signal_ms),
+        "first_buy_at": ms_to_rfc3339(touch.first_seen_ms),
+        "last_buy_at": ms_to_rfc3339(touch.last_seen_ms),
+        "first_sell_at": touch.first_sell_ms.map(ms_to_rfc3339),
+        "last_sell_at": touch.last_sell_ms.map(ms_to_rfc3339),
+    })
+}
+
+fn post_signal_buy_sol(touch: &ConvergenceTouch, signal_ms: i64) -> f64 {
+    touch
+        .buy_events
+        .iter()
+        .filter(|event| event.at_ms > signal_ms.saturating_add(RETENTION_ADD_GRACE_MS))
+        .map(|event| event.amount_sol)
+        .sum()
+}
+
+fn sell_through_pct(buy_sol: f64, sell_sol: f64) -> f64 {
+    if buy_sol <= 0.0 {
+        return 0.0;
+    }
+    ((sell_sol.max(0.0) / buy_sol) * 100.0).clamp(0.0, 200.0)
+}
+
+fn classify_retention_snapshot(
+    checkpoint_ms: i64,
+    sell_through_pct: f64,
+    added_buy_sol_after_signal: f64,
+) -> &'static str {
+    if sell_through_pct >= 75.0 {
+        return "CONVERGENCE_DUMPED_FAST";
+    }
+    if added_buy_sol_after_signal >= 0.02 {
+        return "CONVERGENCE_ADDED_AFTER_SIGNAL";
+    }
+    if sell_through_pct <= 25.0 {
+        return if checkpoint_ms <= 5 * 60 * 1000 {
+            "CONVERGENCE_HELD_5M"
+        } else {
+            "CONVERGENCE_HELD_10M"
+        };
+    }
+    "CONVERGENCE_PARTIAL_EXIT"
+}
+
+fn score_retention_snapshot(
+    parent_count: usize,
+    child_count: usize,
+    total_wallet_count: usize,
+    retained_wallet_count: usize,
+    sell_through_pct: f64,
+    added_buy_sol_after_signal: f64,
+    bc_progress_pct: Option<f64>,
+    checkpoint_ms: i64,
+) -> f64 {
+    let retained_ratio = if total_wallet_count == 0 {
+        0.0
+    } else {
+        retained_wallet_count as f64 / total_wallet_count as f64
+    };
+
+    let mut score = 28.0;
+    score += retained_ratio * 30.0;
+    score += (100.0 - sell_through_pct.min(100.0)) * 0.22;
+    score += (added_buy_sol_after_signal * 12.0).clamp(0.0, 12.0);
+    score += match parent_count {
+        0 => 0.0,
+        1 => 5.0,
+        2 => 11.0,
+        _ => 15.0,
+    };
+    score += match child_count {
+        0 => 0.0,
+        1 => 7.0,
+        _ => 12.0,
+    };
+    score += bc_progress_pct.unwrap_or(0.0) * 0.05;
+    if checkpoint_ms >= 10 * 60 * 1000 {
+        score += 5.0;
+    }
+    if sell_through_pct >= 75.0 {
+        score -= 35.0;
+    }
+
+    score.clamp(0.0, 100.0)
+}
+
 fn prune_convergence_state(inner: &mut WalletGraphInner, now_ms: i64) {
     let cutoff_ms = now_ms - CONVERGENCE_WINDOW_MS;
     inner.convergence_by_mint.retain(|_, state| {
-        state.parents.retain(|_, touch| touch.last_seen_ms >= cutoff_ms);
-        state.children.retain(|_, touch| touch.last_seen_ms >= cutoff_ms);
+        prune_completed_retention_checkpoints(state, now_ms);
+        let keep_for_retention = has_pending_retention(state, now_ms);
+        if !keep_for_retention {
+            state.parents.retain(|_, touch| touch.last_seen_ms >= cutoff_ms);
+            state.children.retain(|_, touch| touch.last_seen_ms >= cutoff_ms);
+        }
         if state.parents.is_empty() && state.children.is_empty() {
             return false;
         }
@@ -1284,6 +1725,34 @@ fn prune_convergence_state(inner: &mut WalletGraphInner, now_ms: i64) {
     }
 }
 
+fn has_pending_retention(state: &MintConvergenceState, now_ms: i64) -> bool {
+    let final_checkpoint_ms = RETENTION_CHECKPOINTS_MS.iter().copied().max().unwrap_or(0);
+    state.retention_by_reason.values().any(|checkpoint| {
+        let has_missing_checkpoint = RETENTION_CHECKPOINTS_MS
+            .iter()
+            .any(|checkpoint_ms| !checkpoint.emitted_checkpoints_ms.contains(checkpoint_ms));
+        has_missing_checkpoint
+            && now_ms <= checkpoint
+                .signal_ms
+                .saturating_add(final_checkpoint_ms)
+                .saturating_add(60_000)
+    })
+}
+
+fn prune_completed_retention_checkpoints(state: &mut MintConvergenceState, now_ms: i64) {
+    let final_checkpoint_ms = RETENTION_CHECKPOINTS_MS.iter().copied().max().unwrap_or(0);
+    state.retention_by_reason.retain(|_, checkpoint| {
+        let all_emitted = RETENTION_CHECKPOINTS_MS
+            .iter()
+            .all(|checkpoint_ms| checkpoint.emitted_checkpoints_ms.contains(checkpoint_ms));
+        !all_emitted
+            || now_ms <= checkpoint
+                .signal_ms
+                .saturating_add(final_checkpoint_ms)
+                .saturating_add(60_000)
+    });
+}
+
 async fn flush_convergence_writes(state: WalletGraphState, pending: Vec<Value>) {
     for payload in pending {
         let mint = payload
@@ -1294,6 +1763,20 @@ async fn flush_convergence_writes(state: WalletGraphState, pending: Vec<Value>) 
         let state_c = state.clone();
         tokio::spawn(async move {
             write_wallet_convergence_signal(&state_c, &mint, &payload).await;
+        });
+    }
+}
+
+async fn flush_retention_writes(state: WalletGraphState, pending: Vec<Value>) {
+    for payload in pending {
+        let mint = payload
+            .get("mint")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        let state_c = state.clone();
+        tokio::spawn(async move {
+            write_wallet_convergence_retention_snapshot(&state_c, &mint, &payload).await;
         });
     }
 }
@@ -1326,6 +1809,46 @@ async fn write_wallet_convergence_signal(state: &WalletGraphState, mint: &str, p
         }
         Err(e) => {
             warn!(mint = %mint, signal_reason = %signal_reason, "wallet_convergence_signals write error: {}", e);
+        }
+    }
+}
+
+async fn write_wallet_convergence_retention_snapshot(
+    state: &WalletGraphState,
+    mint: &str,
+    payload: &Value,
+) {
+    let retention_reason = payload
+        .get("retention_reason")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let checkpoint_secs = payload
+        .get("checkpoint_secs")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let url = format!(
+        "{}/wallet_convergence_retention_snapshots?on_conflict=dedupe_key",
+        state.supabase.base_url
+    );
+    match state
+        .supabase
+        .client
+        .post(&url)
+        .header("Prefer", "resolution=merge-duplicates,return=minimal")
+        .json(payload)
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            info!(mint = %mint, retention_reason = %retention_reason, checkpoint_secs, "Wallet convergence retention snapshot upserted");
+        }
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            warn!(mint = %mint, retention_reason = %retention_reason, checkpoint_secs, http_status = %status, "wallet_convergence_retention_snapshots write failed: {}", body);
+        }
+        Err(e) => {
+            warn!(mint = %mint, retention_reason = %retention_reason, checkpoint_secs, "wallet_convergence_retention_snapshots write error: {}", e);
         }
     }
 }
