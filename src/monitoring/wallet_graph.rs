@@ -19,6 +19,8 @@ use crate::logger::SupabaseClient;
 const LAMPORTS_PER_SOL: f64 = 1_000_000_000.0;
 const RPC_TIMEOUT_SECS: u64 = 25;
 const MAX_EMITTED_SIGNAL_KEYS: usize = 50_000;
+const CONVERGENCE_WINDOW_MS: i64 = 15 * 60 * 1000;
+const MAX_CONVERGENCE_MINTS: usize = 20_000;
 const SYSTEM_PROGRAM: &str = "11111111111111111111111111111111";
 const TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const TOKEN_2022_PROGRAM: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
@@ -53,6 +55,7 @@ struct WalletGraphInner {
     emitted_signals: HashSet<String>,
     parent_mint_touches: HashSet<String>,
     child_mint_touches: HashMap<String, HashSet<String>>,
+    convergence_by_mint: HashMap<String, MintConvergenceState>,
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +75,25 @@ struct DerivedChild {
     funded_amount_sol: f64,
     first_seen_at_ms: i64,
     expires_at_ms: i64,
+}
+
+#[derive(Debug, Clone)]
+struct ConvergenceTouch {
+    wallet: String,
+    parent_wallet: String,
+    parent_score: f64,
+    edge_score: Option<f64>,
+    amount_sol: f64,
+    first_seen_ms: i64,
+    last_seen_ms: i64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct MintConvergenceState {
+    first_seen_ms: i64,
+    last_seen_ms: i64,
+    parents: HashMap<String, ConvergenceTouch>,
+    children: HashMap<String, ConvergenceTouch>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -293,6 +315,7 @@ pub async fn observe_pumpfun_trade(ctx: PumpfunTradeContext) {
     };
 
     let mut pending: Vec<(String, Value)> = Vec::new();
+    let mut convergence_pending: Vec<Value> = Vec::new();
     let mut child_activity: Option<(String, String, String)> = None;
 
     {
@@ -303,9 +326,11 @@ pub async fn observe_pumpfun_trade(ctx: PumpfunTradeContext) {
         if inner.emitted_signals.len() > MAX_EMITTED_SIGNAL_KEYS {
             inner.emitted_signals.clear();
         }
+        prune_convergence_state(&mut inner, now_ms);
 
         if let Some(parent) = inner.parents.get(&ctx.trader_wallet).cloned() {
             inner.parent_mint_touches.insert(parent_mint_key(&parent.wallet, &ctx.mint));
+            record_parent_convergence_touch(&mut inner, &ctx, &parent, now_ms);
             maybe_queue_trade_signal(
                 &state,
                 &mut inner,
@@ -340,6 +365,7 @@ pub async fn observe_pumpfun_trade(ctx: PumpfunTradeContext) {
                 label: child.parent_label.clone(),
                 parent_score: child.parent_score,
             };
+            record_child_convergence_touch(&mut inner, &ctx, &child, now_ms);
             let cluster_key = parent_mint_key(&child.parent_wallet, &ctx.mint);
             let child_count = {
                 let children = inner.child_mint_touches.entry(cluster_key.clone()).or_default();
@@ -389,9 +415,12 @@ pub async fn observe_pumpfun_trade(ctx: PumpfunTradeContext) {
 
             child_activity = Some((child.wallet.clone(), ctx.mint.clone(), "buy".to_string()));
         }
+
+        maybe_queue_convergence_signals(&state, &inner, &mut convergence_pending, &ctx);
     }
 
     flush_signal_writes(state.clone(), pending).await;
+    flush_convergence_writes(state.clone(), convergence_pending).await;
     if let Some((wallet, mint, action)) = child_activity {
         write_child_activity(&state, &wallet, &mint, &action).await;
     }
@@ -411,7 +440,7 @@ pub async fn observe_pumpfun_graduation(ctx: PumpfunGraduationContext) {
 
 async fn run_loop(state: WalletGraphState) {
     if !ensure_tables_ready(&state.supabase).await {
-        warn!("Proven-wallet graph tables are missing; run migration 031 before deploying this lane");
+        warn!("Proven-wallet graph tables are missing; run migrations 031 and 032 before deploying this lane");
         return;
     }
 
@@ -470,6 +499,7 @@ async fn ensure_tables_ready(supabase: &SupabaseClient) -> bool {
         && ensure_table_ready(supabase, "derived_wallets", "wallet").await
         && ensure_table_ready(supabase, "wallet_linked_mint_signals", "id").await
         && ensure_table_ready(supabase, "wallet_graph_outcomes", "id").await
+        && ensure_table_ready(supabase, "wallet_convergence_signals", "id").await
 }
 
 async fn ensure_table_ready(supabase: &SupabaseClient, table: &str, column: &str) -> bool {
@@ -1010,6 +1040,296 @@ fn maybe_queue_trade_signal(
     pending.push((ctx.mint.clone(), payload));
 }
 
+fn record_parent_convergence_touch(
+    inner: &mut WalletGraphInner,
+    ctx: &PumpfunTradeContext,
+    parent: &ProvenParent,
+    now_ms: i64,
+) {
+    let state = inner
+        .convergence_by_mint
+        .entry(ctx.mint.clone())
+        .or_insert_with(|| MintConvergenceState {
+            first_seen_ms: now_ms,
+            last_seen_ms: now_ms,
+            ..Default::default()
+        });
+
+    state.first_seen_ms = state.first_seen_ms.min(now_ms);
+    state.last_seen_ms = state.last_seen_ms.max(now_ms);
+    state
+        .parents
+        .entry(parent.wallet.clone())
+        .and_modify(|touch| {
+            touch.amount_sol += ctx.amount_sol.max(0.0);
+            touch.last_seen_ms = now_ms;
+        })
+        .or_insert_with(|| ConvergenceTouch {
+            wallet: parent.wallet.clone(),
+            parent_wallet: parent.wallet.clone(),
+            parent_score: parent.parent_score,
+            edge_score: None,
+            amount_sol: ctx.amount_sol.max(0.0),
+            first_seen_ms: now_ms,
+            last_seen_ms: now_ms,
+        });
+}
+
+fn record_child_convergence_touch(
+    inner: &mut WalletGraphInner,
+    ctx: &PumpfunTradeContext,
+    child: &DerivedChild,
+    now_ms: i64,
+) {
+    let state = inner
+        .convergence_by_mint
+        .entry(ctx.mint.clone())
+        .or_insert_with(|| MintConvergenceState {
+            first_seen_ms: now_ms,
+            last_seen_ms: now_ms,
+            ..Default::default()
+        });
+
+    state.first_seen_ms = state.first_seen_ms.min(now_ms);
+    state.last_seen_ms = state.last_seen_ms.max(now_ms);
+    state
+        .children
+        .entry(child.wallet.clone())
+        .and_modify(|touch| {
+            touch.amount_sol += ctx.amount_sol.max(0.0);
+            touch.last_seen_ms = now_ms;
+        })
+        .or_insert_with(|| ConvergenceTouch {
+            wallet: child.wallet.clone(),
+            parent_wallet: child.parent_wallet.clone(),
+            parent_score: child.parent_score,
+            edge_score: Some(child.edge_score),
+            amount_sol: ctx.amount_sol.max(0.0),
+            first_seen_ms: now_ms,
+            last_seen_ms: now_ms,
+        });
+}
+
+fn maybe_queue_convergence_signals(
+    state: &WalletGraphState,
+    inner: &WalletGraphInner,
+    pending: &mut Vec<Value>,
+    ctx: &PumpfunTradeContext,
+) {
+    let Some(convergence) = inner.convergence_by_mint.get(&ctx.mint) else {
+        return;
+    };
+
+    let parent_count = convergence.parents.len();
+    let child_count = convergence.children.len();
+
+    if parent_count >= 2 {
+        pending.push(build_convergence_payload(
+            state,
+            ctx,
+            convergence,
+            "TWO_PARENTS_SAME_MINT",
+        ));
+    }
+    if parent_count >= 1 && child_count >= 1 {
+        pending.push(build_convergence_payload(
+            state,
+            ctx,
+            convergence,
+            "PARENT_CHILD_SAME_MINT",
+        ));
+    }
+    if child_count >= 2 {
+        pending.push(build_convergence_payload(
+            state,
+            ctx,
+            convergence,
+            "MULTI_CHILD_SAME_MINT",
+        ));
+    }
+}
+
+fn build_convergence_payload(
+    state: &WalletGraphState,
+    ctx: &PumpfunTradeContext,
+    convergence: &MintConvergenceState,
+    reason: &str,
+) -> Value {
+    let parent_count = convergence.parents.len();
+    let child_count = convergence.children.len();
+    let total_watched_buy_sol: f64 = convergence
+        .parents
+        .values()
+        .chain(convergence.children.values())
+        .map(|touch| touch.amount_sol)
+        .sum();
+
+    let scores: Vec<f64> = convergence
+        .parents
+        .values()
+        .chain(convergence.children.values())
+        .map(|touch| touch.parent_score)
+        .collect();
+    let max_parent_score = scores.iter().copied().reduce(f64::max);
+    let avg_parent_score = if scores.is_empty() {
+        None
+    } else {
+        Some(scores.iter().sum::<f64>() / scores.len() as f64)
+    };
+    let max_edge_score = convergence
+        .children
+        .values()
+        .filter_map(|touch| touch.edge_score)
+        .reduce(f64::max);
+
+    let parent_wallets: Vec<Value> = convergence
+        .parents
+        .values()
+        .map(|touch| json!({
+            "wallet": touch.wallet,
+            "parent_score": touch.parent_score,
+            "amount_sol": touch.amount_sol,
+            "first_seen_at": ms_to_rfc3339(touch.first_seen_ms),
+            "last_seen_at": ms_to_rfc3339(touch.last_seen_ms),
+        }))
+        .collect();
+    let child_wallets: Vec<Value> = convergence
+        .children
+        .values()
+        .map(|touch| json!({
+            "wallet": touch.wallet,
+            "parent_wallet": touch.parent_wallet,
+            "parent_score": touch.parent_score,
+            "edge_score": touch.edge_score,
+            "amount_sol": touch.amount_sol,
+            "first_seen_at": ms_to_rfc3339(touch.first_seen_ms),
+            "last_seen_at": ms_to_rfc3339(touch.last_seen_ms),
+        }))
+        .collect();
+
+    let convergence_score = score_convergence_signal(
+        parent_count,
+        child_count,
+        total_watched_buy_sol,
+        max_parent_score,
+        max_edge_score,
+        ctx.bc_progress_pct,
+        reason,
+    );
+    let dedupe_key = format!("wallet_convergence:{}:{}", reason, ctx.mint);
+
+    json!({
+        "dedupe_key": dedupe_key,
+        "mint": ctx.mint,
+        "signal_reason": reason,
+        "signal_at": Utc::now().to_rfc3339(),
+        "first_seen_at": ms_to_rfc3339(convergence.first_seen_ms),
+        "last_seen_at": ms_to_rfc3339(convergence.last_seen_ms),
+        "parent_count": parent_count as i32,
+        "child_count": child_count as i32,
+        "total_watched_buy_sol": total_watched_buy_sol,
+        "max_parent_score": max_parent_score,
+        "avg_parent_score": avg_parent_score,
+        "max_edge_score": max_edge_score,
+        "convergence_score": convergence_score,
+        "bc_progress_pct": ctx.bc_progress_pct,
+        "virtual_sol_reserves": ctx.virtual_sol_reserves,
+        "virtual_token_reserves": ctx.virtual_token_reserves,
+        "market_cap_sol": ctx.market_cap_sol,
+        "parent_wallets": parent_wallets,
+        "child_wallets": child_wallets,
+        "raw_context": json!({
+            "event": "wallet_convergence_buy",
+            "last_trader_wallet": ctx.trader_wallet,
+            "last_amount_sol": ctx.amount_sol,
+            "window_secs": CONVERGENCE_WINDOW_MS / 1000,
+        }),
+        "strategy_version": strategy_version(state),
+        "is_shadow": true,
+        "updated_at": Utc::now().to_rfc3339(),
+    })
+}
+
+fn prune_convergence_state(inner: &mut WalletGraphInner, now_ms: i64) {
+    let cutoff_ms = now_ms - CONVERGENCE_WINDOW_MS;
+    inner.convergence_by_mint.retain(|_, state| {
+        state.parents.retain(|_, touch| touch.last_seen_ms >= cutoff_ms);
+        state.children.retain(|_, touch| touch.last_seen_ms >= cutoff_ms);
+        if state.parents.is_empty() && state.children.is_empty() {
+            return false;
+        }
+
+        let mut first_seen_ms = i64::MAX;
+        let mut last_seen_ms = i64::MIN;
+        for touch in state.parents.values().chain(state.children.values()) {
+            first_seen_ms = first_seen_ms.min(touch.first_seen_ms);
+            last_seen_ms = last_seen_ms.max(touch.last_seen_ms);
+        }
+        state.first_seen_ms = first_seen_ms;
+        state.last_seen_ms = last_seen_ms;
+        true
+    });
+
+    if inner.convergence_by_mint.len() > MAX_CONVERGENCE_MINTS {
+        let mut by_age: Vec<(String, i64)> = inner
+            .convergence_by_mint
+            .iter()
+            .map(|(mint, state)| (mint.clone(), state.last_seen_ms))
+            .collect();
+        by_age.sort_by_key(|(_, last_seen_ms)| *last_seen_ms);
+        let drop_n = by_age.len().saturating_sub(MAX_CONVERGENCE_MINTS / 2);
+        for (mint, _) in by_age.into_iter().take(drop_n) {
+            inner.convergence_by_mint.remove(&mint);
+        }
+    }
+}
+
+async fn flush_convergence_writes(state: WalletGraphState, pending: Vec<Value>) {
+    for payload in pending {
+        let mint = payload
+            .get("mint")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        let state_c = state.clone();
+        tokio::spawn(async move {
+            write_wallet_convergence_signal(&state_c, &mint, &payload).await;
+        });
+    }
+}
+
+async fn write_wallet_convergence_signal(state: &WalletGraphState, mint: &str, payload: &Value) {
+    let signal_reason = payload
+        .get("signal_reason")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let url = format!(
+        "{}/wallet_convergence_signals?on_conflict=dedupe_key",
+        state.supabase.base_url
+    );
+    match state
+        .supabase
+        .client
+        .post(&url)
+        .header("Prefer", "resolution=merge-duplicates,return=minimal")
+        .json(payload)
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            info!(mint = %mint, signal_reason = %signal_reason, "Wallet convergence shadow signal upserted");
+        }
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            warn!(mint = %mint, signal_reason = %signal_reason, http_status = %status, "wallet_convergence_signals write failed: {}", body);
+        }
+        Err(e) => {
+            warn!(mint = %mint, signal_reason = %signal_reason, "wallet_convergence_signals write error: {}", e);
+        }
+    }
+}
+
 async fn flush_signal_writes(state: WalletGraphState, pending: Vec<(String, Value)>) {
     for (mint, payload) in pending {
         let state_c = state.clone();
@@ -1402,6 +1722,43 @@ fn score_wallet_graph(
     score += edge_score.unwrap_or(45.0) * 0.35;
     score += flow_score.unwrap_or(35.0) * 0.20;
     score += bonus;
+    score.clamp(0.0, 100.0)
+}
+
+fn score_convergence_signal(
+    parent_count: usize,
+    child_count: usize,
+    total_watched_buy_sol: f64,
+    max_parent_score: Option<f64>,
+    max_edge_score: Option<f64>,
+    bc_progress_pct: Option<f64>,
+    reason: &str,
+) -> f64 {
+    let mut score = max_parent_score.unwrap_or(60.0) * 0.45;
+
+    score += match parent_count {
+        0 => 0.0,
+        1 => 8.0,
+        2 => 24.0,
+        3 => 34.0,
+        _ => 42.0,
+    };
+    score += match child_count {
+        0 => 0.0,
+        1 => 16.0,
+        2 => 30.0,
+        _ => 40.0,
+    };
+    score += (total_watched_buy_sol * 8.0).clamp(0.0, 14.0);
+    score += max_edge_score.unwrap_or(0.0) * 0.12;
+    score += bc_progress_pct.unwrap_or(0.0) * 0.05;
+    score += match reason {
+        "PARENT_CHILD_SAME_MINT" => 10.0,
+        "MULTI_CHILD_SAME_MINT" => 14.0,
+        "TWO_PARENTS_SAME_MINT" => 8.0,
+        _ => 0.0,
+    };
+
     score.clamp(0.0, 100.0)
 }
 
