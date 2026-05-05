@@ -39,6 +39,20 @@ bc_signal_volume_threshold = 30.0  # SOL — record when cumulative volume hits 
 # no Twitter, Telegram, DexScreener, Birdeye, GoPlus, or paid APIs.
 first_minute_flow_shadow_enabled = true
 
+# ── Proven-wallet graph shadow lane ──
+# Watches proven parent wallets by standard Solana RPC, records fresh child
+# funding edges, then correlates those children with live Pump.fun create/buy
+# events. Observe-only: writes wallet graph signals, never buys.
+proven_wallet_graph_enabled = true
+proven_wallet_graph_poll_interval_secs = 20
+proven_wallet_graph_parent_reload_secs = 300
+proven_wallet_graph_signature_limit = 25
+proven_wallet_graph_max_parents = 50
+proven_wallet_graph_min_parent_score = 60.0
+proven_wallet_graph_min_funding_sol = 0.05
+proven_wallet_graph_max_child_prev_sigs = 3
+proven_wallet_graph_child_watch_hours = 24
+
 # ── Wallet-research shadow lanes (observe-only, never trade live) ──
 # label_flow_shadow: repeated same-label mint cluster seen shortly before this
 # token plus healthy curve flow.

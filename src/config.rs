@@ -115,6 +115,37 @@ pub struct DetectionConfig {
     /// flow data and writes to `first_minute_flow_shadow`.
     #[serde(default)]
     pub first_minute_flow_shadow_enabled: bool,
+    /// Observe-only wallet graph detector. Polls proven parent wallets using
+    /// standard Solana RPC, records fresh child funding, then correlates child
+    /// Pump.fun create/buy activity with live flow. No external APIs and no buys.
+    #[serde(default)]
+    pub proven_wallet_graph_enabled: bool,
+    /// Seconds between parent-wallet funding polls.
+    #[serde(default = "default_proven_wallet_graph_poll_interval_secs")]
+    pub proven_wallet_graph_poll_interval_secs: u64,
+    /// Seconds between reloads of the active proven parent roster from Supabase.
+    #[serde(default = "default_proven_wallet_graph_parent_reload_secs")]
+    pub proven_wallet_graph_parent_reload_secs: u64,
+    /// Max signatures fetched per parent per poll.
+    #[serde(default = "default_proven_wallet_graph_signature_limit")]
+    pub proven_wallet_graph_signature_limit: usize,
+    /// Max active proven parent wallets watched in one process.
+    #[serde(default = "default_proven_wallet_graph_max_parents")]
+    pub proven_wallet_graph_max_parents: usize,
+    /// Minimum parent score required for the active watch roster.
+    #[serde(default = "default_proven_wallet_graph_min_parent_score")]
+    pub proven_wallet_graph_min_parent_score: f64,
+    /// Minimum SOL sent from parent to child to treat as meaningful funding.
+    #[serde(default = "default_proven_wallet_graph_min_funding_sol")]
+    pub proven_wallet_graph_min_funding_sol: f64,
+    /// Maximum prior visible signatures for the destination to qualify as a
+    /// fresh child wallet.
+    #[serde(default = "default_proven_wallet_graph_max_child_prev_sigs")]
+    pub proven_wallet_graph_max_child_prev_sigs: usize,
+    /// Hours after first funding during which a child wallet is considered
+    /// active for Pump.fun create/buy correlation.
+    #[serde(default = "default_proven_wallet_graph_child_watch_hours")]
+    pub proven_wallet_graph_child_watch_hours: i64,
     /// Shadow-only lane: record a would-be mint-time entry when a brand-new
     /// token arrives into a very recent same-label cluster.
     #[serde(default)]
@@ -177,6 +208,14 @@ pub struct DetectionConfig {
 
 fn default_true() -> bool { true }
 fn default_bc_signal_volume_threshold() -> f64 { 50.0 }
+fn default_proven_wallet_graph_poll_interval_secs() -> u64 { 20 }
+fn default_proven_wallet_graph_parent_reload_secs() -> u64 { 300 }
+fn default_proven_wallet_graph_signature_limit() -> usize { 25 }
+fn default_proven_wallet_graph_max_parents() -> usize { 50 }
+fn default_proven_wallet_graph_min_parent_score() -> f64 { 60.0 }
+fn default_proven_wallet_graph_min_funding_sol() -> f64 { 0.05 }
+fn default_proven_wallet_graph_max_child_prev_sigs() -> usize { 3 }
+fn default_proven_wallet_graph_child_watch_hours() -> i64 { 24 }
 fn default_launch_label_shadow_max_age_seconds() -> u64 { 30 }
 fn default_launch_label_shadow_max_progress_pct() -> f64 { 25.0 }
 fn default_launch_label_shadow_min_prior_mints() -> usize { 1 }

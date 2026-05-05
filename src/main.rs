@@ -13,7 +13,7 @@ mod sniper;
 /// Falls back to a manual marker so you can always tell which build you're running.
 macro_rules! compile_time_stamp {
     () => {
-        "2026-05-04-entry-skeleton | old entry pipeline disabled"
+        "2026-05-05-wallet-graph-shadow | old entry pipeline disabled"
     };
 }
 
@@ -210,7 +210,7 @@ async fn main() {
     info!("Supabase client initialized");
 
     // ── 4b. Auto-cleanup disabled in shadow-only mode ─────
-    info!("Startup cleanup disabled — first-minute flow shadow only");
+    info!("Startup cleanup disabled — shadow research runtime only");
 
     // ── 5. Log startup event to Supabase system_events ──
     let startup_payload = serde_json::json!({
@@ -249,16 +249,21 @@ async fn main() {
     let cfg_arc = Arc::new(cfg);
     let supabase_arc = Arc::new(supabase);
 
-    // ── 7. Start detection engine ───────────────────────
+    // ── 7. Start wallet graph shadow monitor ────────────
+    // On-chain-only: watches proven parent wallets through standard Solana RPC,
+    // derives fresh child wallets, and correlates them with live Pump.fun events.
+    monitoring::wallet_graph::start(Arc::clone(&cfg_arc), Arc::clone(&supabase_arc));
+
+    // ── 8. Start detection engine ───────────────────────
     let (detection_rx, _bc_cache) = detection::start(Arc::clone(&cfg_arc), Arc::clone(&supabase_arc));
     info!("Detection engine started — listening for new tokens");
 
-    // ── 7a. External research monitors disabled ─────────
-    // New pivot is plain on-chain/Pump.fun trade-flow shadow only: no Bags,
+    // ── 8a. External research monitors disabled ─────────
+    // New pivot is on-chain Pump.fun flow + wallet graph shadow only: no Bags,
     // DexScreener, Birdeye, GoPlus, Twitter, Telegram, or news APIs.
-    info!("External research monitors disabled — running plain flow shadow only");
+    info!("External research monitors disabled — running flow + wallet graph shadow only");
 
-    // ── 7b. Entry skeleton ─────────────────────────────
+    // ── 8b. Entry skeleton ─────────────────────────────
     // Old entry stack intentionally disabled while the new entry design is
     // discussed: sniper enrichment, filters, execution, monitoring, exits,
     // re-entry, and stuck-position recovery are not started from main.

@@ -188,6 +188,24 @@ fn compute_current_whale_buy(entry: &WatchlistEntry) -> bool {
     entry.trade_log.iter().any(|&(_, sol, is_buy, _)| is_buy && sol >= 3.0)
 }
 
+fn current_trade_flow_volumes(entry: &WatchlistEntry) -> (f64, f64, f64) {
+    let mut buy_volume_sol = 0.0;
+    let mut sell_volume_sol = 0.0;
+    let mut largest_buy_sol = 0.0;
+    for &(_, sol, is_buy, _) in &entry.trade_log {
+        if is_buy {
+            buy_volume_sol += sol;
+            if sol > largest_buy_sol {
+                largest_buy_sol = sol;
+            }
+        } else {
+            sell_volume_sol += sol;
+        }
+    }
+
+    (buy_volume_sol, sell_volume_sol, largest_buy_sol)
+}
+
 fn compute_current_bc_score(entry: &WatchlistEntry) -> f64 {
     compute_bc_score(
         entry.unique_buyers.len(),
@@ -638,6 +656,8 @@ async fn handle_new_token(
         .and_then(|s| s.as_str())
         .unwrap_or("")
         .to_string();
+    let name_for_wallet_graph = name.clone();
+    let symbol_for_wallet_graph = symbol.clone();
 
     let now = chrono::Utc::now().timestamp_millis();
     let (
@@ -722,6 +742,17 @@ async fn handle_new_token(
 
 
     watchlist.insert(mint_str.to_string(), entry);
+
+    crate::monitoring::wallet_graph::observe_pumpfun_create(
+        crate::monitoring::wallet_graph::PumpfunCreateContext {
+            mint: mint_str.to_string(),
+            creator_wallet: creator_wallet.to_string(),
+            name: name_for_wallet_graph,
+            symbol: symbol_for_wallet_graph,
+            token_age_ms: 0,
+        },
+    )
+    .await;
 
     // ── Subscribe to trade events for this specific token ──
     let sub_payload = format!(
@@ -842,6 +873,40 @@ async fn handle_token_trade(
         if let Some(trader_pubkey) = trader {
             entry.trade_log.push((now, sol_amount, is_buy, trader_pubkey));
         }
+    }
+
+    let (buy_volume_sol, sell_volume_sol, largest_buy_sol) = current_trade_flow_volumes(entry);
+    let token_age_ms = now.saturating_sub(entry.detected_at);
+    let bc_progress_pct = if entry.last_v_sol_reserves > 0.0 {
+        Some((((entry.last_v_sol_reserves - 30.0) / 85.0) * 100.0).clamp(0.0, 100.0))
+    } else {
+        None
+    };
+
+    if let Some(trader_pubkey) = trader {
+        crate::monitoring::wallet_graph::observe_pumpfun_trade(
+            crate::monitoring::wallet_graph::PumpfunTradeContext {
+                mint: mint_str.to_string(),
+                trader_wallet: trader_pubkey.to_string(),
+                name: entry.name.clone(),
+                symbol: entry.symbol.clone(),
+                token_age_ms,
+                is_buy,
+                amount_sol: sol_amount,
+                buy_count: entry.buy_count,
+                sell_count: entry.sell_count,
+                unique_buyers: entry.unique_buyers.len(),
+                buy_volume_sol,
+                sell_volume_sol,
+                largest_buy_sol,
+                buy_pressure_pct: entry.buy_pressure_pct(),
+                bc_progress_pct,
+                virtual_sol_reserves: entry.last_v_sol_reserves,
+                virtual_token_reserves: entry.last_v_token_reserves,
+                market_cap_sol: entry.last_market_cap_sol,
+            },
+        )
+        .await;
     }
 
     maybe_fire_first_minute_flow_shadow(entry, mint_str, supabase, cfg, now);
@@ -977,19 +1042,7 @@ fn maybe_fire_first_minute_flow_shadow(
         return;
     }
 
-    let mut buy_volume_sol = 0.0;
-    let mut sell_volume_sol = 0.0;
-    let mut largest_buy_sol = 0.0;
-    for &(_, sol, is_buy, _) in &entry.trade_log {
-        if is_buy {
-            buy_volume_sol += sol;
-            if sol > largest_buy_sol {
-                largest_buy_sol = sol;
-            }
-        } else {
-            sell_volume_sol += sol;
-        }
-    }
+    let (buy_volume_sol, sell_volume_sol, largest_buy_sol) = current_trade_flow_volumes(entry);
 
     let buy_pressure_pct = entry.buy_pressure_pct();
     let unique_buyers = entry.unique_buyers.len();
@@ -1308,6 +1361,84 @@ async fn handle_token_complete(
         .and_then(|m| m.as_str())
         .ok_or_else(|| anyhow::anyhow!("tokenComplete: missing 'mint' field"))?;
 
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let (
+        graduation_name,
+        graduation_symbol,
+        graduation_token_age_ms,
+        graduation_buy_count,
+        graduation_sell_count,
+        graduation_unique_buyers,
+        graduation_buy_volume_sol,
+        graduation_sell_volume_sol,
+        graduation_largest_buy_sol,
+        graduation_buy_pressure_pct,
+        graduation_bc_progress_pct,
+        graduation_v_sol,
+        graduation_v_tok,
+        graduation_market_cap_sol,
+    ) = if let Some(entry) = watchlist.get(mint_str) {
+        let (buy_volume_sol, sell_volume_sol, largest_buy_sol) = current_trade_flow_volumes(entry);
+        let bc_progress_pct = if entry.last_v_sol_reserves > 0.0 {
+            Some((((entry.last_v_sol_reserves - 30.0) / 85.0) * 100.0).clamp(0.0, 100.0))
+        } else {
+            Some(100.0)
+        };
+        (
+            entry.name.clone(),
+            entry.symbol.clone(),
+            now_ms.saturating_sub(entry.detected_at),
+            entry.buy_count,
+            entry.sell_count,
+            entry.unique_buyers.len(),
+            buy_volume_sol,
+            sell_volume_sol,
+            largest_buy_sol,
+            entry.buy_pressure_pct(),
+            bc_progress_pct,
+            entry.last_v_sol_reserves,
+            entry.last_v_token_reserves,
+            entry.last_market_cap_sol,
+        )
+    } else {
+        (
+            v.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
+            v.get("symbol").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+            0,
+            0,
+            0,
+            0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            Some(100.0),
+            0.0,
+            0.0,
+            0.0,
+        )
+    };
+
+    crate::monitoring::wallet_graph::observe_pumpfun_graduation(
+        crate::monitoring::wallet_graph::PumpfunGraduationContext {
+            mint: mint_str.to_string(),
+            name: graduation_name,
+            symbol: graduation_symbol,
+            token_age_ms: graduation_token_age_ms,
+            buy_count: graduation_buy_count,
+            sell_count: graduation_sell_count,
+            unique_buyers: graduation_unique_buyers,
+            buy_volume_sol: graduation_buy_volume_sol,
+            sell_volume_sol: graduation_sell_volume_sol,
+            largest_buy_sol: graduation_largest_buy_sol,
+            buy_pressure_pct: graduation_buy_pressure_pct,
+            bc_progress_pct: graduation_bc_progress_pct,
+            virtual_sol_reserves: graduation_v_sol,
+            virtual_token_reserves: graduation_v_tok,
+            market_cap_sol: graduation_market_cap_sol,
+        },
+    ).await;
+
     if cfg.strategy.entry_skeleton_mode {
         watchlist.remove(mint_str);
         debug!(
@@ -1442,8 +1573,6 @@ async fn handle_token_complete(
             "❌ POOL_FAIL — all 3 resolution paths failed (event/migration_tx/dexscreener); LP + tick monitoring will be unavailable"
         );
     }
-
-    let now_ms = chrono::Utc::now().timestamp_millis();
 
     // ── Fetch historical trades from pump.fun API ────────
     // Skip if the watchlist already has enough trade data from WebSocket monitoring.

@@ -9,6 +9,7 @@ pub mod st_trades;
 pub mod tick_stream;
 pub mod triggers;
 pub mod types;
+pub mod wallet_graph;
 pub mod yellowstone_grpc;
 
 use std::str::FromStr;
