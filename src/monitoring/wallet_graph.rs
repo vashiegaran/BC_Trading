@@ -33,6 +33,18 @@ struct WalletGraphState {
     inner: Arc<RwLock<WalletGraphInner>>,
 }
 
+impl WalletGraphState {
+    /// Prefer the Helius RPC URL when available so wallet graph polling does
+    /// not hit Chainstack's archive/historical signature restrictions.
+    fn rpc_url(&self) -> &str {
+        self.cfg
+            .env
+            .helius_rpc_url
+            .as_deref()
+            .unwrap_or(&self.cfg.env.solana_rpc_url)
+    }
+}
+
 #[derive(Debug, Default)]
 struct WalletGraphInner {
     parents: HashMap<String, ProvenParent>,
@@ -608,7 +620,7 @@ async fn poll_parent_funding_once(state: &WalletGraphState, rpc_client: &Client)
     for (parent, last_seen) in poll_items {
         let signatures = fetch_new_signatures_for_parent(
             rpc_client,
-            &state.cfg.env.solana_rpc_url,
+            state.rpc_url(),
             &parent.wallet,
             last_seen.as_deref(),
             state.cfg.strategy.detection.proven_wallet_graph_signature_limit.max(1),
@@ -668,7 +680,7 @@ async fn process_parent_signature(
 ) -> Result<()> {
     let tx = rpc_call(
         rpc_client,
-        &state.cfg.env.solana_rpc_url,
+        state.rpc_url(),
         "getTransaction",
         json!([
             sig.signature,
@@ -699,7 +711,7 @@ async fn process_parent_signature(
 
         let prev_count = count_previous_signatures(
             rpc_client,
-            &state.cfg.env.solana_rpc_url,
+            state.rpc_url(),
             &transfer.destination,
             &sig.signature,
             sig.slot,
