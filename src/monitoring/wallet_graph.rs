@@ -24,6 +24,7 @@ const MAX_CONVERGENCE_MINTS: usize = 20_000;
 const RETENTION_CHECKPOINTS_MS: [i64; 2] = [5 * 60 * 1000, 10 * 60 * 1000];
 const RETENTION_ADD_GRACE_MS: i64 = 15 * 1000;
 const SYSTEM_PROGRAM: &str = "11111111111111111111111111111111";
+const PUMPFUN_PROGRAM_ID: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 const TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const TOKEN_2022_PROGRAM: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 const ASSOCIATED_TOKEN_PROGRAM: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
@@ -178,6 +179,13 @@ struct FundingEdge {
     slot: u64,
     child_previous_signature_count: usize,
     edge_score: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PumpfunTxAction {
+    Buy,
+    Sell,
+    Create,
 }
 
 #[derive(Debug, Clone)]
@@ -797,6 +805,8 @@ async fn process_parent_signature(
     if tx.is_null() {
         return Ok(());
     }
+
+    observe_parent_pumpfun_activity_from_tx(state, parent, sig, &tx).await;
 
     let transfers = system_transfers_from_parent(&tx, &parent.wallet);
     if transfers.is_empty() {
@@ -2136,6 +2146,245 @@ async fn rpc_call(client: &Client, rpc_url: &str, method: &str, params: Value) -
         .get("result")
         .cloned()
         .ok_or_else(|| anyhow!("wallet_graph: RPC {} missing result", method))
+}
+
+async fn observe_parent_pumpfun_activity_from_tx(
+    _state: &WalletGraphState,
+    parent: &ProvenParent,
+    sig: &SignatureInfo,
+    tx: &Value,
+) {
+    let Some(action) = pumpfun_action_from_logs(tx) else {
+        return;
+    };
+
+    let mint = pumpfun_mint_from_tx(tx, &parent.wallet, action).unwrap_or_default();
+    if mint.is_empty() {
+        debug!(parent = %parent.wallet, signature = %sig.signature, action = ?action, "wallet_graph: Pump.fun RPC fallback could not infer mint");
+        return;
+    }
+
+    match action {
+        PumpfunTxAction::Create => {
+            observe_pumpfun_create(PumpfunCreateContext {
+                mint: mint.clone(),
+                creator_wallet: parent.wallet.clone(),
+                name: String::new(),
+                symbol: String::new(),
+                token_age_ms: 0,
+            })
+            .await;
+            info!(parent = %parent.wallet, mint = %mint, signature = %sig.signature, "wallet_graph: parent Pump.fun create observed via RPC fallback");
+        }
+        PumpfunTxAction::Buy | PumpfunTxAction::Sell => {
+            let delta_sol = wallet_lamport_delta_sol(tx, &parent.wallet).unwrap_or(0.0);
+            let amount_sol = match action {
+                PumpfunTxAction::Buy => (-delta_sol).max(0.0),
+                PumpfunTxAction::Sell => delta_sol.max(0.0),
+                PumpfunTxAction::Create => 0.0,
+            };
+            if amount_sol <= 0.0 {
+                debug!(parent = %parent.wallet, mint = %mint, signature = %sig.signature, action = ?action, delta_sol = format!("{:.6}", delta_sol), "wallet_graph: Pump.fun RPC fallback amount was zero");
+                return;
+            }
+
+            let is_buy = action == PumpfunTxAction::Buy;
+            observe_pumpfun_trade(PumpfunTradeContext {
+                mint: mint.clone(),
+                trader_wallet: parent.wallet.clone(),
+                name: String::new(),
+                symbol: String::new(),
+                token_age_ms: 0,
+                is_buy,
+                amount_sol,
+                buy_count: if is_buy { 1 } else { 0 },
+                sell_count: if is_buy { 0 } else { 1 },
+                unique_buyers: if is_buy { 1 } else { 0 },
+                buy_volume_sol: if is_buy { amount_sol } else { 0.0 },
+                sell_volume_sol: if is_buy { 0.0 } else { amount_sol },
+                largest_buy_sol: if is_buy { amount_sol } else { 0.0 },
+                buy_pressure_pct: if is_buy { 100.0 } else { 0.0 },
+                bc_progress_pct: None,
+                virtual_sol_reserves: 0.0,
+                virtual_token_reserves: 0.0,
+                market_cap_sol: 0.0,
+            })
+            .await;
+            info!(parent = %parent.wallet, mint = %mint, signature = %sig.signature, action = ?action, amount_sol = format!("{:.6}", amount_sol), "wallet_graph: parent Pump.fun trade observed via RPC fallback");
+        }
+    }
+}
+
+fn pumpfun_action_from_logs(tx: &Value) -> Option<PumpfunTxAction> {
+    let logs = tx
+        .get("meta")
+        .and_then(|value| value.get("logMessages"))
+        .and_then(Value::as_array)?;
+
+    for log in logs.iter().filter_map(Value::as_str) {
+        if log.contains("Instruction: Buy") {
+            return Some(PumpfunTxAction::Buy);
+        }
+        if log.contains("Instruction: Sell") {
+            return Some(PumpfunTxAction::Sell);
+        }
+        if log.contains("Instruction: Create") {
+            return Some(PumpfunTxAction::Create);
+        }
+    }
+    None
+}
+
+fn pumpfun_mint_from_tx(tx: &Value, wallet: &str, action: PumpfunTxAction) -> Option<String> {
+    pumpfun_mint_from_instruction_accounts(tx, action)
+        .or_else(|| pumpfun_mint_from_token_balance_change(tx, wallet, action))
+}
+
+fn pumpfun_mint_from_instruction_accounts(tx: &Value, action: PumpfunTxAction) -> Option<String> {
+    let mint_index = match action {
+        PumpfunTxAction::Buy | PumpfunTxAction::Sell => 2,
+        PumpfunTxAction::Create => 0,
+    };
+
+    let mut found = None;
+    collect_instructions(tx, |instruction| {
+        if found.is_some() {
+            return;
+        }
+        if instruction.get("programId").and_then(Value::as_str) != Some(PUMPFUN_PROGRAM_ID) {
+            return;
+        }
+        found = instruction
+            .get("accounts")
+            .and_then(Value::as_array)
+            .and_then(|accounts| accounts.get(mint_index))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+    });
+    found
+}
+
+fn pumpfun_mint_from_token_balance_change(
+    tx: &Value,
+    wallet: &str,
+    action: PumpfunTxAction,
+) -> Option<String> {
+    if action == PumpfunTxAction::Create {
+        return None;
+    }
+
+    let mut by_mint: HashMap<String, (f64, f64)> = HashMap::new();
+    collect_token_balances(tx, "preTokenBalances", wallet, |mint, amount| {
+        by_mint.entry(mint).or_insert((0.0, 0.0)).0 = amount;
+    });
+    collect_token_balances(tx, "postTokenBalances", wallet, |mint, amount| {
+        by_mint.entry(mint).or_insert((0.0, 0.0)).1 = amount;
+    });
+
+    by_mint
+        .into_iter()
+        .filter_map(|(mint, (pre, post))| {
+            let delta = post - pre;
+            let score = match action {
+                PumpfunTxAction::Buy if delta > 0.0 => delta,
+                PumpfunTxAction::Sell if delta < 0.0 => -delta,
+                _ => return None,
+            };
+            Some((mint, score))
+        })
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(mint, _)| mint)
+}
+
+fn collect_token_balances(
+    tx: &Value,
+    field: &str,
+    wallet: &str,
+    mut visit: impl FnMut(String, f64),
+) {
+    let Some(balances) = tx
+        .get("meta")
+        .and_then(|value| value.get(field))
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+
+    for balance in balances {
+        if balance.get("owner").and_then(Value::as_str) != Some(wallet) {
+            continue;
+        }
+        let Some(mint) = balance.get("mint").and_then(Value::as_str) else {
+            continue;
+        };
+        let amount = balance
+            .get("uiTokenAmount")
+            .and_then(|value| value.get("amount"))
+            .and_then(Value::as_str)
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        visit(mint.to_string(), amount);
+    }
+}
+
+fn wallet_lamport_delta_sol(tx: &Value, wallet: &str) -> Option<f64> {
+    let account_index = tx
+        .get("transaction")
+        .and_then(|value| value.get("message"))
+        .and_then(|value| value.get("accountKeys"))
+        .and_then(Value::as_array)
+        .and_then(|keys| {
+            keys.iter()
+                .position(|key| account_key_str(key) == Some(wallet))
+        })?;
+
+    let pre = tx
+        .get("meta")
+        .and_then(|value| value.get("preBalances"))
+        .and_then(Value::as_array)
+        .and_then(|balances| balances.get(account_index))
+        .and_then(Value::as_u64)?;
+    let post = tx
+        .get("meta")
+        .and_then(|value| value.get("postBalances"))
+        .and_then(Value::as_array)
+        .and_then(|balances| balances.get(account_index))
+        .and_then(Value::as_u64)?;
+
+    Some((post as i128 - pre as i128) as f64 / LAMPORTS_PER_SOL)
+}
+
+fn account_key_str(value: &Value) -> Option<&str> {
+    value
+        .as_str()
+        .or_else(|| value.get("pubkey").and_then(Value::as_str))
+}
+
+fn collect_instructions(tx: &Value, mut visit: impl FnMut(&Value)) {
+    if let Some(instructions) = tx
+        .get("transaction")
+        .and_then(|value| value.get("message"))
+        .and_then(|value| value.get("instructions"))
+        .and_then(Value::as_array)
+    {
+        for instruction in instructions {
+            visit(instruction);
+        }
+    }
+
+    if let Some(inner_sets) = tx
+        .get("meta")
+        .and_then(|value| value.get("innerInstructions"))
+        .and_then(Value::as_array)
+    {
+        for inner in inner_sets {
+            if let Some(instructions) = inner.get("instructions").and_then(Value::as_array) {
+                for instruction in instructions {
+                    visit(instruction);
+                }
+            }
+        }
+    }
 }
 
 fn system_transfers_from_parent(tx: &Value, parent_wallet: &str) -> Vec<FundingTransfer> {
