@@ -38,3 +38,7 @@ tonic = { version = "0.10", features = ["tls", "tls-roots"] }
 # The real protoc is provided via the PROTOC env var.
 [patch.crates-io]
 protobuf-src = { path = "vendor/protobuf-src-stub" }
+
+[dev-dependencies]
+sha2 = "0.10"
+

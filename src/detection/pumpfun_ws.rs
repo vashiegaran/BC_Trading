@@ -49,8 +49,14 @@ const RECENT_LABEL_WINDOW_MS: i64 = 6 * 60 * 60 * 1_000;
 /// Maximum number of label buckets before pruning oldest buckets.
 const MAX_LABEL_CACHE_SIZE: usize = 10_000;
 
+/// Window for tokenComplete dedup (pump.fun sometimes emits migrate+complete
+/// for the same mint within milliseconds).
+pub(super) const COMPLETE_DEDUP_WINDOW_MS: i64 = 5 * 60 * 1000;
+/// Hard cap on the dedup map before we drop the oldest half.
+pub(super) const COMPLETE_DEDUP_MAX_ENTRIES: usize = 5_000;
+
 #[derive(Debug, Clone)]
-struct RecentLabelObservation {
+pub(super) struct RecentLabelObservation {
     mint: String,
     creator_wallet: Pubkey,
     seen_at: i64,
@@ -470,8 +476,6 @@ async fn connect_and_listen(tx: &mpsc::Sender<GraduatedToken>, supabase: &Arc<Su
     // re-graduates the same mint, and any legitimate re-emit would be a true
     // duplicate.
     let mut emitted_complete: HashMap<String, i64> = HashMap::new();
-    const COMPLETE_DEDUP_WINDOW_MS: i64 = 5 * 60 * 1000;
-    const COMPLETE_DEDUP_MAX_ENTRIES: usize = 5_000;
 
     // ── Read loop ─────────────────────────────────────────
     while let Some(msg_result) = read.next().await {
@@ -537,7 +541,7 @@ enum EventKind {
 // ─── Message handler ─────────────────────────────────────────────────────────
 
 /// Route a text message to the appropriate handler based on event type.
-async fn handle_text_message(
+pub(super) async fn handle_text_message(
     text: &str,
     tx: &mpsc::Sender<GraduatedToken>,
     watchlist: &mut HashMap<String, WatchlistEntry>,

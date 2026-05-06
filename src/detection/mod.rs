@@ -2,11 +2,12 @@ pub mod pumpfun_ws;
 pub mod raydium_poller;
 pub mod st_search_poller;
 pub mod types;
+pub mod yellowstone_pumpfun;
 
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::AppConfig;
 use crate::logger::SupabaseClient;
@@ -21,16 +22,52 @@ pub fn start(cfg: Arc<AppConfig>, supabase: Arc<SupabaseClient>) -> (mpsc::Recei
     let (tx, rx) = mpsc::channel::<GraduatedToken>(CHANNEL_CAPACITY);
     let bc_cache = new_bc_score_cache();
 
-    // ── PumpFun WebSocket (primary, free) ────────────────
+    // ── Detection source: Yellowstone gRPC (preferred) or PumpPortal WS ──
     let pumpfun_tx = tx.clone();
     let pumpfun_supabase = Arc::clone(&supabase);
     let rpc_url = cfg.env.solana_rpc_url.clone();
     let pumpfun_cfg = Arc::clone(&cfg);
     let pumpfun_cache = bc_cache.clone();
-    tokio::spawn(async move {
-        pumpfun_ws::run(pumpfun_tx, pumpfun_supabase, rpc_url, pumpfun_cfg, pumpfun_cache).await;
-    });
-    info!("Detection: PumpFun WebSocket task spawned");
+
+    if cfg.env.use_grpc_pumpfun_detection {
+        match cfg.env.yellowstone_grpc_endpoint.as_deref() {
+            Some(endpoint) if !endpoint.is_empty() => {
+                let grpc_cfg = yellowstone_pumpfun::YellowstonePumpfunConfig {
+                    endpoint: endpoint.to_string(),
+                    x_token: cfg.env.yellowstone_grpc_x_token.clone(),
+                    username: cfg.env.yellowstone_grpc_username.clone(),
+                    password: cfg.env.yellowstone_grpc_password.clone(),
+                };
+                tokio::spawn(async move {
+                    yellowstone_pumpfun::run(
+                        grpc_cfg,
+                        pumpfun_tx,
+                        pumpfun_supabase,
+                        rpc_url,
+                        pumpfun_cfg,
+                        pumpfun_cache,
+                    )
+                    .await;
+                });
+                info!("Detection: Yellowstone gRPC pump.fun source spawned (PumpPortal WS disabled)");
+            }
+            _ => {
+                warn!(
+                    "USE_GRPC_PUMPFUN_DETECTION=true but YELLOWSTONE_GRPC_ENDPOINT is empty — \
+                     falling back to PumpPortal WebSocket"
+                );
+                tokio::spawn(async move {
+                    pumpfun_ws::run(pumpfun_tx, pumpfun_supabase, rpc_url, pumpfun_cfg, pumpfun_cache).await;
+                });
+                info!("Detection: PumpFun WebSocket task spawned (fallback)");
+            }
+        }
+    } else {
+        tokio::spawn(async move {
+            pumpfun_ws::run(pumpfun_tx, pumpfun_supabase, rpc_url, pumpfun_cfg, pumpfun_cache).await;
+        });
+        info!("Detection: PumpFun WebSocket task spawned");
+    }
 
     // ── Raydium logsSubscribe (real-time detection) ───────
     if cfg.strategy.detection.poll_raydium {

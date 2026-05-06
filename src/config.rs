@@ -765,6 +765,11 @@ pub struct EnvConfig {
     /// Feature flag — when true (and endpoint/token present) the mux runs
     /// in place of `helius_price_ws`.
     pub enable_yellowstone_grpc: bool,
+    /// Feature flag — when true, swap the PumpPortal WebSocket detection
+    /// source for a Yellowstone gRPC pump.fun event stream (see
+    /// `src/detection/yellowstone_pumpfun.rs`). Reuses the same
+    /// `YELLOWSTONE_GRPC_*` credentials.
+    pub use_grpc_pumpfun_detection: bool,
 }
 
 // ── Combined app config ──────────────────────────────────────
@@ -1031,6 +1036,9 @@ impl AppConfig {
             yellowstone_grpc_username: optional_env("YELLOWSTONE_GRPC_USERNAME"),
             yellowstone_grpc_password: optional_env("YELLOWSTONE_GRPC_PASSWORD"),
             enable_yellowstone_grpc: optional_env("ENABLE_YELLOWSTONE_GRPC")
+                .map(|v| v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+            use_grpc_pumpfun_detection: optional_env("USE_GRPC_PUMPFUN_DETECTION")
                 .map(|v| v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
         };
