@@ -386,6 +386,7 @@ pub async fn enrich_token_fast(
 
 /// Fetch on-chain mint data: authority revocation status, supply, decimals.
 async fn fetch_mint_data(rpc: &RpcClient, mint: &str) -> Option<MintData> {
+    use solana_sdk::commitment_config::CommitmentConfig;
     use solana_sdk::pubkey::Pubkey;
     use std::str::FromStr;
 
@@ -393,10 +394,21 @@ async fn fetch_mint_data(rpc: &RpcClient, mint: &str) -> Option<MintData> {
 
     let mut account = None;
     for attempt in 0..MINT_ACCOUNT_FETCH_ATTEMPTS {
-        match rpc.get_account(&mint_pubkey).await {
-            Ok(a) => {
-                account = Some(a);
-                break;
+        match rpc
+            .get_account_with_commitment(&mint_pubkey, CommitmentConfig::processed())
+            .await
+        {
+            Ok(resp) => {
+                if let Some(a) = resp.value {
+                    account = Some(a);
+                    break;
+                }
+                warn!(
+                    mint = %mint,
+                    attempt = attempt + 1,
+                    max_attempts = MINT_ACCOUNT_FETCH_ATTEMPTS,
+                    "Mint account not yet available at processed commitment"
+                );
             }
             Err(e) => {
                 warn!(
