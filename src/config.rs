@@ -217,6 +217,14 @@ pub struct FiltersConfig {
     /// Data: creator_rebuy tokens graduate at 1.1% vs 6.0% without (5x worse).
     #[serde(default = "default_true")]
     pub reject_creator_rebuy: bool,
+    /// Shadow-only experiment: for high BC-score creator-rebuy tokens, run the
+    /// Fast-Track safety checks and log the would-have-qualified row, but never
+    /// forward to live/paper execution. Keeps `reject_creator_rebuy` intact.
+    #[serde(default)]
+    pub creator_rebuy_shadow_enabled: bool,
+    /// Minimum BC score required for the creator-rebuy shadow lane.
+    #[serde(default = "default_creator_rebuy_shadow_min_score")]
+    pub creator_rebuy_shadow_min_score: f64,
     /// Minimum buy/sell ratio on the bonding curve.
     /// Data: Q4 (>2.3) graduates at 10.9% vs Q1 (<1.1) at 3.2%.
     #[serde(default = "default_min_buy_sell_ratio")]
@@ -265,6 +273,7 @@ pub struct FiltersConfig {
 fn default_max_single_holder_pct() -> f64 { 25.0 }
 fn default_min_holder_count() -> usize { 8 }
 fn default_min_buy_sell_ratio() -> f64 { 1.2 }
+fn default_creator_rebuy_shadow_min_score() -> f64 { 60.0 }
 fn default_max_bc_sell_count() -> u64 { 40 }
 fn default_min_sniper_score() -> f64 { 60.0 }
 fn default_bc_fast_track_min_score() -> f64 { 65.0 }

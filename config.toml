@@ -146,6 +146,11 @@ coordinated_buy_threshold = 10
 # Data: creator_rebuy tokens graduate at 1.1% vs 6.0% without — manipulation signal.
 reject_creator_rebuy = true
 
+# Shadow-only test: high-score creator_rebuy names still stay blocked from live
+# execution, but run Fast-Track safety checks and log counterfactual outcomes.
+creator_rebuy_shadow_enabled = true
+creator_rebuy_shadow_min_score = 60.0
+
 # Minimum buy/sell ratio on the bonding curve.
 # Data: ratio > 2.3 graduates at 10.9% vs < 1.1 at 3.2%. Using 1.2 to avoid over-filtering.
 min_buy_sell_ratio = 2.0

@@ -102,6 +102,133 @@ pub fn start(
                 let bc_score = bc_entry.as_ref().map(|entry| entry.score);
 
                 if let Some(reason) = filters::check_bc_pattern(&token, &cfg.strategy.filters, bc_score) {
+                    let creator_rebuy_shadow_qualifies = reason == "creator_rebuy_detected"
+                        && cfg.strategy.filters.creator_rebuy_shadow_enabled
+                        && bc_entry
+                            .as_ref()
+                            .map(|entry| entry.score >= cfg.strategy.filters.creator_rebuy_shadow_min_score)
+                            .unwrap_or(false);
+
+                    if creator_rebuy_shadow_qualifies {
+                        let bc_entry = bc_entry.clone().expect("creator-rebuy shadow qualification requires BC entry");
+                        warn!(
+                            mint = %mint_str,
+                            bc_score = format!("{:.1}", bc_entry.score),
+                            threshold = cfg.strategy.filters.creator_rebuy_shadow_min_score,
+                            "🧪 CREATOR-REBUY SHADOW — live blocked, running Fast-Track safety checks only"
+                        );
+
+                        let shadow_start = std::time::Instant::now();
+                        let detection_to_sniper_ms = {
+                            let now_ms = chrono::Utc::now().timestamp_millis();
+                            now_ms - detected_at
+                        };
+                        token.pipeline_timing.detection_to_sniper_ms = Some(detection_to_sniper_ms);
+
+                        let shadow_enrichment = enrichment::enrich_token_fast(&rpc, &mint_str).await;
+                        token.pipeline_timing.enrichment_total_ms = Some(shadow_enrichment.enrichment_duration_ms);
+                        token.pipeline_timing.enrichment_per_source = shadow_enrichment.per_source_ms.clone();
+
+                        let shadow_filter = filters::apply_fast_track_filters(&shadow_enrichment);
+                        let shadow_elapsed = shadow_start.elapsed();
+                        let shadow_action = if shadow_filter.passed {
+                            "creator_rebuy_shadow_passed"
+                        } else {
+                            "creator_rebuy_shadow_rejected"
+                        };
+                        let shadow_rejection_reason = if shadow_filter.passed {
+                            Some("creator_rebuy_detected_live_block")
+                        } else {
+                            shadow_filter.rejection_reason.as_deref()
+                        };
+                        let shadow_filter_name = if shadow_filter.passed {
+                            Some("creator_rebuy_shadow")
+                        } else {
+                            shadow_filter.filter_name.as_deref()
+                        };
+
+                        let shadow_features = serde_json::json!({
+                            "entry_tier": "creator_rebuy_shadow_fast_track",
+                            "shadow_mode": true,
+                            "live_forwarded": false,
+                            "blocked_live_reason": reason,
+                            "shadow_min_score": cfg.strategy.filters.creator_rebuy_shadow_min_score,
+                            "bc_score": bc_entry.score,
+                            "bc_unique_buyers": bc_entry.unique_buyers,
+                            "bc_buy_sell_ratio": bc_entry.buy_sell_ratio,
+                            "bc_creator_rebuy": bc_entry.creator_rebuy,
+                            "bc_whale_buy": bc_entry.whale_buy,
+                            "bc_buy_count": bc_entry.buy_count,
+                            "bc_sell_count": bc_entry.sell_count,
+                            "bc_total_volume_sol": bc_entry.total_volume_sol,
+                            "bc_score_recorded_at": bc_entry.recorded_at,
+                            "fast_track_safety_passed": shadow_filter.passed,
+                            "fast_track_rejection_reason": shadow_filter.rejection_reason.as_deref(),
+                            "fast_track_filter_name": shadow_filter.filter_name.as_deref(),
+                            "fast_track_enrichment_ms": shadow_enrichment.enrichment_duration_ms,
+                            "mint_authority_revoked": shadow_enrichment.on_chain_mint.as_ref().map(|m| m.mint_authority_revoked),
+                            "freeze_authority_revoked": shadow_enrichment.on_chain_mint.as_ref().map(|m| m.freeze_authority_revoked),
+                            "goplus_honeypot": shadow_enrichment.goplus.as_ref().and_then(|g| g.is_honeypot.clone()),
+                            "initial_liquidity_sol": initial_liquidity_sol,
+                        });
+
+                        let candidate_id = log_sniper_candidate(
+                            &supabase,
+                            &mint_str,
+                            &token.name,
+                            &token.symbol,
+                            token.pool_address.as_ref().map(|p| p.to_string()).as_deref(),
+                            &creator_str,
+                            initial_liquidity_sol,
+                            shadow_action,
+                            shadow_rejection_reason,
+                            shadow_filter_name,
+                            bc_entry.score,
+                            &shadow_features,
+                        ).await;
+
+                        if shadow_filter.passed {
+                            info!(
+                                mint = %mint_str,
+                                bc_score = format!("{:.1}", bc_entry.score),
+                                elapsed_ms = shadow_elapsed.as_millis() as u64,
+                                "🧪 CREATOR-REBUY SHADOW PASS — counterfactual tracked, live execution still blocked"
+                            );
+                            token.pipeline_timing.outcome = Some("shadow_creator_rebuy_fast_track_passed".to_string());
+                            token.pipeline_timing.rejection_stage = Some("creator_rebuy_shadow".to_string());
+                            token.pipeline_timing.rejection_reason = Some("creator_rebuy_detected_live_block".to_string());
+                        } else {
+                            warn!(
+                                mint = %mint_str,
+                                reason = shadow_filter.rejection_reason.as_deref().unwrap_or("unknown"),
+                                bc_score = format!("{:.1}", bc_entry.score),
+                                "🧪 CREATOR-REBUY SHADOW REJECT — Fast-Track safety filter blocked"
+                            );
+                            token.pipeline_timing.outcome = Some("shadow_creator_rebuy_fast_track_rejected".to_string());
+                            token.pipeline_timing.rejection_stage = Some("creator_rebuy_shadow_fast_track_filter".to_string());
+                            token.pipeline_timing.rejection_reason = shadow_filter
+                                .rejection_reason
+                                .clone()
+                                .or_else(|| Some("fast_track_safety_unknown".to_string()));
+                        }
+
+                        let timing_payload = token.pipeline_timing.to_json(&mint_str);
+                        let supabase_bg = Arc::clone(&supabase);
+                        tokio::spawn(async move {
+                            log_pipeline_latency(&supabase_bg, &timing_payload).await;
+                        });
+
+                        if let Some(cid) = candidate_id {
+                            tracker::spawn_rejected_tracker(
+                                Arc::clone(&supabase),
+                                cid,
+                                mint_str.clone(),
+                            );
+                        }
+
+                        continue;
+                    }
+
                     warn!(
                         mint = %mint_str,
                         reason = %reason,
