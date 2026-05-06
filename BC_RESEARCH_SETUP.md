@@ -41,7 +41,7 @@ whether these filters produce positive PnL, not just predict graduation.
 | Service | Env var | What to do |
 |---|---|---|
 | **Supabase** | `SUPABASE_URL`, `SUPABASE_SERVICE_KEY` | Create new project at supabase.com. Run migrations (see below). |
-| **PumpPortal WS** | None (hardcoded `wss://pumpportal.fun/api/data`) | Free public WebSocket, no account needed. |
+| **PumpPortal WS** | `PUMPPORTAL_API_KEY` | `newToken`/`migration` are free; `subscribeTokenTrade` is metered and requires a PumpPortal API key with a linked wallet funded with at least 0.02 SOL. |
 | **pump.fun REST** | None (hardcoded `https://frontend-api.pump.fun/...`) | Free public API, no key. |
 | **DexScreener** | None (hardcoded) | Free public API, no key. |
 | **GoPlus** | None | Free security API, no key. |
@@ -86,6 +86,7 @@ SUPABASE_SERVICE_KEY=YOUR_NEW_SERVICE_ROLE_KEY
 
 # ── Detection ──
 DETECTION_METHOD=pumpfun_ws
+PUMPPORTAL_API_KEY=YOUR_PUMPPORTAL_API_KEY
 POLL_RAYDIUM=false
 
 # ── Execution ──

@@ -77,8 +77,8 @@ Three independent detection sources run simultaneously. A token must **graduate*
 
 | Detail | Value |
 |--------|-------|
-| **Endpoint** | `wss://pumpportal.fun/api/data` |
-| **Cost** | Free |
+| **Endpoint** | `wss://pumpportal.fun/api/data?api-key=…` when `PUMPPORTAL_API_KEY` is set |
+| **Cost** | `newToken`/`migration` free; `tokenTrade` is metered by PumpPortal |
 | **Latency** | Real-time (sub-second) |
 
 **How it works:**
@@ -688,7 +688,7 @@ This prevents the old "ratchet-only" problem where a token that was briefly `Run
 
 | Service | Base URL | Purpose | Auth | Rate Limit |
 |---------|----------|---------|------|------------|
-| **PumpFun Portal** | `wss://pumpportal.fun/api/data` | Token discovery (bonding curve events) | None | Unlimited (free WS) |
+| **PumpFun Portal** | `wss://pumpportal.fun/api/data?api-key=…` | Token discovery + bonding-curve trades | `PUMPPORTAL_API_KEY` required for `subscribeTokenTrade`; free for `newToken`/`migration` | Metered token/account trade events |
 | **Pump.fun Frontend** | `https://frontend-api.pump.fun` | Historical bonding curve trades | None | Unknown |
 | **Solana RPC (Helius)** | `https://mainnet.helius-rpc.com/?api-key=…` | On-chain reads, tx submission | API key in URL | 50 RPS (Developer plan) |
 | **Helius DAS** | Same as RPC | `getAsset` for mint/freeze authority | API key in URL | 5 DAS RPS |

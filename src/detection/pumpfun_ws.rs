@@ -7,6 +7,7 @@ use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
 use solana_transaction_status::UiTransactionEncoding;
 use std::collections::{HashMap, HashSet};
+use std::env;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -17,8 +18,14 @@ use super::types::{DetectionSource, GraduatedToken, PipelineTiming, WatchlistEnt
 use crate::config::AppConfig;
 use crate::logger::SupabaseClient;
 
-/// Public pump.fun portal WebSocket endpoint.
+/// PumpPortal WebSocket base endpoint.
 const PUMPFUN_WS_URL: &str = "wss://pumpportal.fun/api/data";
+
+/// Optional PumpPortal API key. Required for metered tokenTrade/accountTrade streams.
+const PUMPPORTAL_API_KEY_ENV: &str = "PUMPPORTAL_API_KEY";
+
+/// Optional full URL override, useful if PumpPortal changes the query-string format.
+const PUMPPORTAL_WS_URL_ENV: &str = "PUMPPORTAL_WS_URL";
 
 /// Maximum back-off duration between reconnection attempts.
 const MAX_BACKOFF_SECS: u64 = 30;
@@ -55,6 +62,24 @@ fn bc_price_usd_from_market_cap(market_cap_usd: f64) -> f64 {
     } else {
         0.0
     }
+}
+
+fn pumpportal_ws_url() -> (String, bool) {
+    if let Ok(url) = env::var(PUMPPORTAL_WS_URL_ENV) {
+        let trimmed = url.trim();
+        if !trimmed.is_empty() {
+            return (trimmed.to_string(), trimmed.contains("api-key="));
+        }
+    }
+
+    if let Ok(api_key) = env::var(PUMPPORTAL_API_KEY_ENV) {
+        let trimmed = api_key.trim();
+        if !trimmed.is_empty() {
+            return (format!("{}?api-key={}", PUMPFUN_WS_URL, trimmed), true);
+        }
+    }
+
+    (PUMPFUN_WS_URL.to_string(), false)
 }
 
 fn bc_price_usd_from_sol(price_sol_per_token: f64, sol_usd: f64) -> f64 {
@@ -376,11 +401,20 @@ pub async fn run(tx: mpsc::Sender<GraduatedToken>, supabase: Arc<SupabaseClient>
 
 /// Inner helper: connect once, subscribe, and read messages until error.
 async fn connect_and_listen(tx: &mpsc::Sender<GraduatedToken>, supabase: &Arc<SupabaseClient>, rpc_url: &str, cfg: &Arc<AppConfig>, bc_cache: &BcScoreCache) -> Result<()> {
-    let (ws_stream, _response) = connect_async(PUMPFUN_WS_URL)
+    let (ws_url, token_trade_subs_enabled) = pumpportal_ws_url();
+    if token_trade_subs_enabled {
+        info!("Connecting to PumpFun WebSocket with PumpPortal API key");
+    } else {
+        warn!(
+            "Connecting to PumpFun WebSocket without PUMPPORTAL_API_KEY; PumpPortal will not allow subscribeTokenTrade, so BC Fast-Track data will stay unavailable"
+        );
+    }
+
+    let (ws_stream, _response) = connect_async(ws_url.as_str())
         .await
         .context("Failed to connect to PumpFun WebSocket")?;
 
-    info!("Connected to PumpFun WebSocket");
+    info!(token_trade_subs_enabled, "Connected to PumpFun WebSocket");
 
     let (mut write, mut read) = ws_stream.split();
 
@@ -450,7 +484,7 @@ async fn connect_and_listen(tx: &mpsc::Sender<GraduatedToken>, supabase: &Arc<Su
 
         match msg {
             Message::Text(text) => {
-                if let Err(e) = handle_text_message(&text, tx, &mut watchlist, &mut recent_labels, &mut emitted_complete, COMPLETE_DEDUP_WINDOW_MS, COMPLETE_DEDUP_MAX_ENTRIES, supabase, &ws_write_tx, rpc_url, cfg, bc_cache).await {
+                if let Err(e) = handle_text_message(&text, tx, &mut watchlist, &mut recent_labels, &mut emitted_complete, COMPLETE_DEDUP_WINDOW_MS, COMPLETE_DEDUP_MAX_ENTRIES, supabase, &ws_write_tx, token_trade_subs_enabled, rpc_url, cfg, bc_cache).await {
                     // Log parse errors but keep the connection alive.
                     warn!("Failed to process PumpFun message: {:#}", e);
                 }
@@ -513,6 +547,7 @@ async fn handle_text_message(
     complete_dedup_max_entries: usize,
     supabase: &Arc<SupabaseClient>,
     ws_write_tx: &mpsc::Sender<Message>,
+    token_trade_subs_enabled: bool,
     rpc_url: &str,
     cfg: &Arc<AppConfig>,
     bc_cache: &BcScoreCache,
@@ -528,7 +563,7 @@ async fn handle_text_message(
     }
 
     match kind {
-        EventKind::NewToken => handle_new_token(&v, watchlist, recent_labels, ws_write_tx).await?,
+        EventKind::NewToken => handle_new_token(&v, watchlist, recent_labels, ws_write_tx, token_trade_subs_enabled).await?,
         EventKind::TokenTrade => handle_token_trade(&v, watchlist, cfg, supabase, bc_cache).await?,
         EventKind::TokenComplete => {
             // ── Dedup tokenComplete: pump.fun can emit migrate+complete for the
@@ -577,8 +612,19 @@ async fn handle_text_message(
             handle_token_complete(&v, tx, watchlist, supabase, rpc_url, cfg).await?
         }
         EventKind::Unknown => {
-            // Subscription acks have no txType — only log events that have one
-            if let Some(tx_type) = v.get("txType").and_then(|t| t.as_str()) {
+            // Subscription acks/errors have no txType. Keep success acks quiet,
+            // but surface PumpPortal auth/funding errors because they disable BC Fast-Track.
+            if let Some(message) = v.get("message").and_then(|m| m.as_str()) {
+                if message.contains("subscribeTokenTrade")
+                    || message.contains("subscribeAccountTrade")
+                    || message.contains("API key")
+                    || message.contains("funded")
+                {
+                    warn!("PumpPortal WS subscription warning: {}", message);
+                } else {
+                    debug!("PumpPortal WS ack/message: {}", message);
+                }
+            } else if let Some(tx_type) = v.get("txType").and_then(|t| t.as_str()) {
                 info!("UNKNOWN EVENT txType={} payload={}", tx_type, serde_json::to_string_pretty(&v).unwrap_or_default());
             }
         }
@@ -597,6 +643,7 @@ async fn handle_new_token(
     watchlist: &mut HashMap<String, WatchlistEntry>,
     recent_labels: &mut HashMap<String, Vec<RecentLabelObservation>>,
     ws_write_tx: &mpsc::Sender<Message>,
+    token_trade_subs_enabled: bool,
 ) -> Result<()> {
     let mint_str = v
         .get("mint")
@@ -711,6 +758,14 @@ async fn handle_new_token(
 
 
     watchlist.insert(mint_str.to_string(), entry);
+
+    if !token_trade_subs_enabled {
+        debug!(
+            mint = %mint_str,
+            "Skipping PumpPortal subscribeTokenTrade; PUMPPORTAL_API_KEY/PUMPPORTAL_WS_URL with api-key is not configured"
+        );
+        return Ok(());
+    }
 
     // ── Subscribe to trade events for this specific token ──
     let sub_payload = format!(
