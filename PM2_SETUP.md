@@ -101,10 +101,19 @@ If not, run `pm2 resurrect && pm2 save` and re-check `systemctl status pm2-<user
 
 This repo also ships [setup_systemd.sh](setup_systemd.sh). Pick **one**
 supervisor — running both will fight over the binary. To switch from systemd
-to PM2:
+to PM2, stop the default `bcbot` unit created by [setup_systemd.sh](setup_systemd.sh)
+first. If you previously installed the unit under a custom name, stop that
+custom unit too.
 
 ```bash
-sudo systemctl stop solana-memecoin-bot
-sudo systemctl disable solana-memecoin-bot
+sudo systemctl stop bcbot 2>/dev/null || true
+sudo systemctl disable bcbot 2>/dev/null || true
+sudo systemctl stop solana-memecoin-bot 2>/dev/null || true
+sudo systemctl disable solana-memecoin-bot 2>/dev/null || true
 pm2 start ecosystem.config.js && pm2 save
 ```
+
+If PM2 logs `REFUSING TO START — another bot instance is already running`,
+inspect the holder PID from the log before deleting any lock file. The lock is
+held by the running process, so removing `/tmp/bc_trading_locks/*.lock` while
+the PID is alive does not safely stop duplicate trading.

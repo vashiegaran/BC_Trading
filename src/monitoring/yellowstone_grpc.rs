@@ -59,6 +59,10 @@ use crate::monitoring::helius_price_ws::{BondingCurveSnapshot, HeliusPriceCache}
 const PUMPFUN_PROGRAM: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 const RAYDIUM_AMM_V4: &str = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
 const SOL_MINT: &str = "So11111111111111111111111111111111111111112";
+const RAYDIUM_INITIALIZE2_TAG: u8 = 1;
+const RAYDIUM_INIT2_POOL_ACCOUNT_POS: usize = 4;
+const RAYDIUM_INIT2_COIN_MINT_POS: usize = 8;
+const RAYDIUM_INIT2_PC_MINT_POS: usize = 9;
 
 const MAX_BACKOFF_SECS: u64 = 10;
 const INITIAL_BACKOFF_SECS: u64 = 1;
@@ -532,6 +536,45 @@ fn build_tx_filters() -> HashMap<String, SubscribeRequestFilterTransactions> {
     txs
 }
 
+fn account_key_at(account_keys: &[Vec<u8>], ix_accounts: &[u8], ix_pos: usize) -> Option<Vec<u8>> {
+    let account_idx = *ix_accounts.get(ix_pos)? as usize;
+    account_keys.get(account_idx).cloned()
+}
+
+fn extract_raydium_initialize2_pool_and_mint(
+    account_keys: &[Vec<u8>],
+    ix_accounts: &[u8],
+    ix_data: &[u8],
+) -> Option<(String, String)> {
+    if ix_data.first().copied() != Some(RAYDIUM_INITIALIZE2_TAG) {
+        return None;
+    }
+
+    // Raydium AMM V4 initialize2 layout as observed in migration txs:
+    //   [0] SPL Token Program
+    //   [1] Associated Token Program
+    //   [2] System Program
+    //   [3] Rent Sysvar
+    //   [4] amm_id (pool)
+    //   [8] coin_mint
+    //   [9] pc_mint (WSOL for pump.fun graduations; side order can vary)
+    let pool = account_key_at(account_keys, ix_accounts, RAYDIUM_INIT2_POOL_ACCOUNT_POS)?;
+    let coin_mint = account_key_at(account_keys, ix_accounts, RAYDIUM_INIT2_COIN_MINT_POS)?;
+    let pc_mint = account_key_at(account_keys, ix_accounts, RAYDIUM_INIT2_PC_MINT_POS)?;
+    let sol_mint = bs58_to_bytes(SOL_MINT);
+
+    let mint = match (coin_mint == sol_mint, pc_mint == sol_mint) {
+        (false, true) => coin_mint,
+        (true, false) => pc_mint,
+        _ => return None,
+    };
+
+    Some((
+        bs58::encode(mint).into_string(),
+        bs58::encode(pool).into_string(),
+    ))
+}
+
 /// Handle a transaction update from the Raydium graduation filter.
 ///
 /// Extracts the pool address and mint from Raydium AMM V4 `initialize2`
@@ -566,12 +609,6 @@ async fn handle_transaction_update(
     // (same IX can appear in both top-level and inner instructions).
     let mut seen_pools: Vec<String> = Vec::new();
 
-    // Find the Raydium instruction. In Raydium AMM V4, `initialize2` is the
-    // pool creation IX. The account layout is:
-    //   [0] amm_id (pool)
-    //   ...
-    //   [8] coin_mint (token A — the memecoin mint)
-    //   [9] pc_mint   (token B — always WSOL for pump.fun pools)
     for ix in &msg.instructions {
         let prog_idx = ix.program_id_index as usize;
         if prog_idx >= account_keys.len() {
@@ -580,21 +617,13 @@ async fn handle_transaction_update(
         if account_keys[prog_idx] != raydium_bytes {
             continue;
         }
-        // `initialize2` needs at least 10 accounts (index 0..9).
-        if ix.accounts.len() < 10 {
+        let Some((mint_str, pool_str)) = extract_raydium_initialize2_pool_and_mint(
+            &account_keys,
+            &ix.accounts,
+            &ix.data,
+        ) else {
             continue;
-        }
-
-        let pool_idx = ix.accounts[0] as usize;
-        let coin_mint_idx = ix.accounts[8] as usize;
-        // let pc_mint_idx = ix.accounts[9] as usize; // WSOL
-
-        if pool_idx >= account_keys.len() || coin_mint_idx >= account_keys.len() {
-            continue;
-        }
-
-        let pool_str = bs58::encode(&account_keys[pool_idx]).into_string();
-        let mint_str = bs58::encode(&account_keys[coin_mint_idx]).into_string();
+        };
 
         // Dedup: skip if we already logged this pool from a top-level IX.
         if seen_pools.contains(&pool_str) {
@@ -637,19 +666,13 @@ async fn handle_transaction_update(
             if account_keys[prog_idx] != raydium_bytes {
                 continue;
             }
-            if inner_ix.accounts.len() < 10 {
+            let Some((mint_str, pool_str)) = extract_raydium_initialize2_pool_and_mint(
+                &account_keys,
+                &inner_ix.accounts,
+                &inner_ix.data,
+            ) else {
                 continue;
-            }
-
-            let pool_idx = inner_ix.accounts[0] as usize;
-            let coin_mint_idx = inner_ix.accounts[8] as usize;
-
-            if pool_idx >= account_keys.len() || coin_mint_idx >= account_keys.len() {
-                continue;
-            }
-
-            let pool_str = bs58::encode(&account_keys[pool_idx]).into_string();
-            let mint_str = bs58::encode(&account_keys[coin_mint_idx]).into_string();
+            };
 
             // Dedup: skip if already logged from top-level instructions.
             if seen_pools.contains(&pool_str) {
