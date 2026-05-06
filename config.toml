@@ -218,7 +218,8 @@ slippage_bps = 1000
 
 # Maximum number of open positions at any time
 # v2: raised from 5 → 8; 74% of passed tokens never traded due to full slots
-max_open_positions = 8
+# LIVE CANARY (2026-05-06): cap at 2 while PAPER_TRADE=false and wallet is small.
+max_open_positions = 2
 
 # Transaction confirmation timeout in seconds
 tx_confirm_timeout_secs = 25
@@ -359,10 +360,11 @@ momentum_kill_min_multiplier = 1.3
 [risk]
 
 # Daily loss limit in SOL — stop new buys if exceeded
-daily_loss_limit_sol = 1.0
+# LIVE CANARY (2026-05-06): hard-cap day-1 downside to 2 failed 0.05 SOL entries.
+daily_loss_limit_sol = 0.10
 
 # Maximum SOL deployed across all open positions
-max_portfolio_exposure_sol = 0.6
+max_portfolio_exposure_sol = 0.10
 
 # Minimum SOL balance to keep for gas fees
 min_sol_balance = 0.2

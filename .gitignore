@@ -5,3 +5,4 @@ bot-wallet-new.json
 target/
 *.db
 scripts/
+wallets/
