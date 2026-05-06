@@ -1716,6 +1716,19 @@ async fn monitor_position(
                 position.sniper_features.as_ref(),
             );
 
+            // v18.7: on-chain bc_score is the primary moonbag gate; narrative
+            // score is optional and additive. We promote at the TP1 cross
+            // when EITHER the on-chain score clears the gate OR a v14
+            // paper-path matched.
+            let early_onchain_score = position.sniper_features.as_ref()
+                .and_then(|f| f.get("bc_score").and_then(|v| v.as_f64()))
+                .unwrap_or(0.0);
+            let early_narrative_score = last_narrative_result.as_ref()
+                .map(|nr| nr.score as f64).unwrap_or(0.0);
+            let early_effective_score = early_onchain_score.max(early_narrative_score);
+            let early_min_score = cfg.strategy.monitoring.moonbag_promotion_min_score;
+            let early_score_passes = early_effective_score >= early_min_score;
+
             // Always log the eval (helps the path_eval_log answer the
             // "did we even reach this point?" question).
             {
@@ -1723,10 +1736,11 @@ async fn monitor_position(
                 let mint_bg = position.mint.clone();
                 let pos_id = position.position_id;
                 let eval = early_eval.clone();
-                let openai_score = last_narrative_result.as_ref()
-                    .map(|nr| nr.score as f64).unwrap_or(0.0);
-                let min_score = cfg.strategy.monitoring.moonbag_promotion_min_score;
-                let decision: &'static str = if eval.selected.is_some() {
+                let logged_score = early_effective_score;
+                let min_score = early_min_score;
+                let decision: &'static str = if early_score_passes {
+                    "onchain_score_promoted"
+                } else if eval.selected.is_some() {
                     "paper_path_promoted"
                 } else {
                     "no_promote"
@@ -1734,13 +1748,19 @@ async fn monitor_position(
                 tokio::spawn(async move {
                     moonbag::write_path_eval_log(
                         &sb, pos_id, &mint_bg, "early_tick",
-                        openai_score, min_score, false,
+                        logged_score, min_score, false,
                         &eval, decision,
                     ).await;
                 });
             }
 
-            if let Some(promo_source) = early_eval.selected.clone() {
+            // Promote on either the on-chain score gate OR a v14 paper-path match.
+            let early_promo_source: Option<PromotionSource> = if early_score_passes {
+                Some(PromotionSource::NarrativeTp1)
+            } else {
+                early_eval.selected.clone()
+            };
+            if let Some(promo_source) = early_promo_source {
                 info!(
                     mint = %position.mint,
                     path = %promo_source,
@@ -1815,11 +1835,17 @@ async fn monitor_position(
                 _ => {}
             }
 
-            // ── TP2 moonbag intercept: score check OR fast-runner auto-promote ──
+            // ── TP2 moonbag intercept: on-chain score OR fast-runner OR paper-path ──
             if signal_reason_clone == types::ExitReason::TakeProfit2
                 && remaining_token_amount > 1.0
             {
-                let openai_score = last_narrative_result.as_ref().map(|nr| nr.score as f64).unwrap_or(0.0);
+                // v18.7: gate uses on-chain bc_score as the primary signal,
+                // narrative score (if present) is additive via .max().
+                let onchain_score = position.sniper_features.as_ref()
+                    .and_then(|f| f.get("bc_score").and_then(|v| v.as_f64()))
+                    .unwrap_or(0.0);
+                let narrative_score = last_narrative_result.as_ref().map(|nr| nr.score as f64).unwrap_or(0.0);
+                let openai_score = onchain_score.max(narrative_score);
                 let min_score = cfg.strategy.monitoring.moonbag_promotion_min_score;
                 let elapsed_secs = started_at.elapsed().as_secs();
                 let fast_runner_threshold = cfg.strategy.monitoring.fast_runner_threshold_secs;
@@ -1850,7 +1876,7 @@ async fn monitor_position(
                 let tp2_decision: &'static str = if is_fast_runner {
                     "fast_runner_promoted"
                 } else if openai_score >= min_score {
-                    "narrative_promoted"
+                    "onchain_score_promoted"
                 } else if paper_path.is_some() {
                     "paper_path_promoted"
                 } else {
@@ -2127,17 +2153,21 @@ async fn monitor_position(
                 break;
             }
 
-            // ── Moonbag promotion: TP1 confirmed + OpenAI holistic score ──
-            // The OpenAI score (0-100) is the sole decision-maker — it evaluates
-            // on-chain flow, social/narrative presence, and market data together.
-            // No more manual on-chain scoring + narrative bonus split.
+            // ── Moonbag promotion: TP1 confirmed + on-chain bc_score (v18.7) ──
+            // Primary gate is on-chain bc_score from sniper_features. Narrative
+            // score (if available) is additive via .max(). v14 paper-paths
+            // remain as a secondary fallback.
             if signal_reason_clone == types::ExitReason::TakeProfit1
                 && got_confirmation
                 && tp1_triggered
                 && remaining_token_amount > 1.0
             {
                 let peak_mult = if entry_price_usd > 0.0 { peak_price / entry_price_usd } else { 1.0 };
-                let openai_score = last_narrative_result.as_ref().map(|nr| nr.score as f64).unwrap_or(0.0);
+                let onchain_score = position.sniper_features.as_ref()
+                    .and_then(|f| f.get("bc_score").and_then(|v| v.as_f64()))
+                    .unwrap_or(0.0);
+                let narrative_score = last_narrative_result.as_ref().map(|nr| nr.score as f64).unwrap_or(0.0);
+                let openai_score = onchain_score.max(narrative_score);
                 let min_score = cfg.strategy.monitoring.moonbag_promotion_min_score;
 
                 // Log every moonbag evaluation to narrative_checks for calibration
@@ -2196,7 +2226,7 @@ async fn monitor_position(
                 };
                 // Decision label for path_eval_log
                 let tp1_decision: &'static str = if openai_score >= min_score {
-                    "narrative_promoted"
+                    "onchain_score_promoted"
                 } else if tp1_paper_path.is_some() {
                     "paper_path_promoted"
                 } else {

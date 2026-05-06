@@ -44,7 +44,13 @@ struct TrackedExit {
     /// Cumulative re-entry attempts recorded for this mint (in-memory counter).
     attempts: u16,
     /// Last narrative score recorded for this mint (0..100) — nullable.
+    /// v18.7: replaced as gating signal by `entry_bc_score` (on-chain).
+    /// Still populated for historical/back-fill purposes when narrative runs.
     previous_score: Option<u8>,
+    /// On-chain bc_score (0..100) from the position's original sniper_features.
+    /// Primary gate for re-entry as of v18.7 — we never re-enter a token whose
+    /// original on-chain score was too weak.
+    entry_bc_score: Option<f64>,
 }
 
 // ── Row shape for Supabase query on positions ────────────────
@@ -69,6 +75,8 @@ struct ClosedPositionRow {
     closed_at: Option<DateTime<Utc>>,
     #[serde(default)]
     peak_multiplier: Option<f64>,
+    #[serde(default)]
+    sniper_features: Option<serde_json::Value>,
 }
 
 // ── Row shape for outcome backfill ───────────────────────────
@@ -90,7 +98,11 @@ struct PendingOutcomeRow {
 struct Gates {
     window: bool,
     dip: bool,
+    /// v18.7: renamed semantics — true when on-chain bc_score is available
+    /// from the original entry. Field name kept for backward-compat with the
+    /// reentry_candidates schema.
     narrative_available: bool,
+    /// v18.7: now reflects on-chain bc_score >= threshold (was OpenAI score).
     narrative_threshold: bool,
 }
 
@@ -105,9 +117,9 @@ impl Gates {
         } else if !self.dip {
             Some("insufficient_dip")
         } else if !self.narrative_available {
-            Some("narrative_unavailable")
+            Some("onchain_score_unavailable")
         } else if !self.narrative_threshold {
-            Some("narrative_below_threshold")
+            Some("onchain_score_below_threshold")
         } else {
             None
         }
@@ -249,7 +261,7 @@ async fn enqueue_new_closed(
         .to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
 
     let url = format!(
-        "{}/positions?status=eq.closed&closed_at=gte.{}&select=id,mint,symbol,name,exit_price_usd,pnl_pct,exit_reason,exit_time,closed_at,peak_multiplier&order=closed_at.desc&limit=100",
+        "{}/positions?status=eq.closed&closed_at=gte.{}&select=id,mint,symbol,name,exit_price_usd,pnl_pct,exit_reason,exit_time,closed_at,peak_multiplier,sniper_features&order=closed_at.desc&limit=100",
         supabase.base_url, cutoff
     );
 
@@ -313,6 +325,8 @@ async fn enqueue_new_closed(
                 exit_was_profitable: profitable,
                 attempts: 0,
                 previous_score: None,
+                entry_bc_score: row.sniper_features.as_ref()
+                    .and_then(|f| f.get("bc_score").and_then(|v| v.as_f64())),
             },
         );
         seen_positions.insert(row.id);
@@ -362,15 +376,27 @@ async fn evaluate_candidate(
     gates.window = true; // already guarded by caller
     gates.dip = dip_pct >= cfg.strategy.reentry.min_dip_pct;
 
-    // 2. Narrative score — only if keys available, dip gate passed, AND
-    // require_narrative is true. When require_narrative=false (dip-only
-    // piggyback shadow), auto-pass the narrative gates so we can collect
-    // post-moonbag-exit price data without burning OpenAI/X credits per tick.
-    let mut narrative_result: Option<NarrativeResult> = None;
-    if !cfg.strategy.reentry.require_narrative {
+    // v18.7: on-chain bc_score is the primary re-entry gate.
+    // We use the bc_score captured from the original entry's sniper_features.
+    // Threshold reuses `min_narrative_score` config field (now reinterpreted
+    // as on-chain score threshold). Narrative scoring is opportunistic only:
+    // we still call it when keys are present so we can log a narrative_score
+    // alongside, but it no longer controls the gate.
+    let min_score_threshold = cfg.strategy.reentry.min_narrative_score as f64;
+    let onchain_score = exit.entry_bc_score.unwrap_or(0.0);
+    if let Some(_score) = exit.entry_bc_score {
         gates.narrative_available = true;
-        gates.narrative_threshold = true;
-    } else if gates.dip {
+        gates.narrative_threshold = onchain_score >= min_score_threshold;
+    } else {
+        // No on-chain score on file (legacy positions) — conservative: block.
+        gates.narrative_available = false;
+        gates.narrative_threshold = false;
+    }
+
+    // Opportunistic narrative call — logged but not gating. Skipped when
+    // require_narrative=false (dip-only piggyback shadow) to save credits.
+    let mut narrative_result: Option<NarrativeResult> = None;
+    if cfg.strategy.reentry.require_narrative && gates.dip {
         if let (Some(openai), Some(x_bearer), Some(birdeye)) = (
             cfg.env.openai_api_key.as_deref(),
             cfg.env.x_api_bearer_token.as_deref(),
@@ -392,9 +418,6 @@ async fn evaluate_candidate(
             };
             match narrative::check_narrative(http, openai, birdeye, x_bearer, &ctx).await {
                 Ok(res) => {
-                    gates.narrative_available = true;
-                    gates.narrative_threshold =
-                        res.score >= cfg.strategy.reentry.min_narrative_score;
                     narrative_result = Some(res);
                 }
                 Err(e) => {
