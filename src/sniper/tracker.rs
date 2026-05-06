@@ -170,7 +170,6 @@ async fn track_rejected_prices(
         let peak_multiplier = peak_price / entry_price;
         let url = format!("{}/sniper_candidates?id=eq.{}", supabase.base_url, candidate_id);
         let payload = serde_json::json!({
-            "peak_price_usd": peak_price,
             "peak_multiplier": peak_multiplier,
         });
         let _ = supabase.client.patch(&url).json(&payload).send().await;
