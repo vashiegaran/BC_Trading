@@ -19,6 +19,13 @@ const ENRICHMENT_TIMEOUT_MS: u64 = 2000;
 /// Smart wallet gets a slightly longer timeout — it runs in parallel so doesn't
 /// add wall-clock time, but its 3 sequential RPC steps can take ~900ms-1.5s.
 const SMART_WALLET_TIMEOUT_MS: u64 = 3000;
+/// gRPC migration events can reach sniper before the RPC node can serve the
+/// freshly-created mint account. A few short retries avoids false
+/// `mint_authority_no_data` rejects without materially slowing normal cases.
+const MINT_ACCOUNT_FETCH_ATTEMPTS: usize = 4;
+const MINT_ACCOUNT_RETRY_DELAYS_MS: [u64; MINT_ACCOUNT_FETCH_ATTEMPTS - 1] = [120, 250, 500];
+const FAST_MINT_DATA_TIMEOUT_MS: u64 = 2500;
+const FAST_GOPLUS_TIMEOUT_MS: u64 = 1500;
 
 /// Run the full enrichment pipeline for a token that just graduated.
 /// All calls fire concurrently with a 2-second overall timeout.
@@ -318,13 +325,14 @@ pub async fn enrich_token_fast(
     mint: &str,
 ) -> EnrichmentResult {
     let start = Instant::now();
-    let timeout = Duration::from_millis(1500);
+    let mint_timeout = Duration::from_millis(FAST_MINT_DATA_TIMEOUT_MS);
+    let goplus_timeout = Duration::from_millis(FAST_GOPLUS_TIMEOUT_MS);
     let mint_str = mint.to_string();
 
     let (mint_timed, gp_timed) = tokio::join!(
         async {
             let t = Instant::now();
-            let r = match tokio::time::timeout(timeout, fetch_mint_data(rpc, &mint_str)).await {
+            let r = match tokio::time::timeout(mint_timeout, fetch_mint_data(rpc, &mint_str)).await {
                 Ok(r) => r,
                 Err(_) => { warn!(mint = %mint_str, "Fast-track: mint data timed out"); None }
             };
@@ -332,7 +340,7 @@ pub async fn enrich_token_fast(
         },
         async {
             let t = Instant::now();
-            let r = match tokio::time::timeout(timeout, fetch_goplus(&mint_str)).await {
+            let r = match tokio::time::timeout(goplus_timeout, fetch_goplus(&mint_str)).await {
                 Ok(r) => r,
                 Err(_) => { warn!(mint = %mint_str, "Fast-track: GoPlus timed out"); None }
             };
@@ -382,13 +390,29 @@ async fn fetch_mint_data(rpc: &RpcClient, mint: &str) -> Option<MintData> {
     use std::str::FromStr;
 
     let mint_pubkey = Pubkey::from_str(mint).ok()?;
-    let account = match rpc.get_account(&mint_pubkey).await {
-        Ok(a) => a,
-        Err(e) => {
-            warn!(mint = %mint, "Failed to fetch mint account: {}", e);
-            return None;
+
+    let mut account = None;
+    for attempt in 0..MINT_ACCOUNT_FETCH_ATTEMPTS {
+        match rpc.get_account(&mint_pubkey).await {
+            Ok(a) => {
+                account = Some(a);
+                break;
+            }
+            Err(e) => {
+                warn!(
+                    mint = %mint,
+                    attempt = attempt + 1,
+                    max_attempts = MINT_ACCOUNT_FETCH_ATTEMPTS,
+                    "Failed to fetch mint account: {}",
+                    e
+                );
+                if let Some(delay_ms) = MINT_ACCOUNT_RETRY_DELAYS_MS.get(attempt) {
+                    tokio::time::sleep(Duration::from_millis(*delay_ms)).await;
+                }
+            }
         }
     };
+    let account = account?;
 
     let data = &account.data;
     if data.len() < 82 {
