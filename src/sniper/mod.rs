@@ -24,12 +24,91 @@ use solana_client::nonblocking::rpc_client::RpcClient;
 use tokio::sync::mpsc;
 use tracing::{info, warn, error};
 
-use crate::config::AppConfig;
-use crate::detection::types::{GraduatedToken, BcScoreCache};
+use crate::config::{AppConfig, FiltersConfig};
+use crate::detection::types::{GraduatedToken, BcScoreCache, BcScoreEntry};
 use crate::execution::jupiter::{JupiterClient, SOL_MINT};
 use crate::logger::SupabaseClient;
 
 const SNIPER_CHANNEL_CAPACITY: usize = 100;
+const CREATOR_REBUY_SHADOW_ENTRY_TIER: &str = "creator_rebuy_shadow_fast_track";
+const CREATOR_REBUY_LIVE_TEST_ENTRY_TIER: &str = "creator_rebuy_live_test_fast_track";
+
+fn creator_rebuy_live_test_rejection_reason(
+    token: &GraduatedToken,
+    bc_entry: &BcScoreEntry,
+    filters_cfg: &FiltersConfig,
+    initial_liquidity_sol: f64,
+) -> Option<String> {
+    if !filters_cfg.creator_rebuy_live_test_enabled {
+        return Some("creator_rebuy_live_test_disabled".to_string());
+    }
+
+    if bc_entry.score < filters_cfg.creator_rebuy_live_test_min_score {
+        return Some(format!(
+            "bc_score_{:.1}_below_live_test_min_{:.1}",
+            bc_entry.score, filters_cfg.creator_rebuy_live_test_min_score
+        ));
+    }
+
+    if token.buy_pressure_pct < filters_cfg.creator_rebuy_live_test_min_buy_pressure_pct {
+        return Some(format!(
+            "buy_pressure_{:.1}_below_live_test_min_{:.1}",
+            token.buy_pressure_pct, filters_cfg.creator_rebuy_live_test_min_buy_pressure_pct
+        ));
+    }
+
+    let buy_sell_ratio = match (bc_entry.buy_sell_ratio > 0.0, token.buy_sell_ratio > 0.0) {
+        (true, true) => bc_entry.buy_sell_ratio.min(token.buy_sell_ratio),
+        (true, false) => bc_entry.buy_sell_ratio,
+        (false, true) => token.buy_sell_ratio,
+        (false, false) => 0.0,
+    };
+    if buy_sell_ratio < filters_cfg.creator_rebuy_live_test_min_buy_sell_ratio {
+        return Some(format!(
+            "buy_sell_ratio_{:.2}_below_live_test_min_{:.2}",
+            buy_sell_ratio, filters_cfg.creator_rebuy_live_test_min_buy_sell_ratio
+        ));
+    }
+
+    let unique_buyers = bc_entry.unique_buyers.max(token.unique_buyer_count);
+    if unique_buyers < filters_cfg.creator_rebuy_live_test_min_unique_buyers {
+        return Some(format!(
+            "unique_buyers_{}_below_live_test_min_{}",
+            unique_buyers, filters_cfg.creator_rebuy_live_test_min_unique_buyers
+        ));
+    }
+
+    let sell_count = bc_entry.sell_count.max(token.sell_count);
+    if sell_count > filters_cfg.creator_rebuy_live_test_max_sell_count {
+        return Some(format!(
+            "sell_count_{}_above_live_test_max_{}",
+            sell_count, filters_cfg.creator_rebuy_live_test_max_sell_count
+        ));
+    }
+
+    let min_liq = filters_cfg.creator_rebuy_live_test_min_initial_liquidity_sol;
+    if min_liq > 0.0 {
+        if initial_liquidity_sol <= 0.0 {
+            return Some("initial_liquidity_sol_unknown_for_live_test".to_string());
+        }
+        if initial_liquidity_sol < min_liq {
+            return Some(format!(
+                "initial_liquidity_sol_{:.1}_below_live_test_min_{:.1}",
+                initial_liquidity_sol, min_liq
+            ));
+        }
+    }
+
+    let max_liq = filters_cfg.creator_rebuy_live_test_max_initial_liquidity_sol;
+    if max_liq > 0.0 && initial_liquidity_sol > max_liq {
+        return Some(format!(
+            "initial_liquidity_sol_{:.1}_above_live_test_max_{:.1}",
+            initial_liquidity_sol, max_liq
+        ));
+    }
+
+    None
+}
 
 /// Start the sniper enrichment pipeline.
 ///
@@ -108,14 +187,21 @@ pub fn start(
                             .as_ref()
                             .map(|entry| entry.score >= cfg.strategy.filters.creator_rebuy_shadow_min_score)
                             .unwrap_or(false);
+                    let creator_rebuy_live_test_score_qualifies = reason == "creator_rebuy_detected"
+                        && cfg.strategy.filters.creator_rebuy_live_test_enabled
+                        && bc_entry
+                            .as_ref()
+                            .map(|entry| entry.score >= cfg.strategy.filters.creator_rebuy_live_test_min_score)
+                            .unwrap_or(false);
 
-                    if creator_rebuy_shadow_qualifies {
-                        let bc_entry = bc_entry.clone().expect("creator-rebuy shadow qualification requires BC entry");
+                    if creator_rebuy_shadow_qualifies || creator_rebuy_live_test_score_qualifies {
+                        let bc_entry = bc_entry.clone().expect("creator-rebuy experiment qualification requires BC entry");
                         warn!(
                             mint = %mint_str,
                             bc_score = format!("{:.1}", bc_entry.score),
-                            threshold = cfg.strategy.filters.creator_rebuy_shadow_min_score,
-                            "🧪 CREATOR-REBUY SHADOW — live blocked, running Fast-Track safety checks only"
+                            shadow_threshold = cfg.strategy.filters.creator_rebuy_shadow_min_score,
+                            live_threshold = cfg.strategy.filters.creator_rebuy_live_test_min_score,
+                            "🧪 CREATOR-REBUY EXPERIMENT — running Fast-Track safety checks"
                         );
 
                         let shadow_start = std::time::Instant::now();
@@ -131,28 +217,67 @@ pub fn start(
 
                         let shadow_filter = filters::apply_fast_track_filters(&shadow_enrichment);
                         let shadow_elapsed = shadow_start.elapsed();
-                        let shadow_action = if shadow_filter.passed {
+                        let live_test_rejection_reason = if shadow_filter.passed {
+                            creator_rebuy_live_test_rejection_reason(
+                                &token,
+                                &bc_entry,
+                                &cfg.strategy.filters,
+                                initial_liquidity_sol,
+                            )
+                        } else {
+                            Some(
+                                shadow_filter
+                                    .rejection_reason
+                                    .clone()
+                                    .unwrap_or_else(|| "fast_track_safety_unknown".to_string()),
+                            )
+                        };
+                        let live_test_qualifies = shadow_filter.passed && live_test_rejection_reason.is_none();
+
+                        let shadow_action = if live_test_qualifies {
+                            "creator_rebuy_live_test_passed"
+                        } else if shadow_filter.passed {
                             "creator_rebuy_shadow_passed"
                         } else {
                             "creator_rebuy_shadow_rejected"
                         };
-                        let shadow_rejection_reason = if shadow_filter.passed {
+                        let shadow_rejection_reason = if live_test_qualifies {
+                            None
+                        } else if shadow_filter.passed {
                             Some("creator_rebuy_detected_live_block")
                         } else {
                             shadow_filter.rejection_reason.as_deref()
                         };
-                        let shadow_filter_name = if shadow_filter.passed {
+                        let shadow_filter_name = if live_test_qualifies {
+                            Some("creator_rebuy_live_test")
+                        } else if shadow_filter.passed {
                             Some("creator_rebuy_shadow")
                         } else {
                             shadow_filter.filter_name.as_deref()
                         };
+                        let entry_tier = if live_test_qualifies {
+                            CREATOR_REBUY_LIVE_TEST_ENTRY_TIER
+                        } else {
+                            CREATOR_REBUY_SHADOW_ENTRY_TIER
+                        };
 
                         let shadow_features = serde_json::json!({
-                            "entry_tier": "creator_rebuy_shadow_fast_track",
-                            "shadow_mode": true,
-                            "live_forwarded": false,
+                            "entry_tier": entry_tier,
+                            "shadow_mode": !live_test_qualifies,
+                            "live_forwarded": live_test_qualifies,
                             "blocked_live_reason": reason,
                             "shadow_min_score": cfg.strategy.filters.creator_rebuy_shadow_min_score,
+                            "creator_rebuy_live_test_enabled": cfg.strategy.filters.creator_rebuy_live_test_enabled,
+                            "creator_rebuy_live_test_profile_passed": live_test_qualifies,
+                            "creator_rebuy_live_test_rejection_reason": live_test_rejection_reason.as_deref(),
+                            "creator_rebuy_live_test_min_score": cfg.strategy.filters.creator_rebuy_live_test_min_score,
+                            "creator_rebuy_live_test_min_buy_pressure_pct": cfg.strategy.filters.creator_rebuy_live_test_min_buy_pressure_pct,
+                            "creator_rebuy_live_test_min_buy_sell_ratio": cfg.strategy.filters.creator_rebuy_live_test_min_buy_sell_ratio,
+                            "creator_rebuy_live_test_min_unique_buyers": cfg.strategy.filters.creator_rebuy_live_test_min_unique_buyers,
+                            "creator_rebuy_live_test_max_sell_count": cfg.strategy.filters.creator_rebuy_live_test_max_sell_count,
+                            "creator_rebuy_live_test_min_initial_liquidity_sol": cfg.strategy.filters.creator_rebuy_live_test_min_initial_liquidity_sol,
+                            "creator_rebuy_live_test_max_initial_liquidity_sol": cfg.strategy.filters.creator_rebuy_live_test_max_initial_liquidity_sol,
+                            "creator_rebuy_live_test_buy_amount_sol": cfg.strategy.execution.creator_rebuy_live_test_buy_amount_sol,
                             "bc_score": bc_entry.score,
                             "bc_unique_buyers": bc_entry.unique_buyers,
                             "bc_buy_sell_ratio": bc_entry.buy_sell_ratio,
@@ -187,10 +312,49 @@ pub fn start(
                             &shadow_features,
                         ).await;
 
-                        if shadow_filter.passed {
+                        if live_test_qualifies {
                             info!(
                                 mint = %mint_str,
                                 bc_score = format!("{:.1}", bc_entry.score),
+                                buy_pressure = format!("{:.1}", token.buy_pressure_pct),
+                                buy_sell_ratio = format!("{:.2}", bc_entry.buy_sell_ratio),
+                                elapsed_ms = shadow_elapsed.as_millis() as u64,
+                                "🚦 CREATOR-REBUY LIVE TEST PASS — forwarding tiny canary to filter engine"
+                            );
+
+                            token.candidate_id = candidate_id;
+                            token.sniper_features = Some(shadow_features);
+                            token.sniper_score = Some(bc_entry.score);
+
+                            let deferred_supabase = Arc::clone(&supabase);
+                            let deferred_cfg = Arc::clone(&cfg);
+                            let deferred_mint = mint_str.clone();
+                            let deferred_creator = creator_str.clone();
+                            let deferred_liq = initial_liquidity_sol;
+                            let deferred_detected_at = detected_at;
+                            let deferred_candidate_id = candidate_id;
+                            tokio::spawn(async move {
+                                run_deferred_verification(
+                                    deferred_cfg,
+                                    deferred_supabase,
+                                    deferred_mint,
+                                    deferred_creator,
+                                    deferred_liq,
+                                    deferred_detected_at,
+                                    deferred_candidate_id,
+                                ).await;
+                            });
+
+                            if tx.send(token).await.is_err() {
+                                warn!("Sniper → filter channel closed");
+                                break;
+                            }
+                            continue;
+                        } else if shadow_filter.passed {
+                            info!(
+                                mint = %mint_str,
+                                bc_score = format!("{:.1}", bc_entry.score),
+                                live_test_rejection = live_test_rejection_reason.as_deref().unwrap_or("unknown"),
                                 elapsed_ms = shadow_elapsed.as_millis() as u64,
                                 "🧪 CREATOR-REBUY SHADOW PASS — counterfactual tracked, live execution still blocked"
                             );
@@ -212,18 +376,20 @@ pub fn start(
                                 .or_else(|| Some("fast_track_safety_unknown".to_string()));
                         }
 
-                        let timing_payload = token.pipeline_timing.to_json(&mint_str);
-                        let supabase_bg = Arc::clone(&supabase);
-                        tokio::spawn(async move {
-                            log_pipeline_latency(&supabase_bg, &timing_payload).await;
-                        });
+                        if !live_test_qualifies {
+                            let timing_payload = token.pipeline_timing.to_json(&mint_str);
+                            let supabase_bg = Arc::clone(&supabase);
+                            tokio::spawn(async move {
+                                log_pipeline_latency(&supabase_bg, &timing_payload).await;
+                            });
 
-                        if let Some(cid) = candidate_id {
-                            tracker::spawn_rejected_tracker(
-                                Arc::clone(&supabase),
-                                cid,
-                                mint_str.clone(),
-                            );
+                            if let Some(cid) = candidate_id {
+                                tracker::spawn_rejected_tracker(
+                                    Arc::clone(&supabase),
+                                    cid,
+                                    mint_str.clone(),
+                                );
+                            }
                         }
 
                         continue;

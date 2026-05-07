@@ -225,6 +225,38 @@ pub struct FiltersConfig {
     /// Minimum BC score required for the creator-rebuy shadow lane.
     #[serde(default = "default_creator_rebuy_shadow_min_score")]
     pub creator_rebuy_shadow_min_score: f64,
+    /// Extremely narrow live canary for creator-rebuy tokens that already pass
+    /// Fast-Track safety plus stronger bonding-curve profile gates. Keeps the
+    /// broad `reject_creator_rebuy` hard gate intact.
+    #[serde(default)]
+    pub creator_rebuy_live_test_enabled: bool,
+    /// Minimum BC score for the creator-rebuy live canary.
+    #[serde(default = "default_creator_rebuy_live_test_min_score")]
+    pub creator_rebuy_live_test_min_score: f64,
+    /// Minimum buy pressure for the creator-rebuy live canary.
+    #[serde(default = "default_creator_rebuy_live_test_min_buy_pressure_pct")]
+    pub creator_rebuy_live_test_min_buy_pressure_pct: f64,
+    /// Minimum buy/sell ratio for the creator-rebuy live canary.
+    #[serde(default = "default_creator_rebuy_live_test_min_buy_sell_ratio")]
+    pub creator_rebuy_live_test_min_buy_sell_ratio: f64,
+    /// Minimum distinct buyers for the creator-rebuy live canary.
+    #[serde(default = "default_creator_rebuy_live_test_min_unique_buyers")]
+    pub creator_rebuy_live_test_min_unique_buyers: usize,
+    /// Maximum sell count for the creator-rebuy live canary.
+    #[serde(default = "default_creator_rebuy_live_test_max_sell_count")]
+    pub creator_rebuy_live_test_max_sell_count: u64,
+    /// Minimum SOL-side pool liquidity for the creator-rebuy live canary.
+    /// 0 = disabled. Unknown/zero liquidity fails when this is > 0.
+    #[serde(default = "default_creator_rebuy_live_test_min_initial_liquidity_sol")]
+    pub creator_rebuy_live_test_min_initial_liquidity_sol: f64,
+    /// Maximum SOL-side pool liquidity for the creator-rebuy live canary.
+    /// 0 = disabled.
+    #[serde(default = "default_creator_rebuy_live_test_max_initial_liquidity_sol")]
+    pub creator_rebuy_live_test_max_initial_liquidity_sol: f64,
+    /// Maximum concurrently open positions from the creator-rebuy live canary.
+    /// 0 = no lane-specific cap.
+    #[serde(default = "default_creator_rebuy_live_test_max_open_positions")]
+    pub creator_rebuy_live_test_max_open_positions: u32,
     /// Minimum buy/sell ratio on the bonding curve.
     /// Data: Q4 (>2.3) graduates at 10.9% vs Q1 (<1.1) at 3.2%.
     #[serde(default = "default_min_buy_sell_ratio")]
@@ -274,6 +306,14 @@ fn default_max_single_holder_pct() -> f64 { 25.0 }
 fn default_min_holder_count() -> usize { 8 }
 fn default_min_buy_sell_ratio() -> f64 { 1.2 }
 fn default_creator_rebuy_shadow_min_score() -> f64 { 60.0 }
+fn default_creator_rebuy_live_test_min_score() -> f64 { 63.0 }
+fn default_creator_rebuy_live_test_min_buy_pressure_pct() -> f64 { 70.0 }
+fn default_creator_rebuy_live_test_min_buy_sell_ratio() -> f64 { 2.0 }
+fn default_creator_rebuy_live_test_min_unique_buyers() -> usize { 40 }
+fn default_creator_rebuy_live_test_max_sell_count() -> u64 { 30 }
+fn default_creator_rebuy_live_test_min_initial_liquidity_sol() -> f64 { 30.0 }
+fn default_creator_rebuy_live_test_max_initial_liquidity_sol() -> f64 { 80.0 }
+fn default_creator_rebuy_live_test_max_open_positions() -> u32 { 1 }
 fn default_max_bc_sell_count() -> u64 { 40 }
 fn default_min_sniper_score() -> f64 { 60.0 }
 fn default_bc_fast_track_min_score() -> f64 { 65.0 }
@@ -347,6 +387,11 @@ pub struct ExecutionConfig {
     /// Read from `sniper_features.be_volume_24h_usd`. 0 = disabled.
     #[serde(default = "default_moonbag_vol_24h_usd_max")]
     pub moonbag_vol_24h_usd_max: f64,
+    /// Fixed tiny buy size for the creator-rebuy live canary. 0 = use normal
+    /// dynamic sizing. When set, execution uses the smaller of this and the
+    /// normal dynamic size.
+    #[serde(default)]
+    pub creator_rebuy_live_test_buy_amount_sol: f64,
 }
 
 fn default_paper_slippage_bps() -> u64 { 0 }

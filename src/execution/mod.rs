@@ -32,6 +32,7 @@ use wallet::BotWallet;
 
 /// Channel capacity for execution → monitoring pipeline.
 const CHANNEL_CAPACITY: usize = 50;
+const CREATOR_REBUY_LIVE_TEST_ENTRY_TIER: &str = "creator_rebuy_live_test_fast_track";
 
 /// Minimum liquidity floor for dynamic sizing scale (SOL).
 const DYNAMIC_SIZE_LIQ_FLOOR: f64 = 30.0;
@@ -54,6 +55,29 @@ fn compute_dynamic_buy_amount(cfg: &AppConfig, initial_liquidity_sol: f64) -> f6
 
     let ratio = ((initial_liquidity_sol - DYNAMIC_SIZE_LIQ_FLOOR) / (DYNAMIC_SIZE_LIQ_CAP - DYNAMIC_SIZE_LIQ_FLOOR)).clamp(0.0, 1.0);
     min_buy + ratio * (max_buy - min_buy)
+}
+
+fn is_creator_rebuy_live_test(token: &FilteredToken) -> bool {
+    token
+        .event
+        .sniper_features
+        .as_ref()
+        .and_then(|features| features.get("entry_tier"))
+        .and_then(|entry_tier| entry_tier.as_str())
+        == Some(CREATOR_REBUY_LIVE_TEST_ENTRY_TIER)
+}
+
+fn compute_buy_amount(cfg: &AppConfig, token: &FilteredToken) -> f64 {
+    let dynamic_amount = compute_dynamic_buy_amount(cfg, token.event.initial_liquidity_sol);
+
+    if is_creator_rebuy_live_test(token) {
+        let canary_amount = cfg.strategy.execution.creator_rebuy_live_test_buy_amount_sol;
+        if canary_amount > 0.0 {
+            return canary_amount.min(dynamic_amount);
+        }
+    }
+
+    dynamic_amount
 }
 
 /// Start the execution engine.
@@ -155,6 +179,30 @@ pub fn start(
                 }
             }
         
+            // ── Lane-specific canary cap ─────────────────────────────────────────────
+            // Creator-rebuy is still broadly blocked upstream. If the tiny canary lane
+            // is allowed through, keep at most one such position open by default.
+            if is_creator_rebuy_live_test(&token) {
+                let cap = cfg.strategy.filters.creator_rebuy_live_test_max_open_positions;
+                let open_count = trading_state.creator_rebuy_live_test_open_count().await;
+                if cap > 0 && open_count >= cap as i64 {
+                    let reason = format!(
+                        "creator_rebuy_live_test_open_cap_reached_{}/{}",
+                        open_count, cap
+                    );
+                    warn!(mint = %mint_str, reason = %reason, "⏭️ Skipping creator-rebuy canary — lane cap reached");
+                    timing.outcome = Some("rejected_precheck".to_string());
+                    timing.rejection_stage = Some("precheck".to_string());
+                    timing.rejection_reason = Some(reason);
+                    let timing_payload = timing.to_json(&mint_str);
+                    let supabase_bg = supabase.clone();
+                    tokio::spawn(async move {
+                        log_pipeline_latency(&supabase_bg, &timing_payload).await;
+                    });
+                    continue;
+                }
+            }
+
             // ── Dedup: skip if we already have a position in this mint (in-memory) ──
             // ATOMIC reserve-or-skip — protects against the TOCTOU race where two
             // near-simultaneous events (e.g. pump.fun migrate+complete double-emit,
@@ -219,7 +267,6 @@ pub fn start(
 
             // ── Execute trade ─────────────────────────────────────────────────────────
             let trade_exec_start = Instant::now();
-            let buy_amount_sol = cfg.strategy.execution.buy_amount_sol;
             if cfg.env.paper_trade {
                 match execute_paper_trade(&cfg, &jupiter, &supabase, &token, &tx, &trading_state).await {
                     Ok(Some(result)) => {
@@ -250,7 +297,7 @@ pub fn start(
                         tokio::spawn(async move {
                             post_buy::verify(
                                 cfg_bg, supabase_bg, alert_tx_bg,
-                                mint_bg, result.position_id, result.entry_price_usd, buy_amount_sol,
+                                mint_bg, result.position_id, result.entry_price_usd, result.sol_spent,
                                 result.token_amount, true,
                             ).await;
                         });
@@ -322,7 +369,7 @@ pub fn start(
                         tokio::spawn(async move {
                             post_buy::verify(
                                 cfg_bg, supabase_bg, alert_tx_bg,
-                                mint_bg, result.position_id, result.entry_price_usd, buy_amount_sol,
+                                mint_bg, result.position_id, result.entry_price_usd, result.sol_spent,
                                 result.token_amount, false,
                             ).await;
                         });
@@ -464,7 +511,7 @@ async fn execute_paper_trade(
 ) -> Result<Option<TradeResult>> {
     let trade_start = Instant::now();
     let mint_str = token.event.mint.to_string();
-    let buy_amount_sol = compute_dynamic_buy_amount(cfg, token.event.initial_liquidity_sol);
+    let buy_amount_sol = compute_buy_amount(cfg, token);
 
     info!(
         mint = %mint_str,
@@ -844,6 +891,7 @@ async fn execute_paper_trade(
         position_id,
         entry_price_usd,
         token_amount,
+        sol_spent: buy_amount_sol,
     }))
 }
 
@@ -854,6 +902,7 @@ struct TradeResult {
     position_id: i64,
     entry_price_usd: f64,
     token_amount: f64,
+    sol_spent: f64,
 }
 
 async fn execute_real_trade(
@@ -871,7 +920,7 @@ async fn execute_real_trade(
 ) -> Result<Option<TradeResult>> {
     let trade_start = Instant::now();
     let mint_str = token.event.mint.to_string();
-    let buy_amount_sol = compute_dynamic_buy_amount(cfg, token.event.initial_liquidity_sol);
+    let buy_amount_sol = compute_buy_amount(cfg, token);
     let amount_lamports = (buy_amount_sol * 1_000_000_000.0) as u64;
 
     info!(
@@ -1214,7 +1263,9 @@ async fn execute_real_trade(
 
     // Step 7: Update in-memory state immediately, write Supabase in background
     // This means monitoring starts ASAP without waiting for DB.
-    trading_state.record_buy(&mint_str, buy_amount_sol).await;
+    trading_state
+        .record_buy(&mint_str, buy_amount_sol, is_creator_rebuy_live_test(token))
+        .await;
 
     let pool_address = match token.event.pool_address {
         Some(p) => Some(p.to_string()),
@@ -1404,6 +1455,7 @@ async fn execute_real_trade(
         position_id,
         entry_price_usd,
         token_amount,
+        sol_spent: buy_amount_sol,
     }))
 }
 

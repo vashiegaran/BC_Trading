@@ -30,22 +30,37 @@ pub fn spawn_rejected_tracker(
 /// Called once at startup. Finds rows < 1hr old with NULL price_1h and
 /// re-spawns trackers with adjusted delays based on elapsed time.
 pub async fn recover_pending_trackers(supabase: Arc<SupabaseClient>) {
-    let url = format!(
-        "{}/sniper_candidates?price_1h=is.null&created_at=gte.{}&select=id,mint,created_at&limit=100",
-        supabase.base_url,
-        chrono::Utc::now()
-            .checked_sub_signed(chrono::Duration::hours(1))
-            .unwrap_or_else(chrono::Utc::now)
-            .to_rfc3339(),
-    );
+    let url = format!("{}/sniper_candidates", supabase.base_url);
+    let cutoff = chrono::Utc::now()
+        .checked_sub_signed(chrono::Duration::hours(1))
+        .unwrap_or_else(chrono::Utc::now)
+        .to_rfc3339();
+    let created_at_filter = format!("gte.{}", cutoff);
 
-    let resp = match supabase.client.get(&url).send().await {
+    let resp = match supabase.client
+        .get(&url)
+        .query(&[
+            ("price_1h", "is.null"),
+            ("created_at", created_at_filter.as_str()),
+            ("select", "id,mint,created_at"),
+            ("limit", "100"),
+        ])
+        .send()
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             warn!("Tracker recovery: failed to query sniper_candidates: {}", e);
             return;
         }
     };
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        warn!(status = %status, body = %body, "Tracker recovery: sniper_candidates query failed");
+        return;
+    }
 
     let rows: Vec<serde_json::Value> = match resp.json().await {
         Ok(r) => r,

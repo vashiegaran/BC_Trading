@@ -9,6 +9,25 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.7 — Creator-Rebuy Canary (2026-05-07)
+
+**strategy_version**: `v18.7-creator-rebuy-canary`
+
+### Why
+Live flow after the gRPC cutover showed the bot was healthy but over-gated: Standard lane stayed disabled by design, while many current graduations were creator-rebuy and therefore blocked before live execution. Shadow data showed some creator-rebuy winners, but the median outcome was still weak, so this is a tiny canary rather than a broad allowlist.
+
+### Changes
+- Keeps `reject_creator_rebuy = true` in [config.toml](config.toml).
+- Adds a separate creator-rebuy live-test gate in [src/config.rs](src/config.rs) and [src/sniper/mod.rs](src/sniper/mod.rs): Fast-Track safety must pass, then the token must meet stricter BC profile thresholds for score, buy pressure, buy/sell ratio, unique buyers, sell count, and liquidity.
+- Keeps creator-rebuy shadow logging for non-qualifying names.
+- Adds lane-specific tiny sizing: `creator_rebuy_live_test_buy_amount_sol = 0.01` in [config.toml](config.toml).
+- Adds an execution-time canary cap of one open creator-rebuy live-test position via [src/execution/state.rs](src/execution/state.rs).
+
+### Rollback
+Set `creator_rebuy_live_test_enabled = false` in [config.toml](config.toml) and restart PM2. Shadow tracking remains active.
+
+---
+
 ## v18.6 — Data-Tuned Filters + Score Re-fit (2026-05-01)
 
 **strategy_version**: `v18.6-data-tuned`

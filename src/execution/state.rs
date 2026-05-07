@@ -6,6 +6,8 @@ use tracing::{debug, info, warn};
 
 use crate::logger::SupabaseClient;
 
+const CREATOR_REBUY_LIVE_TEST_ENTRY_TIER: &str = "creator_rebuy_live_test_fast_track";
+
 /// In-memory trading state that replaces Supabase reads on the critical buy path.
 ///
 /// Safety checks (open position count, exposure, daily PnL, dedup) are read
@@ -24,6 +26,8 @@ struct TradingStateInner {
     open_since: HashMap<String, Instant>,
     /// Total SOL exposure across all open positions.
     total_exposure_sol: f64,
+    /// Open positions admitted by the tiny creator-rebuy live canary lane.
+    creator_rebuy_live_test_open_mints: HashSet<String>,
     /// Today's realized PnL (accumulated from exits).
     today_pnl_sol: f64,
     /// Date string for PnL reset (e.g. "2026-03-21").
@@ -53,6 +57,7 @@ impl TradingState {
                 open_mints: HashSet::new(),
                 open_since: HashMap::new(),
                 total_exposure_sol: 0.0,
+                creator_rebuy_live_test_open_mints: HashSet::new(),
                 today_pnl_sol: 0.0,
                 pnl_date: today_str(),
                 blacklisted_devs,
@@ -73,7 +78,7 @@ impl TradingState {
 
         // Fetch open positions (mints + exposure)
         let url = format!(
-            "{}/positions?select=mint,sol_spent&{}&is_paper_trade=eq.{}&exit_tx_sig=is.null",
+            "{}/positions?select=mint,sol_spent,sniper_features&{}&is_paper_trade=eq.{}&exit_tx_sig=is.null",
             supabase.base_url, status_filter, paper_trade
         );
 
@@ -92,6 +97,16 @@ impl TradingState {
             }
             if let Some(sol) = row.get("sol_spent").and_then(|v| v.as_f64()) {
                 inner.total_exposure_sol += sol;
+            }
+            let is_creator_rebuy_live_test = row
+                .get("sniper_features")
+                .and_then(|features| features.get("entry_tier"))
+                .and_then(|entry_tier| entry_tier.as_str())
+                == Some(CREATOR_REBUY_LIVE_TEST_ENTRY_TIER);
+            if is_creator_rebuy_live_test {
+                if let Some(mint) = row.get("mint").and_then(|v| v.as_str()) {
+                    inner.creator_rebuy_live_test_open_mints.insert(mint.to_string());
+                }
             }
         }
 
@@ -126,6 +141,7 @@ impl TradingState {
 
         info!(
             open_positions = inner.open_mints.len(),
+            creator_rebuy_live_test_open = inner.creator_rebuy_live_test_open_mints.len(),
             exposure_sol = format!("{:.4}", inner.total_exposure_sol),
             today_pnl = format!("{:.4}", inner.today_pnl_sol),
             "📊 TradingState hydrated from Supabase"
@@ -144,6 +160,10 @@ impl TradingState {
 
     pub async fn total_exposure(&self) -> f64 {
         self.inner.read().await.total_exposure_sol
+    }
+
+    pub async fn creator_rebuy_live_test_open_count(&self) -> i64 {
+        self.inner.read().await.creator_rebuy_live_test_open_mints.len() as i64
     }
 
     pub async fn today_pnl(&self) -> f64 {
@@ -264,6 +284,7 @@ impl TradingState {
         let mut inner = self.inner.write().await;
         if inner.open_mints.remove(mint) {
             inner.open_since.remove(mint);
+            inner.creator_rebuy_live_test_open_mints.remove(mint);
             inner.total_exposure_sol -= sol_spent;
             if inner.total_exposure_sol < 0.0 {
                 inner.total_exposure_sol = 0.0;
@@ -278,16 +299,20 @@ impl TradingState {
     }
 
     /// Record a new position opened (buy confirmed).
-    pub async fn record_buy(&self, mint: &str, sol_spent: f64) {
+    pub async fn record_buy(&self, mint: &str, sol_spent: f64, is_creator_rebuy_live_test: bool) {
         let mut inner = self.inner.write().await;
         inner.pending_mints.remove(mint);
         inner.open_mints.insert(mint.to_string());
         inner.open_since.insert(mint.to_string(), Instant::now());
         inner.total_exposure_sol += sol_spent;
+        if is_creator_rebuy_live_test {
+            inner.creator_rebuy_live_test_open_mints.insert(mint.to_string());
+        }
         debug!(
             mint = mint,
             exposure = format!("{:.4}", inner.total_exposure_sol),
             open = inner.open_mints.len(),
+            creator_rebuy_live_test_open = inner.creator_rebuy_live_test_open_mints.len(),
             "📊 State: position opened"
         );
     }
@@ -298,6 +323,7 @@ impl TradingState {
         if is_full_exit {
             inner.open_mints.remove(mint);
             inner.open_since.remove(mint);
+            inner.creator_rebuy_live_test_open_mints.remove(mint);
             inner.total_exposure_sol -= sol_spent;
             if inner.total_exposure_sol < 0.0 {
                 inner.total_exposure_sol = 0.0;
