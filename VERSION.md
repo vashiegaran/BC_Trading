@@ -9,6 +9,28 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.7.2 — Narrative-Cluster Armed Shadow (2026-05-07)
+
+**Live strategy impact**: none. Active live behavior remains `v18.7-creator-rebuy-canary`; this is observe-only and never forwards execution.
+
+### Why
+The Soothsayer cluster showed a repeated narrative/name wave where one leader and one follow-up ran hard while later clones were mostly noisy. Creator rebuy was present, so a global creator-rebuy allow would be unsafe. This shadow lane tests a narrow hypothesis: repeated narrative clusters can tolerate creator rebuy only when outside-buyer flow and bonding-curve acceleration are strong.
+
+### Changes
+- Adds `narrative_cluster_shadow_enabled` and score thresholds under `[detection]` in [config.toml](config.toml).
+- Adds a separate Supabase table via [migrations/030_narrative_cluster_shadow.sql](migrations/030_narrative_cluster_shadow.sql).
+- Arms a token during bonding-curve flow when the same normalized label has appeared recently and the composite narrative score clears the threshold.
+- Simulates post-graduation entry by patching the row with `sim_entry_at`, `sim_entry_price`, price snapshots, and `peak_multiplier` after graduation.
+- Allows creator rebuy only inside this shadow/simulation lane; global `reject_creator_rebuy = true` remains unchanged.
+
+### Scoring inputs
+- Cluster: normalized label, cluster rank, prior same-label mint count, prior creator count, and recency gap.
+- Flow: BC progress, volume, buy pressure, buy/sell ratio, unique buyers, buy velocity, whale buys.
+- Risk penalties: creator rebuy, creator sold during BC, late-clone rank, and early-buyer sell pressure.
+- Overlap: first-buyer depth, early-buyer rebuy count/size, rebuyer wallets, and early sellers.
+
+---
+
 ## v18.7.1 — Early-Buyer Rebuy Shadow (2026-05-07)
 
 **Live strategy impact**: none. Active live behavior remains `v18.7-creator-rebuy-canary` unless [config.toml](config.toml) is changed separately.

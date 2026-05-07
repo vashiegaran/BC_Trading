@@ -38,6 +38,16 @@ label_flow_shadow_min_progress_pct = 30.0
 label_flow_shadow_min_prior_mints = 1
 label_flow_shadow_max_gap_seconds = 1800
 
+# narrative_cluster_shadow: separate armed-post-grad simulation for repeated
+# narrative/name clusters. It can tolerate creator rebuy inside this shadow
+# lane only, but it never forwards live execution.
+narrative_cluster_shadow_enabled = true
+narrative_cluster_min_prior_mints = 1
+narrative_cluster_min_progress_pct = 20.0
+narrative_cluster_max_progress_pct = 100.0
+narrative_cluster_max_gap_seconds = 1800
+narrative_cluster_min_score = 45.0
+
 # probe_add_shadow: shadow-only ladder model. Record a would-be probe once
 # the curve is strong, then a would-be add only if the same mint keeps
 # strengthening.

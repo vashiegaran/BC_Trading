@@ -378,6 +378,328 @@ struct EarlyBuyerRebuyMetrics {
     first_rebuy_after_secs: Option<f64>,
 }
 
+#[derive(Debug, Clone)]
+struct NarrativeClusterScore {
+    score: f64,
+    reasons: Vec<String>,
+    penalties: Vec<String>,
+    breakdown: serde_json::Value,
+}
+
+fn add_narrative_component(
+    score: &mut f64,
+    reasons: &mut Vec<String>,
+    penalties: &mut Vec<String>,
+    breakdown: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    points: f64,
+    label: &str,
+) {
+    if points.abs() < f64::EPSILON {
+        breakdown.insert(key.to_string(), serde_json::json!(0.0));
+        return;
+    }
+
+    *score += points;
+    breakdown.insert(key.to_string(), serde_json::json!(points));
+    if points > 0.0 {
+        reasons.push(format!("{} +{:.1}", label, points));
+    } else {
+        penalties.push(format!("{} {:.1}", label, points));
+    }
+}
+
+fn compute_narrative_cluster_score(
+    entry: &WatchlistEntry,
+    early_metrics: Option<&EarlyBuyerRebuyMetrics>,
+    bc_progress_pct: f64,
+) -> NarrativeClusterScore {
+    let mut score = 0.0_f64;
+    let mut reasons = Vec::new();
+    let mut penalties = Vec::new();
+    let mut breakdown = serde_json::Map::new();
+
+    let cluster_rank = entry.prior_same_label_mints_6h + 1;
+    let cluster_points = if entry.prior_same_label_mints_6h > 0 {
+        (12.0 + entry.prior_same_label_mints_6h as f64 * 3.0).min(24.0)
+    } else {
+        0.0
+    };
+    add_narrative_component(
+        &mut score,
+        &mut reasons,
+        &mut penalties,
+        &mut breakdown,
+        "cluster_prior_mints",
+        cluster_points,
+        "same-label cluster",
+    );
+
+    let creator_diversity_points = if entry.prior_same_label_creators_6h > 0 {
+        (5.0 + entry.prior_same_label_creators_6h as f64 * 4.0).min(15.0)
+    } else {
+        0.0
+    };
+    add_narrative_component(
+        &mut score,
+        &mut reasons,
+        &mut penalties,
+        &mut breakdown,
+        "cluster_creator_diversity",
+        creator_diversity_points,
+        "multi-creator narrative",
+    );
+
+    let recency_points = match entry.seconds_since_label_seen {
+        Some(gap) if gap <= 60 => 12.0,
+        Some(gap) if gap <= 300 => 10.0,
+        Some(gap) if gap <= 1_800 => 6.0,
+        _ => 0.0,
+    };
+    add_narrative_component(
+        &mut score,
+        &mut reasons,
+        &mut penalties,
+        &mut breakdown,
+        "cluster_recency",
+        recency_points,
+        "recent same-label mint",
+    );
+
+    let progress_points = if bc_progress_pct >= 60.0 {
+        12.0
+    } else if bc_progress_pct >= 40.0 {
+        10.0
+    } else if bc_progress_pct >= 20.0 {
+        8.0
+    } else {
+        0.0
+    };
+    add_narrative_component(
+        &mut score,
+        &mut reasons,
+        &mut penalties,
+        &mut breakdown,
+        "bc_progress",
+        progress_points,
+        "BC acceleration",
+    );
+
+    let volume_points = if entry.total_volume_sol >= 50.0 {
+        18.0
+    } else if entry.total_volume_sol >= 25.0 {
+        12.0
+    } else if entry.total_volume_sol >= 10.0 {
+        6.0
+    } else {
+        0.0
+    };
+    add_narrative_component(
+        &mut score,
+        &mut reasons,
+        &mut penalties,
+        &mut breakdown,
+        "entry_volume_sol",
+        volume_points,
+        "early volume",
+    );
+
+    let buy_pressure = entry.buy_pressure_pct();
+    let pressure_points = if buy_pressure >= 85.0 {
+        14.0
+    } else if buy_pressure >= 70.0 {
+        10.0
+    } else if buy_pressure >= 60.0 {
+        4.0
+    } else {
+        -6.0
+    };
+    add_narrative_component(
+        &mut score,
+        &mut reasons,
+        &mut penalties,
+        &mut breakdown,
+        "buy_pressure",
+        pressure_points,
+        "buy pressure",
+    );
+
+    let buy_sell_ratio = compute_current_buy_sell_ratio(entry);
+    let bsr_points = if buy_sell_ratio >= 5.0 {
+        12.0
+    } else if buy_sell_ratio >= 2.5 {
+        8.0
+    } else if buy_sell_ratio >= 1.5 {
+        3.0
+    } else {
+        -5.0
+    };
+    add_narrative_component(
+        &mut score,
+        &mut reasons,
+        &mut penalties,
+        &mut breakdown,
+        "buy_sell_ratio",
+        bsr_points,
+        "buy/sell ratio",
+    );
+
+    let unique_buyers = entry.unique_buyers.len();
+    let buyer_points = if unique_buyers >= 40 {
+        12.0
+    } else if unique_buyers >= 20 {
+        8.0
+    } else if unique_buyers >= 8 {
+        4.0
+    } else {
+        0.0
+    };
+    add_narrative_component(
+        &mut score,
+        &mut reasons,
+        &mut penalties,
+        &mut breakdown,
+        "unique_buyers",
+        buyer_points,
+        "outside buyers",
+    );
+
+    let whale_buy_max_sol = entry.trade_log.iter()
+        .filter(|(_, _, is_buy, _)| *is_buy)
+        .map(|(_, sol, _, _)| *sol)
+        .fold(0.0_f64, f64::max);
+    let whale_buy_count = entry.trade_log.iter()
+        .filter(|(_, sol, is_buy, _)| *is_buy && *sol >= 3.0)
+        .count();
+    let whale_points = if whale_buy_max_sol >= 5.0 {
+        12.0
+    } else if whale_buy_count > 0 {
+        8.0
+    } else {
+        0.0
+    };
+    add_narrative_component(
+        &mut score,
+        &mut reasons,
+        &mut penalties,
+        &mut breakdown,
+        "whale_buy",
+        whale_points,
+        "whale buy",
+    );
+
+    if let Some(metrics) = early_metrics {
+        let first_buyer_points = if metrics.first_buyers.len() >= 5 {
+            4.0
+        } else if metrics.first_buyers.len() >= 3 {
+            2.0
+        } else {
+            0.0
+        };
+        add_narrative_component(
+            &mut score,
+            &mut reasons,
+            &mut penalties,
+            &mut breakdown,
+            "first_buyer_depth",
+            first_buyer_points,
+            "early buyer depth",
+        );
+
+        let rebuy_points = if metrics.rebuy_sol_total >= 1.0 {
+            10.0
+        } else if metrics.rebuy_sol_total >= 0.5 {
+            7.0
+        } else if !metrics.rebuy_wallets.is_empty() {
+            5.0
+        } else {
+            0.0
+        };
+        add_narrative_component(
+            &mut score,
+            &mut reasons,
+            &mut penalties,
+            &mut breakdown,
+            "early_buyer_rebuy",
+            rebuy_points,
+            "early buyer rebuy",
+        );
+
+        let early_seller_points = if metrics.early_seller_wallets.is_empty() {
+            3.0
+        } else if metrics.early_seller_wallets.len() >= 2 {
+            -8.0
+        } else {
+            0.0
+        };
+        add_narrative_component(
+            &mut score,
+            &mut reasons,
+            &mut penalties,
+            &mut breakdown,
+            "early_sellers",
+            early_seller_points,
+            "early-buyer sell pressure",
+        );
+    }
+
+    let creator_rebuy = compute_current_creator_rebuy(entry);
+    if creator_rebuy {
+        add_narrative_component(
+            &mut score,
+            &mut reasons,
+            &mut penalties,
+            &mut breakdown,
+            "creator_rebuy_penalty",
+            -8.0,
+            "creator rebuy tolerated",
+        );
+    }
+
+    let creator_sold = entry.trade_log.iter().any(|&(_, _, is_buy, wallet)| {
+        !is_buy && wallet == entry.creator_wallet
+    });
+    if creator_sold {
+        add_narrative_component(
+            &mut score,
+            &mut reasons,
+            &mut penalties,
+            &mut breakdown,
+            "creator_sold_penalty",
+            -12.0,
+            "creator sold during BC",
+        );
+    }
+
+    let late_clone_penalty = if cluster_rank > 10 {
+        -20.0
+    } else if cluster_rank > 6 {
+        -10.0
+    } else {
+        0.0
+    };
+    add_narrative_component(
+        &mut score,
+        &mut reasons,
+        &mut penalties,
+        &mut breakdown,
+        "late_clone_penalty",
+        late_clone_penalty,
+        "late narrative clone",
+    );
+
+    breakdown.insert("raw_score".to_string(), serde_json::json!(score));
+    breakdown.insert("cluster_rank".to_string(), serde_json::json!(cluster_rank));
+    breakdown.insert("buy_velocity_30s".to_string(), serde_json::json!(compute_buy_velocity(&entry.trade_log, 30_000)));
+
+    NarrativeClusterScore {
+        score: score.clamp(0.0, 100.0),
+        reasons,
+        penalties,
+        breakdown: serde_json::Value::Object(breakdown),
+    }
+}
+
 fn compute_early_buyer_rebuy_metrics(
     entry: &WatchlistEntry,
     first_n: usize,
@@ -460,6 +782,197 @@ fn compute_early_buyer_rebuy_metrics(
         rebuy_max_sol,
         first_rebuy_after_secs,
     })
+}
+
+fn maybe_fire_narrative_cluster_shadow(
+    entry: &mut WatchlistEntry,
+    mint_str: &str,
+    supabase: &Arc<SupabaseClient>,
+    cfg: &Arc<AppConfig>,
+    bc_progress_pct: f64,
+) {
+    let detection_cfg = &cfg.strategy.detection;
+    if !detection_cfg.narrative_cluster_shadow_enabled
+        || entry.narrative_cluster_shadow_recorded
+    {
+        return;
+    }
+    if entry.prior_same_label_mints_6h < detection_cfg.narrative_cluster_min_prior_mints {
+        return;
+    }
+    if entry
+        .seconds_since_label_seen
+        .map(|gap| gap > detection_cfg.narrative_cluster_max_gap_seconds as i64)
+        .unwrap_or(true)
+    {
+        return;
+    }
+    if bc_progress_pct < detection_cfg.narrative_cluster_min_progress_pct
+        || bc_progress_pct > detection_cfg.narrative_cluster_max_progress_pct
+    {
+        return;
+    }
+
+    let early_metrics = compute_early_buyer_rebuy_metrics(
+        entry,
+        detection_cfg.early_buyer_rebuy_first_n.max(5),
+        detection_cfg.early_buyer_rebuy_min_rebuy_sol,
+    );
+    let score = compute_narrative_cluster_score(entry, early_metrics.as_ref(), bc_progress_pct);
+    if score.score < detection_cfg.narrative_cluster_min_score {
+        debug!(
+            mint = %mint_str,
+            label = %entry.normalized_label,
+            score = format!("{:.1}", score.score),
+            min_score = format!("{:.1}", detection_cfg.narrative_cluster_min_score),
+            "Narrative cluster shadow not armed — score below threshold"
+        );
+        return;
+    }
+
+    entry.narrative_cluster_shadow_recorded = true;
+    let payload = build_narrative_cluster_shadow_payload(
+        entry,
+        mint_str,
+        &score,
+        early_metrics.as_ref(),
+        bc_progress_pct,
+    );
+    let supabase_c = Arc::clone(supabase);
+    let mint_for_log = mint_str.to_string();
+    let label_for_log = entry.normalized_label.clone();
+    let score_for_log = score.score;
+    tokio::spawn(async move {
+        write_narrative_cluster_shadow(&supabase_c, &payload).await;
+        info!(
+            mint = %mint_for_log,
+            label = %label_for_log,
+            score = format!("{:.1}", score_for_log),
+            "🧪 Narrative cluster armed-post-grad shadow recorded"
+        );
+    });
+}
+
+fn build_narrative_cluster_shadow_payload(
+    entry: &WatchlistEntry,
+    mint_str: &str,
+    score: &NarrativeClusterScore,
+    early_metrics: Option<&EarlyBuyerRebuyMetrics>,
+    bc_progress_pct: f64,
+) -> serde_json::Value {
+    let now = chrono::Utc::now().timestamp_millis();
+    let token_age_secs = (now - entry.detected_at) as f64 / 1_000.0;
+    let buy_sell_ratio = compute_current_buy_sell_ratio(entry);
+    let creator_rebuy = compute_current_creator_rebuy(entry);
+    let creator_sold_during_bc = entry.trade_log.iter().any(|&(_, _, is_buy, wallet)| {
+        !is_buy && wallet == entry.creator_wallet
+    });
+    let whale_buy_max_sol = entry.trade_log.iter()
+        .filter(|(_, _, is_buy, _)| *is_buy)
+        .map(|(_, sol, _, _)| *sol)
+        .fold(0.0_f64, f64::max);
+    let whale_buy_count = entry.trade_log.iter()
+        .filter(|(_, sol, is_buy, _)| *is_buy && *sol >= 3.0)
+        .count() as u32;
+    let bc_price_sol_per_token = if entry.last_v_token_reserves > 0.0 {
+        entry.last_v_sol_reserves / entry.last_v_token_reserves
+    } else {
+        0.0
+    };
+    let bc_price_usd = bc_price_usd_from_sol(bc_price_sol_per_token, DEFAULT_SOL_USD);
+    let bc_market_cap_usd = if entry.last_market_cap_sol > 0.0 {
+        entry.last_market_cap_sol * DEFAULT_SOL_USD
+    } else {
+        0.0
+    };
+
+    let first_buyer_wallets: Vec<String> = early_metrics
+        .map(|m| m.first_buyers.iter().map(ToString::to_string).collect())
+        .unwrap_or_default();
+    let rebuy_wallets: Vec<String> = early_metrics
+        .map(|m| m.rebuy_wallets.iter().map(ToString::to_string).collect())
+        .unwrap_or_default();
+    let early_seller_wallets: Vec<String> = early_metrics
+        .map(|m| m.early_seller_wallets.iter().map(ToString::to_string).collect())
+        .unwrap_or_default();
+
+    let mut entry_metrics = serde_json::Map::new();
+    entry_metrics.insert("buy_velocity_30s".to_string(), serde_json::json!(compute_buy_velocity(&entry.trade_log, 30_000)));
+    entry_metrics.insert("sell_then_buy_flip".to_string(), serde_json::json!(detect_sell_buy_flip(&entry.trade_log)));
+    entry_metrics.insert("zero_sells".to_string(), serde_json::json!(entry.buy_count >= 50 && entry.sell_count == 0));
+    entry_metrics.insert("total_buy_sol".to_string(), serde_json::json!(entry.trade_log.iter().filter(|(_, _, is_buy, _)| *is_buy).map(|(_, sol, _, _)| *sol).sum::<f64>()));
+    entry_metrics.insert("total_sell_sol".to_string(), serde_json::json!(entry.trade_log.iter().filter(|(_, _, is_buy, _)| !*is_buy).map(|(_, sol, _, _)| *sol).sum::<f64>()));
+    entry_metrics.insert("max_single_trade_sol".to_string(), serde_json::json!(entry.trade_log.iter().map(|(_, sol, _, _)| *sol).fold(0.0_f64, f64::max)));
+    entry_metrics.insert("avg_trade_sol".to_string(), serde_json::json!(if entry.trade_log.is_empty() { 0.0 } else { entry.total_volume_sol / entry.trade_log.len() as f64 }));
+
+    let mut payload = serde_json::Map::new();
+    payload.insert("mint".to_string(), serde_json::json!(mint_str));
+    payload.insert("symbol".to_string(), serde_json::json!(entry.symbol.clone()));
+    payload.insert("name".to_string(), serde_json::json!(entry.name.clone()));
+    payload.insert("creator_wallet".to_string(), serde_json::json!(entry.creator_wallet.to_string()));
+    payload.insert("token_created_at_ms".to_string(), serde_json::json!(entry.detected_at));
+    payload.insert("normalized_label".to_string(), serde_json::json!(entry.normalized_label.clone()));
+    payload.insert("cluster_rank".to_string(), serde_json::json!(entry.prior_same_label_mints_6h + 1));
+    payload.insert("prior_same_label_mints_6h".to_string(), serde_json::json!(entry.prior_same_label_mints_6h));
+    payload.insert("prior_same_label_creators_6h".to_string(), serde_json::json!(entry.prior_same_label_creators_6h));
+    payload.insert("seconds_since_label_seen".to_string(), serde_json::json!(entry.seconds_since_label_seen));
+    payload.insert("entry_trigger".to_string(), serde_json::json!("narrative_cluster_armed_post_grad"));
+    payload.insert("armed_at".to_string(), serde_json::json!(chrono::Utc::now().to_rfc3339()));
+    payload.insert("narrative_score".to_string(), serde_json::json!(score.score));
+    payload.insert("score_reasons".to_string(), serde_json::json!(score.reasons));
+    payload.insert("score_penalties".to_string(), serde_json::json!(score.penalties));
+    payload.insert("score_breakdown".to_string(), score.breakdown.clone());
+    payload.insert("creator_rebuy_bypassed".to_string(), serde_json::json!(creator_rebuy));
+    payload.insert("would_trade_live".to_string(), serde_json::json!(false));
+    payload.insert("entry_token_age_secs".to_string(), serde_json::json!(token_age_secs));
+    payload.insert("entry_volume_sol".to_string(), serde_json::json!(entry.total_volume_sol));
+    payload.insert("entry_buy_count".to_string(), serde_json::json!(entry.buy_count));
+    payload.insert("entry_sell_count".to_string(), serde_json::json!(entry.sell_count));
+    payload.insert("entry_unique_buyers".to_string(), serde_json::json!(entry.unique_buyers.len()));
+    payload.insert("entry_buy_sell_ratio".to_string(), serde_json::json!(buy_sell_ratio));
+    payload.insert("entry_buy_pressure_pct".to_string(), serde_json::json!(entry.buy_pressure_pct()));
+    payload.insert("entry_creator_rebuy".to_string(), serde_json::json!(creator_rebuy));
+    payload.insert("creator_sold_during_bc".to_string(), serde_json::json!(creator_sold_during_bc));
+    payload.insert("whale_buy".to_string(), serde_json::json!(whale_buy_count > 0));
+    payload.insert("whale_buy_count".to_string(), serde_json::json!(whale_buy_count));
+    payload.insert("whale_buy_max_sol".to_string(), serde_json::json!(whale_buy_max_sol));
+    payload.insert("first_buyer_wallets".to_string(), serde_json::json!(first_buyer_wallets));
+    payload.insert("first_buyer_count".to_string(), serde_json::json!(early_metrics.map(|m| m.first_buyers.len()).unwrap_or(0)));
+    payload.insert("rebuy_wallets".to_string(), serde_json::json!(rebuy_wallets));
+    payload.insert("rebuyer_count".to_string(), serde_json::json!(early_metrics.map(|m| m.rebuy_wallets.len()).unwrap_or(0)));
+    payload.insert("rebuy_count".to_string(), serde_json::json!(early_metrics.map(|m| m.rebuy_count).unwrap_or(0)));
+    payload.insert("rebuy_sol_total".to_string(), serde_json::json!(early_metrics.map(|m| m.rebuy_sol_total).unwrap_or(0.0)));
+    payload.insert("rebuy_max_sol".to_string(), serde_json::json!(early_metrics.map(|m| m.rebuy_max_sol).unwrap_or(0.0)));
+    payload.insert("first_rebuy_after_secs".to_string(), serde_json::json!(early_metrics.and_then(|m| m.first_rebuy_after_secs)));
+    payload.insert("early_seller_wallets".to_string(), serde_json::json!(early_seller_wallets));
+    payload.insert("early_seller_count".to_string(), serde_json::json!(early_metrics.map(|m| m.early_seller_wallets.len()).unwrap_or(0)));
+    payload.insert("bc_progress_pct".to_string(), serde_json::json!(bc_progress_pct));
+    payload.insert("bc_virtual_sol_reserves".to_string(), serde_json::json!(if entry.last_v_sol_reserves > 0.0 { Some(entry.last_v_sol_reserves) } else { None }));
+    payload.insert("bc_virtual_token_reserves".to_string(), serde_json::json!(if entry.last_v_token_reserves > 0.0 { Some(entry.last_v_token_reserves) } else { None }));
+    payload.insert("bc_market_cap_usd".to_string(), serde_json::json!(if bc_market_cap_usd > 0.0 { Some(bc_market_cap_usd) } else { None }));
+    payload.insert("entry_price_usd".to_string(), serde_json::json!(if bc_price_usd > 0.0 { Some(bc_price_usd) } else { None }));
+    payload.insert("entry_metrics".to_string(), serde_json::Value::Object(entry_metrics));
+    payload.insert("status".to_string(), serde_json::json!("armed"));
+
+    serde_json::Value::Object(payload)
+}
+
+async fn write_narrative_cluster_shadow(
+    supabase: &SupabaseClient,
+    payload: &serde_json::Value,
+) {
+    let mint = payload.get("mint").and_then(|m| m.as_str()).unwrap_or("unknown");
+    let url = format!("{}/narrative_cluster_shadow", supabase.base_url);
+    match supabase.client.post(&url).json(payload).send().await {
+        Ok(resp) if resp.status().is_success() => {}
+        Ok(resp) => {
+            let body = resp.text().await.unwrap_or_default();
+            warn!(mint = %mint, "narrative_cluster_shadow INSERT failed: {}", body);
+        }
+        Err(e) => {
+            warn!(mint = %mint, "narrative_cluster_shadow INSERT error: {}", e);
+        }
+    }
 }
 
 fn maybe_fire_early_buyer_rebuy_shadow(
@@ -880,6 +1393,7 @@ async fn handle_new_token(
         control_recorded: false,
         launch_label_shadow_recorded: false,
         label_flow_shadow_recorded: false,
+        narrative_cluster_shadow_recorded: false,
         probe_add_probe_recorded: false,
         probe_add_add_recorded: false,
         probe_add_probe_buy_count: 0,
@@ -1113,6 +1627,7 @@ async fn handle_token_trade(
 
         maybe_fire_launch_label_shadow(entry, mint_str, supabase, cfg, now, bc_progress_pct, is_buy);
         maybe_fire_early_buyer_rebuy_shadow(entry, mint_str, supabase, cfg, bc_progress_pct);
+        maybe_fire_narrative_cluster_shadow(entry, mint_str, supabase, cfg, bc_progress_pct);
 
         // v14.1 counterfactual control — record once when warming starts.
         // Gives us a negative-class sample of tokens that crossed 30% but
@@ -1578,6 +2093,7 @@ async fn handle_token_complete(
         }
 
         maybe_fire_label_flow_shadow(entry, mint_str, supabase, cfg, bc_progress_pct);
+        maybe_fire_narrative_cluster_shadow(entry, mint_str, supabase, cfg, bc_progress_pct);
         maybe_fire_probe_add_shadow(entry, mint_str, supabase, cfg, bc_progress_pct);
         maybe_fire_early_buyer_rebuy_shadow(entry, mint_str, supabase, cfg, bc_progress_pct);
 
@@ -1883,6 +2399,31 @@ async fn handle_token_complete(
                 }
                 Err(e) => {
                     debug!(mint = %mint_for_grad, "early_buyer_rebuy_shadow graduation update failed: {}", e);
+                }
+            }
+
+            // Update narrative-cluster armed-post-grad simulation rows with graduation outcome.
+            let ncs_url = format!(
+                "{}/narrative_cluster_shadow?mint=eq.{}",
+                supabase_grad.base_url, mint_for_grad
+            );
+            let ncs_payload = serde_json::json!({
+                "graduated": true,
+                "graduated_at": &now_rfc,
+                "sim_entry_at": &now_rfc,
+                "initial_liquidity_sol": grad_liquidity,
+                "status": "graduated",
+            });
+            match supabase_grad.client.patch(&ncs_url).json(&ncs_payload).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    debug!(mint = %mint_for_grad, "narrative_cluster_shadow: marked graduated");
+                }
+                Ok(resp) => {
+                    let body = resp.text().await.unwrap_or_default();
+                    debug!(mint = %mint_for_grad, "narrative_cluster_shadow graduation update: {}", body);
+                }
+                Err(e) => {
+                    debug!(mint = %mint_for_grad, "narrative_cluster_shadow graduation update failed: {}", e);
                 }
             }
 
@@ -2703,6 +3244,14 @@ async fn spawn_bc_price_tracker(supabase: Arc<SupabaseClient>, mint: String) {
             "status": "tracking",
         });
         let _ = supabase.client.patch(&ebr_url).json(&ebr_payload).send().await;
+
+        let ncs_url = format!("{}/narrative_cluster_shadow?mint=eq.{}", supabase.base_url, mint);
+        let ncs_payload = serde_json::json!({
+            "price_at_graduation": baseline,
+            "sim_entry_price": baseline,
+            "status": "tracking",
+        });
+        let _ = supabase.client.patch(&ncs_url).json(&ncs_payload).send().await;
     }
 
     let mut peak_price: f64 = baseline;
@@ -2751,6 +3300,15 @@ async fn spawn_bc_price_tracker(supabase: Arc<SupabaseClient>, mint: String) {
         ebr_payload.insert("peak_multiplier".to_string(), serde_json::json!(peak_price / baseline));
         let _ = supabase.client.patch(&ebr_url).json(&serde_json::Value::Object(ebr_payload)).send().await;
 
+        // Update narrative-cluster rows using the same DexScreener fetch;
+        // this adds no additional external request pressure.
+        let ncs_url = format!("{}/narrative_cluster_shadow?mint=eq.{}", supabase.base_url, mint);
+        let mut ncs_payload = serde_json::Map::new();
+        ncs_payload.insert(pt_columns[i].to_string(), serde_json::json!(price));
+        ncs_payload.insert("peak_price".to_string(), serde_json::json!(peak_price));
+        ncs_payload.insert("peak_multiplier".to_string(), serde_json::json!(peak_price / baseline));
+        let _ = supabase.client.patch(&ncs_url).json(&serde_json::Value::Object(ncs_payload)).send().await;
+
         debug!(
             mint = %mint,
             column = column,
@@ -2766,6 +3324,13 @@ async fn spawn_bc_price_tracker(supabase: Arc<SupabaseClient>, mint: String) {
         "completed_at": chrono::Utc::now().to_rfc3339(),
     });
     let _ = supabase.client.patch(&ebr_url).json(&ebr_payload).send().await;
+
+    let ncs_url = format!("{}/narrative_cluster_shadow?mint=eq.{}", supabase.base_url, mint);
+    let ncs_payload = serde_json::json!({
+        "status": "completed",
+        "completed_at": chrono::Utc::now().to_rfc3339(),
+    });
+    let _ = supabase.client.patch(&ncs_url).json(&ncs_payload).send().await;
 }
 
 /// Simple DexScreener price fetch for bonding curve signal tracking.

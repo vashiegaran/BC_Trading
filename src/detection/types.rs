@@ -280,6 +280,8 @@ pub struct WatchlistEntry {
     pub launch_label_shadow_recorded: bool,
     /// Whether the repeated-label shadow lane row has already been written.
     pub label_flow_shadow_recorded: bool,
+    /// Whether the narrative-cluster armed-post-grad simulation row has been written.
+    pub narrative_cluster_shadow_recorded: bool,
     /// Whether the probe stage of the probe-add shadow ladder has been written.
     pub probe_add_probe_recorded: bool,
     /// Whether the add stage of the probe-add shadow ladder has been written.

@@ -140,6 +140,25 @@ pub struct DetectionConfig {
     /// the label-flow shadow lane.
     #[serde(default = "default_label_flow_shadow_max_gap_seconds")]
     pub label_flow_shadow_max_gap_seconds: u64,
+    /// Shadow-only armed-post-graduation simulation for repeated narrative
+    /// clusters. Allows creator rebuy only inside this research lane.
+    #[serde(default)]
+    pub narrative_cluster_shadow_enabled: bool,
+    /// Minimum prior same-label mints required before narrative-cluster arming.
+    #[serde(default = "default_narrative_cluster_min_prior_mints")]
+    pub narrative_cluster_min_prior_mints: usize,
+    /// Minimum BC progress required before narrative-cluster arming.
+    #[serde(default = "default_narrative_cluster_min_progress_pct")]
+    pub narrative_cluster_min_progress_pct: f64,
+    /// Maximum BC progress allowed for narrative-cluster arming.
+    #[serde(default = "default_narrative_cluster_max_progress_pct")]
+    pub narrative_cluster_max_progress_pct: f64,
+    /// Maximum age, in seconds, of the most recent prior same-label mint.
+    #[serde(default = "default_narrative_cluster_max_gap_seconds")]
+    pub narrative_cluster_max_gap_seconds: u64,
+    /// Minimum composite score required to arm the narrative-cluster shadow row.
+    #[serde(default = "default_narrative_cluster_min_score")]
+    pub narrative_cluster_min_score: f64,
     /// Shadow-only ladder model: record a would-be probe row and later a
     /// would-be add row if the same mint keeps strengthening.
     #[serde(default)]
@@ -187,6 +206,11 @@ fn default_launch_label_shadow_max_gap_seconds() -> u64 { 180 }
 fn default_label_flow_shadow_min_progress_pct() -> f64 { 30.0 }
 fn default_label_flow_shadow_min_prior_mints() -> usize { 1 }
 fn default_label_flow_shadow_max_gap_seconds() -> u64 { 1_800 }
+fn default_narrative_cluster_min_prior_mints() -> usize { 1 }
+fn default_narrative_cluster_min_progress_pct() -> f64 { 20.0 }
+fn default_narrative_cluster_max_progress_pct() -> f64 { 100.0 }
+fn default_narrative_cluster_max_gap_seconds() -> u64 { 1_800 }
+fn default_narrative_cluster_min_score() -> f64 { 45.0 }
 fn default_probe_add_probe_progress_pct() -> f64 { 60.0 }
 fn default_probe_add_add_progress_pct() -> f64 { 75.0 }
 fn default_probe_add_min_unique_buyer_delta() -> usize { 10 }
