@@ -158,6 +158,23 @@ pub struct DetectionConfig {
     /// shadow rows.
     #[serde(default = "default_probe_add_min_volume_multiplier")]
     pub probe_add_min_volume_multiplier: f64,
+    /// Shadow-only signal: track whether any of the first N non-creator buyers
+    /// buys again before graduation. Pure data collection; never forwards live.
+    #[serde(default)]
+    pub early_buyer_rebuy_shadow_enabled: bool,
+    /// Number of earliest distinct non-creator buyers to watch.
+    #[serde(default = "default_early_buyer_rebuy_first_n")]
+    pub early_buyer_rebuy_first_n: usize,
+    /// Minimum distinct early buyers that must rebuy to record a shadow pass.
+    #[serde(default = "default_early_buyer_rebuy_min_rebuy_wallets")]
+    pub early_buyer_rebuy_min_rebuy_wallets: usize,
+    /// Minimum SOL size for a repeat buy to count. 0 = count any non-zero rebuy.
+    #[serde(default)]
+    pub early_buyer_rebuy_min_rebuy_sol: f64,
+    /// Maximum BC progress at which the shadow row can fire. 100 = any time
+    /// before graduation.
+    #[serde(default = "default_early_buyer_rebuy_max_progress_pct")]
+    pub early_buyer_rebuy_max_progress_pct: f64,
 }
 
 fn default_true() -> bool { true }
@@ -174,6 +191,9 @@ fn default_probe_add_probe_progress_pct() -> f64 { 60.0 }
 fn default_probe_add_add_progress_pct() -> f64 { 75.0 }
 fn default_probe_add_min_unique_buyer_delta() -> usize { 10 }
 fn default_probe_add_min_volume_multiplier() -> f64 { 1.5 }
+fn default_early_buyer_rebuy_first_n() -> usize { 5 }
+fn default_early_buyer_rebuy_min_rebuy_wallets() -> usize { 1 }
+fn default_early_buyer_rebuy_max_progress_pct() -> f64 { 100.0 }
 fn default_max_liquidity_usd() -> u64 { 0 } // 0 = disabled, must be set explicitly to take effect
 fn default_max_initial_liquidity_sol() -> f64 { 0.0 } // 0 = disabled
 

@@ -9,6 +9,27 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.7.1 — Early-Buyer Rebuy Shadow (2026-05-07)
+
+**Live strategy impact**: none. Active live behavior remains `v18.7-creator-rebuy-canary` unless [config.toml](config.toml) is changed separately.
+
+### Why
+`creator_rebuy` only checks whether the creator/dev wallet bought again. That can be too narrow. This shadow experiment tests a broader OR-candidate signal: whether any of the first five non-creator buyers returns and buys again before graduation.
+
+### Changes
+- Adds `early_buyer_rebuy_shadow_enabled` and first-N rebuy thresholds under `[detection]` in [config.toml](config.toml).
+- Adds a separate Supabase table via [migrations/029_early_buyer_rebuy_shadow.sql](migrations/029_early_buyer_rebuy_shadow.sql).
+- Computes the signal locally from the existing pump.fun/gRPC trade stream, so it adds no Helius, DAS, Solana RPC, or SolanaTracker calls.
+- Records one shadow row per mint when any configured early buyer rebuys, including rebuy size, rebuyer count, early-seller count, creator-rebuy state, curve metrics, graduation state, and post-graduation price outcomes.
+- Does not forward to live execution and does not change Standard/Fast-Track gates.
+
+### Initial shadow rule
+- First `5` unique non-creator buyers.
+- Pass if at least `1` of those wallets buys again.
+- Count any non-zero rebuy size; quality fields are logged for later filtering.
+
+---
+
 ## v18.7 — Creator-Rebuy Canary (2026-05-07)
 
 **strategy_version**: `v18.7-creator-rebuy-canary`

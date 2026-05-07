@@ -47,6 +47,15 @@ probe_add_add_progress_pct = 75.0
 probe_add_min_unique_buyer_delta = 10
 probe_add_min_volume_multiplier = 1.5
 
+# early_buyer_rebuy_shadow: observe-only signal. If any of the first N
+# non-creator buyers buys again before graduation, write a separate shadow row.
+# This is an OR-candidate research lane only; it never forwards live.
+early_buyer_rebuy_shadow_enabled = true
+early_buyer_rebuy_first_n = 5
+early_buyer_rebuy_min_rebuy_wallets = 1
+early_buyer_rebuy_min_rebuy_sol = 0.0
+early_buyer_rebuy_max_progress_pct = 100.0
+
 
 # ============================================================
 # FILTERS

@@ -367,6 +367,148 @@ fn maybe_fire_probe_add_shadow(
     fire_bc_lane(entry, mint_str, supabase, cfg, "probe_add_add", false, bc_progress_pct);
 }
 
+#[derive(Debug, Clone)]
+struct EarlyBuyerRebuyMetrics {
+    first_buyers: Vec<Pubkey>,
+    rebuy_wallets: Vec<Pubkey>,
+    early_seller_wallets: Vec<Pubkey>,
+    rebuy_count: u64,
+    rebuy_sol_total: f64,
+    rebuy_max_sol: f64,
+    first_rebuy_after_secs: Option<f64>,
+}
+
+fn compute_early_buyer_rebuy_metrics(
+    entry: &WatchlistEntry,
+    first_n: usize,
+    min_rebuy_sol: f64,
+) -> Option<EarlyBuyerRebuyMetrics> {
+    if first_n == 0 {
+        return None;
+    }
+
+    let mut first_buyers = Vec::new();
+    let mut seen_buyers = HashSet::new();
+    for &(_, _, is_buy, wallet) in &entry.trade_log {
+        if !is_buy || wallet == entry.creator_wallet {
+            continue;
+        }
+        if seen_buyers.insert(wallet) {
+            first_buyers.push(wallet);
+            if first_buyers.len() >= first_n {
+                break;
+            }
+        }
+    }
+
+    if first_buyers.is_empty() {
+        return None;
+    }
+
+    let first_set: HashSet<Pubkey> = first_buyers.iter().copied().collect();
+    let mut first_buy_time_by_wallet: HashMap<Pubkey, i64> = HashMap::new();
+    let mut buy_count_by_wallet: HashMap<Pubkey, u64> = HashMap::new();
+    let mut rebuyer_set: HashSet<Pubkey> = HashSet::new();
+    let mut early_seller_set: HashSet<Pubkey> = HashSet::new();
+    let mut rebuy_count = 0_u64;
+    let mut rebuy_sol_total = 0.0_f64;
+    let mut rebuy_max_sol = 0.0_f64;
+    let mut first_rebuy_after_secs: Option<f64> = None;
+
+    for &(ts, sol, is_buy, wallet) in &entry.trade_log {
+        if !first_set.contains(&wallet) {
+            continue;
+        }
+
+        if is_buy {
+            let count = buy_count_by_wallet.entry(wallet).or_insert(0);
+            *count += 1;
+            if *count == 1 {
+                first_buy_time_by_wallet.insert(wallet, ts);
+                continue;
+            }
+
+            if sol <= 0.0 || sol < min_rebuy_sol {
+                continue;
+            }
+
+            rebuy_count += 1;
+            rebuy_sol_total += sol;
+            if sol > rebuy_max_sol {
+                rebuy_max_sol = sol;
+            }
+            rebuyer_set.insert(wallet);
+
+            if let Some(first_ts) = first_buy_time_by_wallet.get(&wallet) {
+                let elapsed = ((ts - *first_ts).max(0) as f64) / 1_000.0;
+                first_rebuy_after_secs = Some(match first_rebuy_after_secs {
+                    Some(current) => current.min(elapsed),
+                    None => elapsed,
+                });
+            }
+        } else {
+            early_seller_set.insert(wallet);
+        }
+    }
+
+    Some(EarlyBuyerRebuyMetrics {
+        first_buyers,
+        rebuy_wallets: rebuyer_set.into_iter().collect(),
+        early_seller_wallets: early_seller_set.into_iter().collect(),
+        rebuy_count,
+        rebuy_sol_total,
+        rebuy_max_sol,
+        first_rebuy_after_secs,
+    })
+}
+
+fn maybe_fire_early_buyer_rebuy_shadow(
+    entry: &mut WatchlistEntry,
+    mint_str: &str,
+    supabase: &Arc<SupabaseClient>,
+    cfg: &Arc<AppConfig>,
+    bc_progress_pct: f64,
+) {
+    let detection_cfg = &cfg.strategy.detection;
+    if !detection_cfg.early_buyer_rebuy_shadow_enabled
+        || entry.early_buyer_rebuy_shadow_recorded
+    {
+        return;
+    }
+    if bc_progress_pct > detection_cfg.early_buyer_rebuy_max_progress_pct {
+        return;
+    }
+
+    let Some(metrics) = compute_early_buyer_rebuy_metrics(
+        entry,
+        detection_cfg.early_buyer_rebuy_first_n,
+        detection_cfg.early_buyer_rebuy_min_rebuy_sol,
+    ) else {
+        return;
+    };
+
+    if metrics.rebuy_wallets.len() < detection_cfg.early_buyer_rebuy_min_rebuy_wallets {
+        return;
+    }
+
+    entry.early_buyer_rebuy_shadow_recorded = true;
+    let payload = build_early_buyer_rebuy_shadow_payload(
+        entry,
+        mint_str,
+        &metrics,
+        detection_cfg.early_buyer_rebuy_first_n,
+        detection_cfg.early_buyer_rebuy_min_rebuy_wallets,
+        detection_cfg.early_buyer_rebuy_min_rebuy_sol,
+        bc_progress_pct,
+    );
+    let supabase_c = Arc::clone(supabase);
+    let mint_for_log = mint_str.to_string();
+    tokio::spawn(async move {
+        write_early_buyer_rebuy_shadow(&supabase_c, &payload).await;
+        info!(mint = %mint_for_log, "🧪 Early-buyer rebuy shadow recorded");
+    });
+}
+
 /// Run the pump.fun WebSocket listener.
 ///
 /// Connects to the PumpPortal WebSocket, subscribes to `newToken`,
@@ -744,6 +886,7 @@ async fn handle_new_token(
         probe_add_probe_unique_buyers: 0,
         probe_add_probe_volume_sol: 0.0,
         probe_add_probe_buy_pressure_pct: 0.0,
+        early_buyer_rebuy_shadow_recorded: false,
         last_v_sol_reserves: 0.0,
         last_v_token_reserves: 0.0,
         last_market_cap_sol: 0.0,
@@ -969,6 +1112,7 @@ async fn handle_token_trade(
             .clamp(0.0, 100.0);
 
         maybe_fire_launch_label_shadow(entry, mint_str, supabase, cfg, now, bc_progress_pct, is_buy);
+        maybe_fire_early_buyer_rebuy_shadow(entry, mint_str, supabase, cfg, bc_progress_pct);
 
         // v14.1 counterfactual control — record once when warming starts.
         // Gives us a negative-class sample of tokens that crossed 30% but
@@ -1435,6 +1579,7 @@ async fn handle_token_complete(
 
         maybe_fire_label_flow_shadow(entry, mint_str, supabase, cfg, bc_progress_pct);
         maybe_fire_probe_add_shadow(entry, mint_str, supabase, cfg, bc_progress_pct);
+        maybe_fire_early_buyer_rebuy_shadow(entry, mint_str, supabase, cfg, bc_progress_pct);
 
         if !entry.graduation_recorded {
             entry.graduation_recorded = true;
@@ -1714,6 +1859,30 @@ async fn handle_token_complete(
                 }
                 Err(e) => {
                     debug!(mint = %mint_for_grad, "bc_paper_trades graduation update failed: {}", e);
+                }
+            }
+
+            // Update early-buyer rebuy shadow rows with graduation outcome.
+            let ebr_url = format!(
+                "{}/early_buyer_rebuy_shadow?mint=eq.{}",
+                supabase_grad.base_url, mint_for_grad
+            );
+            let ebr_payload = serde_json::json!({
+                "graduated": true,
+                "graduated_at": &now_rfc,
+                "initial_liquidity_sol": grad_liquidity,
+                "status": "graduated",
+            });
+            match supabase_grad.client.patch(&ebr_url).json(&ebr_payload).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    debug!(mint = %mint_for_grad, "early_buyer_rebuy_shadow: marked graduated");
+                }
+                Ok(resp) => {
+                    let body = resp.text().await.unwrap_or_default();
+                    debug!(mint = %mint_for_grad, "early_buyer_rebuy_shadow graduation update: {}", body);
+                }
+                Err(e) => {
+                    debug!(mint = %mint_for_grad, "early_buyer_rebuy_shadow graduation update failed: {}", e);
                 }
             }
 
@@ -2092,6 +2261,114 @@ fn build_signal_payload(entry: &WatchlistEntry, mint_str: &str) -> serde_json::V
     })
 }
 
+fn build_early_buyer_rebuy_shadow_payload(
+    entry: &WatchlistEntry,
+    mint_str: &str,
+    metrics: &EarlyBuyerRebuyMetrics,
+    first_n: usize,
+    min_rebuy_wallets: usize,
+    min_rebuy_sol: f64,
+    bc_progress_pct: f64,
+) -> serde_json::Value {
+    let now = chrono::Utc::now().timestamp_millis();
+    let token_age_secs = (now - entry.detected_at) as f64 / 1_000.0;
+    let buy_sell_ratio = compute_current_buy_sell_ratio(entry);
+    let creator_rebuy = compute_current_creator_rebuy(entry);
+    let creator_sold_during_bc = entry.trade_log.iter().any(|&(_, _, is_buy, wallet)| {
+        !is_buy && wallet == entry.creator_wallet
+    });
+    let whale_buy_max_sol = entry.trade_log.iter()
+        .filter(|(_, _, is_buy, _)| *is_buy)
+        .map(|(_, sol, _, _)| *sol)
+        .fold(0.0_f64, f64::max);
+    let whale_buy_count = entry.trade_log.iter()
+        .filter(|(_, sol, is_buy, _)| *is_buy && *sol >= 3.0)
+        .count() as u32;
+    let bc_price_sol_per_token = if entry.last_v_token_reserves > 0.0 {
+        entry.last_v_sol_reserves / entry.last_v_token_reserves
+    } else {
+        0.0
+    };
+    let bc_price_usd = bc_price_usd_from_sol(bc_price_sol_per_token, DEFAULT_SOL_USD);
+    let bc_market_cap_usd = if entry.last_market_cap_sol > 0.0 {
+        entry.last_market_cap_sol * DEFAULT_SOL_USD
+    } else {
+        0.0
+    };
+    let first_buyer_wallets: Vec<String> = metrics.first_buyers.iter().map(ToString::to_string).collect();
+    let rebuy_wallets: Vec<String> = metrics.rebuy_wallets.iter().map(ToString::to_string).collect();
+    let early_seller_wallets: Vec<String> = metrics.early_seller_wallets.iter().map(ToString::to_string).collect();
+
+    let entry_metrics = serde_json::json!({
+        "buy_velocity_30s": compute_buy_velocity(&entry.trade_log, 30_000),
+        "sell_then_buy_flip": detect_sell_buy_flip(&entry.trade_log),
+        "zero_sells": entry.buy_count >= 50 && entry.sell_count == 0,
+        "normalized_label": entry.normalized_label.clone(),
+        "label_repeat_prior_mints_6h": entry.prior_same_label_mints_6h,
+        "label_repeat_prior_creators_6h": entry.prior_same_label_creators_6h,
+        "label_repeat_seconds_since_last_seen": entry.seconds_since_label_seen,
+    });
+
+    let mut payload = serde_json::Map::new();
+    payload.insert("mint".to_string(), serde_json::json!(mint_str));
+    payload.insert("symbol".to_string(), serde_json::json!(entry.symbol.clone()));
+    payload.insert("name".to_string(), serde_json::json!(entry.name.clone()));
+    payload.insert("creator_wallet".to_string(), serde_json::json!(entry.creator_wallet.to_string()));
+    payload.insert("token_created_at_ms".to_string(), serde_json::json!(entry.detected_at));
+    payload.insert("entry_trigger".to_string(), serde_json::json!(format!("first{}_any_rebuy_shadow", first_n)));
+    payload.insert("first_n".to_string(), serde_json::json!(first_n));
+    payload.insert("min_rebuy_wallets".to_string(), serde_json::json!(min_rebuy_wallets));
+    payload.insert("min_rebuy_sol".to_string(), serde_json::json!(min_rebuy_sol));
+    payload.insert("first_buyer_wallets".to_string(), serde_json::json!(first_buyer_wallets));
+    payload.insert("first_buyer_count".to_string(), serde_json::json!(metrics.first_buyers.len()));
+    payload.insert("rebuy_wallets".to_string(), serde_json::json!(rebuy_wallets));
+    payload.insert("rebuyer_count".to_string(), serde_json::json!(metrics.rebuy_wallets.len()));
+    payload.insert("rebuy_count".to_string(), serde_json::json!(metrics.rebuy_count));
+    payload.insert("rebuy_sol_total".to_string(), serde_json::json!(metrics.rebuy_sol_total));
+    payload.insert("rebuy_max_sol".to_string(), serde_json::json!(metrics.rebuy_max_sol));
+    payload.insert("first_rebuy_after_secs".to_string(), serde_json::json!(metrics.first_rebuy_after_secs));
+    payload.insert("early_seller_wallets".to_string(), serde_json::json!(early_seller_wallets));
+    payload.insert("early_seller_count".to_string(), serde_json::json!(metrics.early_seller_wallets.len()));
+    payload.insert("entry_token_age_secs".to_string(), serde_json::json!(token_age_secs));
+    payload.insert("entry_volume_sol".to_string(), serde_json::json!(entry.total_volume_sol));
+    payload.insert("entry_buy_count".to_string(), serde_json::json!(entry.buy_count));
+    payload.insert("entry_sell_count".to_string(), serde_json::json!(entry.sell_count));
+    payload.insert("entry_unique_buyers".to_string(), serde_json::json!(entry.unique_buyers.len()));
+    payload.insert("entry_buy_sell_ratio".to_string(), serde_json::json!(buy_sell_ratio));
+    payload.insert("entry_buy_pressure_pct".to_string(), serde_json::json!(entry.buy_pressure_pct()));
+    payload.insert("entry_creator_rebuy".to_string(), serde_json::json!(creator_rebuy));
+    payload.insert("creator_sold_during_bc".to_string(), serde_json::json!(creator_sold_during_bc));
+    payload.insert("whale_buy".to_string(), serde_json::json!(whale_buy_count > 0));
+    payload.insert("whale_buy_count".to_string(), serde_json::json!(whale_buy_count));
+    payload.insert("whale_buy_max_sol".to_string(), serde_json::json!(whale_buy_max_sol));
+    payload.insert("bc_progress_pct".to_string(), serde_json::json!(bc_progress_pct));
+    payload.insert("bc_virtual_sol_reserves".to_string(), serde_json::json!(if entry.last_v_sol_reserves > 0.0 { Some(entry.last_v_sol_reserves) } else { None }));
+    payload.insert("bc_virtual_token_reserves".to_string(), serde_json::json!(if entry.last_v_token_reserves > 0.0 { Some(entry.last_v_token_reserves) } else { None }));
+    payload.insert("bc_market_cap_usd".to_string(), serde_json::json!(if bc_market_cap_usd > 0.0 { Some(bc_market_cap_usd) } else { None }));
+    payload.insert("entry_price_usd".to_string(), serde_json::json!(if bc_price_usd > 0.0 { Some(bc_price_usd) } else { None }));
+    payload.insert("entry_metrics".to_string(), entry_metrics);
+
+    serde_json::Value::Object(payload)
+}
+
+async fn write_early_buyer_rebuy_shadow(
+    supabase: &SupabaseClient,
+    payload: &serde_json::Value,
+) {
+    let mint = payload.get("mint").and_then(|m| m.as_str()).unwrap_or("unknown");
+    let url = format!("{}/early_buyer_rebuy_shadow", supabase.base_url);
+    match supabase.client.post(&url).json(payload).send().await {
+        Ok(resp) if resp.status().is_success() => {}
+        Ok(resp) => {
+            let body = resp.text().await.unwrap_or_default();
+            warn!(mint = %mint, "early_buyer_rebuy_shadow INSERT failed: {}", body);
+        }
+        Err(e) => {
+            warn!(mint = %mint, "early_buyer_rebuy_shadow INSERT error: {}", e);
+        }
+    }
+}
+
 /// Max number of buy trades in any rolling window of `window_ms` milliseconds.
 fn compute_buy_velocity(trade_log: &[(i64, f64, bool, Pubkey)], window_ms: i64) -> u32 {
     let buys: Vec<i64> = trade_log.iter()
@@ -2419,6 +2696,13 @@ async fn spawn_bc_price_tracker(supabase: Arc<SupabaseClient>, mint: String) {
         let pt_url = format!("{}/bc_paper_trades?mint=eq.{}", supabase.base_url, mint);
         let pt_payload = serde_json::json!({ "price_at_graduation": baseline });
         let _ = supabase.client.patch(&pt_url).json(&pt_payload).send().await;
+
+        let ebr_url = format!("{}/early_buyer_rebuy_shadow?mint=eq.{}", supabase.base_url, mint);
+        let ebr_payload = serde_json::json!({
+            "price_at_graduation": baseline,
+            "status": "tracking",
+        });
+        let _ = supabase.client.patch(&ebr_url).json(&ebr_payload).send().await;
     }
 
     let mut peak_price: f64 = baseline;
@@ -2458,6 +2742,15 @@ async fn spawn_bc_price_tracker(supabase: Arc<SupabaseClient>, mint: String) {
         pt_payload.insert("peak_multiplier".to_string(), serde_json::json!(peak_price / baseline));
         let _ = supabase.client.patch(&pt_url).json(&serde_json::Value::Object(pt_payload)).send().await;
 
+        // Update early-buyer rebuy shadow rows using the same DexScreener fetch;
+        // this adds no extra rate-limit pressure.
+        let ebr_url = format!("{}/early_buyer_rebuy_shadow?mint=eq.{}", supabase.base_url, mint);
+        let mut ebr_payload = serde_json::Map::new();
+        ebr_payload.insert(pt_columns[i].to_string(), serde_json::json!(price));
+        ebr_payload.insert("peak_price".to_string(), serde_json::json!(peak_price));
+        ebr_payload.insert("peak_multiplier".to_string(), serde_json::json!(peak_price / baseline));
+        let _ = supabase.client.patch(&ebr_url).json(&serde_json::Value::Object(ebr_payload)).send().await;
+
         debug!(
             mint = %mint,
             column = column,
@@ -2466,6 +2759,13 @@ async fn spawn_bc_price_tracker(supabase: Arc<SupabaseClient>, mint: String) {
             "BC signal price update"
         );
     }
+
+    let ebr_url = format!("{}/early_buyer_rebuy_shadow?mint=eq.{}", supabase.base_url, mint);
+    let ebr_payload = serde_json::json!({
+        "status": "completed",
+        "completed_at": chrono::Utc::now().to_rfc3339(),
+    });
+    let _ = supabase.client.patch(&ebr_url).json(&ebr_payload).send().await;
 }
 
 /// Simple DexScreener price fetch for bonding curve signal tracking.

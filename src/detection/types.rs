@@ -289,6 +289,8 @@ pub struct WatchlistEntry {
     pub probe_add_probe_unique_buyers: usize,
     pub probe_add_probe_volume_sol: f64,
     pub probe_add_probe_buy_pressure_pct: f64,
+    /// Whether the early-buyer rebuy shadow row has already been written.
+    pub early_buyer_rebuy_shadow_recorded: bool,
 
     // ── Bonding curve state, updated from each tokenTrade WS event ──
     // PumpPortal includes vSolInBondingCurve, vTokensInBondingCurve and
