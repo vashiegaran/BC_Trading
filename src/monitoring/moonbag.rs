@@ -206,6 +206,8 @@ struct MoonbagPosition {
     max_hold_secs: u64,
     /// Profit gate: peak multiplier must reach this before age-based decay activates.
     profit_gate_multiplier: f64,
+    /// Early post-promotion grace where 2x-5x runners get wider trailing.
+    early_trailing_grace_secs: u64,
     /// Whether the profit gate has been reached at any point.
     profit_gate_reached: bool,
     /// Whether a 24h+ extension check has been performed (RUNNER_CONFIRMED only).
@@ -226,7 +228,13 @@ struct MoonbagPosition {
 }
 
 impl MoonbagPosition {
-    fn from_command(cmd: MoonbagCommand, initial_trailing_pct: f64, max_hold_secs: u64, profit_gate: f64) -> Self {
+    fn from_command(
+        cmd: MoonbagCommand,
+        initial_trailing_pct: f64,
+        max_hold_secs: u64,
+        profit_gate: f64,
+        early_trailing_grace_secs: u64,
+    ) -> Self {
         let now = Instant::now();
         let peak_mult = if cmd.entry_price_usd > 0.0 { cmd.peak_price / cmd.entry_price_usd } else { 1.0 };
         Self {
@@ -247,6 +255,7 @@ impl MoonbagPosition {
             is_paper_trade: cmd.is_paper_trade,
             max_hold_secs,
             profit_gate_multiplier: profit_gate,
+            early_trailing_grace_secs,
             profit_gate_reached: peak_mult >= profit_gate,
             extension_checked: false,
             consecutive_low_checks: 0,
@@ -303,7 +312,13 @@ impl MoonbagPosition {
             return self.initial_trailing_pct;
         }
 
-        let mult_based: f64 = if current_multiplier >= 20.0 {
+        let age_secs = self.promoted_at.elapsed().as_secs();
+        let in_early_grace = self.early_trailing_grace_secs > 0
+            && age_secs < self.early_trailing_grace_secs;
+
+        let mult_based: f64 = if in_early_grace && current_multiplier >= 2.0 && current_multiplier < 5.0 {
+            55.0
+        } else if current_multiplier >= 20.0 {
             15.0
         } else if current_multiplier >= 10.0 {
             20.0
@@ -422,6 +437,7 @@ pub async fn run_moonbag_tracker(
     let trailing_expanding = cfg.strategy.monitoring.moonbag_trailing_expanding;
     let trailing_confirmed = cfg.strategy.monitoring.moonbag_trailing_confirmed;
     let profit_gate = cfg.strategy.monitoring.moonbag_profit_gate_multiplier;
+    let early_trailing_grace_secs = cfg.strategy.monitoring.moonbag_early_trailing_grace_secs;
     let downgrade_threshold = cfg.strategy.monitoring.moonbag_downgrade_consecutive;
 
     let mut positions: Vec<MoonbagPosition> = Vec::new();
@@ -596,7 +612,13 @@ pub async fn run_moonbag_tracker(
                 });
 
                 let is_fr = cmd.promotion_source == PromotionSource::FastRunner;
-                positions.push(MoonbagPosition::from_command(cmd, trailing_pct, hold_cap, profit_gate));
+                positions.push(MoonbagPosition::from_command(
+                    cmd,
+                    trailing_pct,
+                    hold_cap,
+                    profit_gate,
+                    early_trailing_grace_secs,
+                ));
 
                 // For fast runners: fire background narrative check immediately
                 if is_fr {

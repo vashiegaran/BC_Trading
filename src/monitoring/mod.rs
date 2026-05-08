@@ -767,6 +767,9 @@ async fn monitor_position(
         //   Post-TP1: 2x base   (30min — gives the bag time to either run or trail out)
         //   Post-TP2: 4x base   (60min — proven runner, let trailing govern)
         let elapsed_seconds = started_at.elapsed().as_secs();
+        let creator_rebuy_runner_grace_active = is_creator_rebuy_quality_entry(&position)
+            && cfg.strategy.monitoring.creator_rebuy_runner_grace_secs > 0
+            && elapsed_seconds < cfg.strategy.monitoring.creator_rebuy_runner_grace_secs;
         let effective_max_hold_loop = if tp2_triggered {
             cfg.strategy.exit.max_hold_seconds.saturating_mul(4)
         } else if tp1_triggered {
@@ -1591,6 +1594,7 @@ async fn monitor_position(
             elapsed_seconds,
             is_paper_trade: position.is_paper_trade,
             initial_liquidity_sol: position.initial_liquidity_sol,
+            runner_grace_active: creator_rebuy_runner_grace_active,
         };
 
         // ── Tick stream momentum + dip state machine ──────────
@@ -1630,7 +1634,16 @@ async fn monitor_position(
         // Handle dip death signals (immediate exit)
         // Gate: skip dip_death if position is younger than min_hold_before_dip_death
         if let DipAction::ImmediateExit { reason: dip_reason } = &dip_action {
-            if elapsed_seconds < cfg.strategy.monitoring.min_hold_before_dip_death {
+            if creator_rebuy_runner_grace_active && is_soft_dip_death_reason(dip_reason) {
+                debug!(
+                    mint = %position.mint,
+                    reason = dip_reason,
+                    age_secs = elapsed_seconds,
+                    grace_secs = cfg.strategy.monitoring.creator_rebuy_runner_grace_secs,
+                    pnl_pct = format!("{:.2}", pnl_pct),
+                    "🛡️ Soft dip death suppressed — creator-rebuy runner grace active"
+                );
+            } else if elapsed_seconds < cfg.strategy.monitoring.min_hold_before_dip_death {
                 debug!(
                     mint = %position.mint,
                     reason = dip_reason,
@@ -2551,6 +2564,23 @@ fn compute_narrative_bonus(state: NarrativeState) -> f64 {
         NarrativeState::ExpandingAttention => 20.0,
         NarrativeState::RunnerConfirmed => 30.0,
     }
+}
+
+fn is_creator_rebuy_quality_entry(position: &PositionOpened) -> bool {
+    position
+        .sniper_features
+        .as_ref()
+        .and_then(|features| features.get("entry_tier"))
+        .and_then(|tier| tier.as_str())
+        .map(|tier| tier.starts_with("creator_rebuy_live_test"))
+        .unwrap_or(false)
+}
+
+fn is_soft_dip_death_reason(reason: &str) -> bool {
+    matches!(
+        reason,
+        "dip_grace_expired" | "no_trades_during_dip" | "extended_grace_expired_weak"
+    )
 }
 
 // ─── Supabase helpers ────────────────────────────────────────

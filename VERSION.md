@@ -9,6 +9,28 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.7.6 — Runner Grace Exit Protection (2026-05-08)
+
+**strategy_version**: `v18.7.6-runner-grace-exit-protection`
+
+### Why
+The strict creator-rebuy entries improved selection, but the latest `shadow_log`
+showed soft exits were still closing runners before continuation:
+
+- `RATJAK` exited via `dip_death:dip_grace_expired` near 1.04x / -9.5%, then shadow tracking saw ~8.45x.
+- `alondemia` was profitable and moonbag-promoted, but exited around 3x while shadow tracking later saw ~6.35x.
+
+### Changes
+- Adds `creator_rebuy_runner_grace_secs = 180` for entries whose `entry_tier` starts with `creator_rebuy_live_test`.
+- During that grace, suppresses only soft exits: `dip_grace_expired`, `no_trades_during_dip`, `extended_grace_expired_weak`, and `momentum_kill`.
+- Preserves hard protections: stop loss, dev-wallet dump, LP drain, whale-sell dip death, and sell-acceleration dip death.
+- Adds `moonbag_early_trailing_grace_secs = 900` and raises early moonbag trail to 55%, giving promoted 2x-5x moonbags a wider early leash before normal multiplier tightening resumes.
+
+### Rollback
+Set `creator_rebuy_runner_grace_secs = 0` and `moonbag_early_trailing_grace_secs = 0` in [config.toml](config.toml), then restart PM2.
+
+---
+
 ## v18.7.5 — Creator-Rebuy Quality 0.05 SOL Deploy (2026-05-08)
 
 **strategy_version**: `v18.7.5-creator-rebuy-quality-0050`

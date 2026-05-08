@@ -615,6 +615,11 @@ pub struct MonitoringConfig {
     /// Prevents premature exits on tokens that dip-then-rip right after entry.
     #[serde(default = "default_min_hold_before_dip_death")]
     pub min_hold_before_dip_death: u64,
+    /// Grace window for strict creator-rebuy quality entries. During this
+    /// window, soft dip-death and momentum-kill exits are suppressed, while
+    /// hard protections (stop loss, dev dump, LP drain, whale dump) remain live.
+    #[serde(default)]
+    pub creator_rebuy_runner_grace_secs: u64,
     /// How long (seconds) to continue shadow-logging price after a position
     /// is closed. 0 = disabled.  Data is written to the `shadow_log` table.
     #[serde(default)]
@@ -725,6 +730,10 @@ pub struct MonitoringConfig {
     /// Initial trailing stop % for RUNNER_CONFIRMED (0-30m).
     #[serde(default = "default_moonbag_trailing_confirmed")]
     pub moonbag_trailing_confirmed: f64,
+    /// Early grace window after moonbag promotion where 2x-5x runners get a
+    /// wider trail before normal multiplier-based tightening resumes.
+    #[serde(default)]
+    pub moonbag_early_trailing_grace_secs: u64,
     /// Peak multiplier threshold before age-based trail decay kicks in.
     /// Below this, keep the initial wide trail to avoid premature exits.
     #[serde(default = "default_moonbag_profit_gate_multiplier")]

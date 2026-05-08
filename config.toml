@@ -9,7 +9,7 @@
 #   filterable in analytics vs the broken v16.1 binary that was running
 #   from never-committed source. Detection: pumpfun_ws. Fast-track:
 #   2-source (on_chain_mint + goplus) so GoPlus runs PRE-buy.
-strategy_version = "v18.7.5-creator-rebuy-quality-0050"
+strategy_version = "v18.7.6-runner-grace-exit-protection"
 
 # ============================================================
 # DETECTION
@@ -472,6 +472,12 @@ dip_whale_sell_multiplier = 3.0
 # Minimum position age (seconds) before dip_death can fire — sniper: 30s
 min_hold_before_dip_death = 30
 
+# v18.7.6: strict creator-rebuy runners often dip/chop for 60-120s before
+# ripping. During this grace, suppress only SOFT exits (dip_grace_expired,
+# no_trades, momentum_kill). Hard protections still fire: stop_loss, dev dump,
+# LP drain, whale/sell-acceleration dip death.
+creator_rebuy_runner_grace_secs = 180
+
 # No trades for this many seconds during a dip = token dead — sniper: 30s
 dip_no_trades_timeout_secs = 30.0
 
@@ -527,9 +533,13 @@ moonbag_max_hold_confirmed_hours = 48
 moonbag_floor_multiplier = 1.2
 
 # Initial trailing stops per narrative state (used in first 30 min):
-moonbag_trailing_early = 45.0
+moonbag_trailing_early = 55.0
 moonbag_trailing_expanding = 55.0
 moonbag_trailing_confirmed = 55.0
+
+# v18.7.6: after a TP1 moonbag promotion, keep early 2x-5x runners on a
+# wider leash for 15m. Floor protection still exits if the bag falls to 1.2x.
+moonbag_early_trailing_grace_secs = 900
 
 # Profit gate: age-based trail decay only kicks in once peak >= this × entry.
 # Below this multiplier, keep the initial wide trail.

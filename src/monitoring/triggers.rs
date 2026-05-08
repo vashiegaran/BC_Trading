@@ -18,6 +18,9 @@ pub struct PositionState {
     pub is_paper_trade: bool,
     /// Initial pool liquidity in SOL — used for low-liq exit overrides.
     pub initial_liquidity_sol: f64,
+    /// Temporary runner-protection grace for high-conviction entries. Soft
+    /// MomentumKill is disabled while this is true; hard stops still fire.
+    pub runner_grace_active: bool,
 }
 
 /// Evaluate all exit triggers for a position.
@@ -169,6 +172,7 @@ pub fn check_triggers(pos: &PositionState, exit_cfg: &ExitConfig, suppress_trail
     let momentum_gate_secs = exit_cfg.momentum_kill_secs.max(MOMENTUM_KILL_MIN_SECS);
     if exit_cfg.momentum_kill_secs > 0
         && pos.elapsed_seconds >= momentum_gate_secs
+        && !pos.runner_grace_active
         && !pos.tp1_triggered
         && peak_multiplier < MOMENTUM_KILL_PEAK_GUARD
         && price_multiplier < exit_cfg.momentum_kill_min_multiplier
@@ -370,6 +374,7 @@ mod tests {
             elapsed_seconds: 10,
             is_paper_trade: true,
             initial_liquidity_sol: 80.0,
+            runner_grace_active: false,
         }
     }
 
