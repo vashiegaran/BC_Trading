@@ -9,6 +9,73 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.7.5 — Creator-Rebuy Quality 0.05 SOL Deploy (2026-05-08)
+
+**strategy_version**: `v18.7.5-creator-rebuy-quality-0050`
+
+### Why
+The v18.7.4 filter tune is ready for deployment, but a `0.005 SOL` creator-rebuy canary is too small once priority fees, execution costs, and slippage overhead are considered. This deploy keeps the same strict quality gates but uses normal `0.05 SOL` sizing for qualified creator-rebuy canary entries.
+
+### Changes
+- Keeps the v18.7.4 quality gates: max sells `3`, max initial liquidity `80 SOL`, valid identity required, max one open creator-rebuy canary.
+- Keeps broad `reject_creator_rebuy = true`; only strict creator-rebuy quality profiles can forward live.
+- Sets `creator_rebuy_live_test_buy_amount_sol = 0.05`, matching the normal configured buy amount.
+- Social/narrative catalyst expansion remains shadow/research only; no live broad social override.
+
+### Rollback
+Set `creator_rebuy_live_test_enabled = false` in [config.toml](config.toml) and restart PM2, or reduce `creator_rebuy_live_test_buy_amount_sol` back to `0.005` for tiny canary sizing.
+
+---
+
+## v18.7.4 — Creator-Rebuy Quality Deploy Tune (2026-05-08)
+
+**strategy_version**: `v18.7.4-creator-rebuy-quality-deploy`
+
+### Why
+Three-day simulation of the v18.7.3 canary showed the profile was clean but slightly too tight on two low-risk edges. Raising only the creator-rebuy canary liquidity ceiling and sell cap added simulated winners without adding bad <1.3x outcomes in the May 6–8 window.
+
+### Changes
+- Keeps broad `reject_creator_rebuy = true` and keeps Standard lane disabled.
+- Keeps canary size at `0.005 SOL` and max one open creator-rebuy canary.
+- Keeps hard live identity guard: non-empty symbol/name and creator wallet not System Program.
+- Raises creator-rebuy canary max sells from `2` to `3`.
+- Raises creator-rebuy canary max initial liquidity from `75` to `80 SOL`.
+- Social/narrative catalyst expansion remains shadow/research only; no live broad social override.
+
+### Backtest snapshot
+May 6–8 creator-rebuy `volume_50sol` simulation:
+
+| Filter | Trades | 2x hits | 5x hits | Bad <1.3x |
+|---|---:|---:|---:|---:|
+| v18.7.3 | 48 | 36 | 14 | 6 |
+| v18.7.4 tune | 58 | 43 | 16 | 6 |
+
+### Rollback
+Set `creator_rebuy_live_test_enabled = false` in [config.toml](config.toml) and restart PM2. Shadow tracking remains active.
+
+---
+
+## v18.7.3 — Creator-Rebuy Quality Canary (2026-05-08)
+
+**strategy_version**: `v18.7.3-creator-rebuy-quality-canary`
+
+### Why
+The v18.7 live canary showed creator-rebuy remained noisy and exposed a fast-track data-quality gap: several live rows had empty token identity and the System Program as creator/dev wallet. Recent shadow analysis showed broad creator-rebuy fast-track rows were too weak (~37% 2x, ~41% below 1.3x), while stricter flow profiles improved selection.
+
+### Changes
+- Routes creator-rebuy detected in the BC score cache through the creator-rebuy experiment instead of generic Fast-Track.
+- Blocks creator-rebuy live canary when token name/symbol are missing or creator wallet is the System Program.
+- Adds cached BC signal fields for `bc_progress_pct` and max single buy size.
+- Replaces the loose live test with two quality profiles:
+  - zero-sell breakout: zero sells, strong buy/sell ratio, strong buy pressure, whale buy.
+  - strong-flow breakout: score ≥ 63, buy pressure ≥ 80%, buy/sell ratio ≥ 4, sells ≤ 2, BC progress 20–45%, whale buy ≥ 4 SOL.
+- Reduces creator-rebuy canary size to `0.005 SOL`.
+
+### Rollback
+Set `creator_rebuy_live_test_enabled = false` in [config.toml](config.toml) and restart PM2. Shadow tracking remains active.
+
+---
+
 ## v18.7.2 — Narrative-Cluster Armed Shadow (2026-05-07)
 
 **Live strategy impact**: none. Active live behavior remains `v18.7-creator-rebuy-canary`; this is observe-only and never forwards execution.

@@ -1558,6 +1558,11 @@ async fn handle_token_trade(
 
         // ── Compute and cache BC score for fast-track pipeline ──
         let whale_buy = entry.trade_log.iter().any(|&(_, sol, is_buy, _)| is_buy && sol >= 3.0);
+        let max_single_buy_sol = entry.trade_log
+            .iter()
+            .filter(|&&(_, _, is_buy, _)| is_buy)
+            .map(|&(_, sol, _, _)| sol)
+            .fold(0.0_f64, f64::max);
         let cr = entry.trade_log.iter().any(|&(_, _, is_buy, wallet)| {
             is_buy && wallet == entry.creator_wallet
         }) && entry.trade_log.len() > 1;
@@ -1565,6 +1570,11 @@ async fn handle_token_trade(
             entry.buy_count as f64 / entry.sell_count as f64
         } else if entry.buy_count > 0 {
             entry.buy_count as f64
+        } else {
+            0.0
+        };
+        let bc_progress_pct = if entry.last_v_sol_reserves > 0.0 {
+            (((entry.last_v_sol_reserves - 30.0) / 85.0) * 100.0).clamp(0.0, 100.0)
         } else {
             0.0
         };
@@ -1584,6 +1594,8 @@ async fn handle_token_trade(
             buy_sell_ratio: bsr,
             creator_rebuy: cr,
             whale_buy,
+            max_single_buy_sol,
+            bc_progress_pct,
             buy_count: entry.buy_count,
             sell_count: entry.sell_count,
             total_volume_sol: entry.total_volume_sol,

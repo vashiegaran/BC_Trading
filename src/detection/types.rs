@@ -19,6 +19,10 @@ pub struct BcScoreEntry {
     pub buy_sell_ratio: f64,
     pub creator_rebuy: bool,
     pub whale_buy: bool,
+    /// Largest single buy seen when the BC score was recorded.
+    pub max_single_buy_sol: f64,
+    /// Bonding-curve progress percent when the BC score was recorded.
+    pub bc_progress_pct: f64,
     pub buy_count: u64,
     pub sell_count: u64,
     pub total_volume_sol: f64,

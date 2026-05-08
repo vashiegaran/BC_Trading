@@ -9,7 +9,7 @@
 #   filterable in analytics vs the broken v16.1 binary that was running
 #   from never-committed source. Detection: pumpfun_ws. Fast-track:
 #   2-source (on_chain_mint + goplus) so GoPlus runs PRE-buy.
-strategy_version = "v18.7-creator-rebuy-canary"
+strategy_version = "v18.7.5-creator-rebuy-quality-0050"
 
 # ============================================================
 # DETECTION
@@ -170,18 +170,27 @@ reject_creator_rebuy = true
 creator_rebuy_shadow_enabled = true
 creator_rebuy_shadow_min_score = 60.0
 
-# Tiny live canary: keep the broad creator_rebuy hard gate, but allow only the
-# strongest creator-rebuy shadow profile through after Fast-Track safety passes.
+# Tiny live canary: keep the broad creator_rebuy hard gate, but allow only
+# high-quality creator-rebuy profiles through after Fast-Track safety passes.
 # Rollback: set creator_rebuy_live_test_enabled=false and restart PM2.
 creator_rebuy_live_test_enabled = true
 creator_rebuy_live_test_min_score = 63.0
-creator_rebuy_live_test_min_buy_pressure_pct = 70.0
-creator_rebuy_live_test_min_buy_sell_ratio = 2.0
-creator_rebuy_live_test_min_unique_buyers = 40
-creator_rebuy_live_test_max_sell_count = 30
+creator_rebuy_live_test_min_buy_pressure_pct = 80.0
+creator_rebuy_live_test_min_buy_sell_ratio = 4.0
+creator_rebuy_live_test_min_unique_buyers = 0
+creator_rebuy_live_test_max_sell_count = 3
 creator_rebuy_live_test_min_initial_liquidity_sol = 30.0
 creator_rebuy_live_test_max_initial_liquidity_sol = 80.0
 creator_rebuy_live_test_max_open_positions = 1
+creator_rebuy_live_test_require_valid_identity = true
+creator_rebuy_live_test_max_bc_progress_pct = 45.0
+creator_rebuy_live_test_min_total_volume_sol = 30.0
+creator_rebuy_live_test_min_whale_buy_sol = 4.0
+creator_rebuy_live_test_zero_sell_enabled = true
+creator_rebuy_live_test_zero_sell_min_score = 50.0
+creator_rebuy_live_test_zero_sell_min_buy_pressure_pct = 70.0
+creator_rebuy_live_test_zero_sell_min_buy_sell_ratio = 5.0
+creator_rebuy_live_test_strong_flow_min_bc_progress_pct = 20.0
 
 # Minimum buy/sell ratio on the bonding curve.
 # Data: ratio > 2.3 graduates at 10.9% vs < 1.1 at 3.2%. Using 1.2 to avoid over-filtering.
@@ -239,9 +248,9 @@ min_sniper_score = 60.0
 # Amount of SOL to spend per trade (max for dynamic sizing)
 buy_amount_sol = 0.05
 
-# Creator-rebuy canary uses a smaller fixed test size. Execution uses the
-# smaller of this value and the normal dynamic size.
-creator_rebuy_live_test_buy_amount_sol = 0.01
+# Creator-rebuy canary uses this fixed size. Execution uses the smaller of
+# this value and the normal dynamic size; 0.05 keeps it at normal size.
+creator_rebuy_live_test_buy_amount_sol = 0.05
 
 # Dynamic position sizing: scale buy size based on pool liquidity.
 # Low-liq tokens get smaller positions to limit risk.

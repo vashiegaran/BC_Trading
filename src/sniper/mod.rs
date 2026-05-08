@@ -32,6 +32,7 @@ use crate::logger::SupabaseClient;
 const SNIPER_CHANNEL_CAPACITY: usize = 100;
 const CREATOR_REBUY_SHADOW_ENTRY_TIER: &str = "creator_rebuy_shadow_fast_track";
 const CREATOR_REBUY_LIVE_TEST_ENTRY_TIER: &str = "creator_rebuy_live_test_fast_track";
+const SYSTEM_PROGRAM_ID: &str = "11111111111111111111111111111111";
 
 fn creator_rebuy_live_test_rejection_reason(
     token: &GraduatedToken,
@@ -43,48 +44,53 @@ fn creator_rebuy_live_test_rejection_reason(
         return Some("creator_rebuy_live_test_disabled".to_string());
     }
 
-    if bc_entry.score < filters_cfg.creator_rebuy_live_test_min_score {
+    if filters_cfg.creator_rebuy_live_test_require_valid_identity {
+        if token.name.trim().is_empty() || token.symbol.trim().is_empty() {
+            return Some("creator_rebuy_live_test_missing_token_identity".to_string());
+        }
+        if token.creator_wallet.to_string() == SYSTEM_PROGRAM_ID {
+            return Some("creator_rebuy_live_test_creator_wallet_system_program".to_string());
+        }
+    }
+
+    if filters_cfg.creator_rebuy_live_test_min_total_volume_sol > 0.0
+        && bc_entry.total_volume_sol < filters_cfg.creator_rebuy_live_test_min_total_volume_sol
+    {
         return Some(format!(
-            "bc_score_{:.1}_below_live_test_min_{:.1}",
-            bc_entry.score, filters_cfg.creator_rebuy_live_test_min_score
+            "total_volume_sol_{:.1}_below_live_test_min_{:.1}",
+            bc_entry.total_volume_sol, filters_cfg.creator_rebuy_live_test_min_total_volume_sol
         ));
     }
 
-    if token.buy_pressure_pct < filters_cfg.creator_rebuy_live_test_min_buy_pressure_pct {
+    if filters_cfg.creator_rebuy_live_test_min_whale_buy_sol > 0.0
+        && bc_entry.max_single_buy_sol < filters_cfg.creator_rebuy_live_test_min_whale_buy_sol
+    {
         return Some(format!(
-            "buy_pressure_{:.1}_below_live_test_min_{:.1}",
-            token.buy_pressure_pct, filters_cfg.creator_rebuy_live_test_min_buy_pressure_pct
+            "max_single_buy_sol_{:.2}_below_live_test_min_{:.2}",
+            bc_entry.max_single_buy_sol, filters_cfg.creator_rebuy_live_test_min_whale_buy_sol
         ));
     }
 
-    let buy_sell_ratio = match (bc_entry.buy_sell_ratio > 0.0, token.buy_sell_ratio > 0.0) {
-        (true, true) => bc_entry.buy_sell_ratio.min(token.buy_sell_ratio),
-        (true, false) => bc_entry.buy_sell_ratio,
-        (false, true) => token.buy_sell_ratio,
-        (false, false) => 0.0,
+    if filters_cfg.creator_rebuy_live_test_max_bc_progress_pct > 0.0 {
+        if bc_entry.bc_progress_pct <= 0.0 {
+            return Some("bc_progress_unknown_for_live_test".to_string());
+        }
+        if bc_entry.bc_progress_pct > filters_cfg.creator_rebuy_live_test_max_bc_progress_pct {
+            return Some(format!(
+                "bc_progress_{:.1}_above_live_test_max_{:.1}",
+                bc_entry.bc_progress_pct, filters_cfg.creator_rebuy_live_test_max_bc_progress_pct
+            ));
+        }
+    }
+
+    let buy_sell_ratio = bc_entry.buy_sell_ratio;
+    let unique_buyers = bc_entry.unique_buyers;
+    let sell_count = bc_entry.sell_count;
+    let buy_pressure_pct = if bc_entry.buy_count + bc_entry.sell_count > 0 {
+        bc_entry.buy_count as f64 / (bc_entry.buy_count + bc_entry.sell_count) as f64 * 100.0
+    } else {
+        token.buy_pressure_pct
     };
-    if buy_sell_ratio < filters_cfg.creator_rebuy_live_test_min_buy_sell_ratio {
-        return Some(format!(
-            "buy_sell_ratio_{:.2}_below_live_test_min_{:.2}",
-            buy_sell_ratio, filters_cfg.creator_rebuy_live_test_min_buy_sell_ratio
-        ));
-    }
-
-    let unique_buyers = bc_entry.unique_buyers.max(token.unique_buyer_count);
-    if unique_buyers < filters_cfg.creator_rebuy_live_test_min_unique_buyers {
-        return Some(format!(
-            "unique_buyers_{}_below_live_test_min_{}",
-            unique_buyers, filters_cfg.creator_rebuy_live_test_min_unique_buyers
-        ));
-    }
-
-    let sell_count = bc_entry.sell_count.max(token.sell_count);
-    if sell_count > filters_cfg.creator_rebuy_live_test_max_sell_count {
-        return Some(format!(
-            "sell_count_{}_above_live_test_max_{}",
-            sell_count, filters_cfg.creator_rebuy_live_test_max_sell_count
-        ));
-    }
 
     let min_liq = filters_cfg.creator_rebuy_live_test_min_initial_liquidity_sol;
     if min_liq > 0.0 {
@@ -104,6 +110,31 @@ fn creator_rebuy_live_test_rejection_reason(
         return Some(format!(
             "initial_liquidity_sol_{:.1}_above_live_test_max_{:.1}",
             initial_liquidity_sol, max_liq
+        ));
+    }
+
+    let zero_sell_profile = filters_cfg.creator_rebuy_live_test_zero_sell_enabled
+        && bc_entry.score >= filters_cfg.creator_rebuy_live_test_zero_sell_min_score
+        && sell_count == 0
+        && buy_pressure_pct >= filters_cfg.creator_rebuy_live_test_zero_sell_min_buy_pressure_pct
+        && buy_sell_ratio >= filters_cfg.creator_rebuy_live_test_zero_sell_min_buy_sell_ratio;
+
+    let strong_flow_profile = bc_entry.score >= filters_cfg.creator_rebuy_live_test_min_score
+        && buy_pressure_pct >= filters_cfg.creator_rebuy_live_test_min_buy_pressure_pct
+        && buy_sell_ratio >= filters_cfg.creator_rebuy_live_test_min_buy_sell_ratio
+        && unique_buyers >= filters_cfg.creator_rebuy_live_test_min_unique_buyers
+        && sell_count <= filters_cfg.creator_rebuy_live_test_max_sell_count
+        && bc_entry.bc_progress_pct >= filters_cfg.creator_rebuy_live_test_strong_flow_min_bc_progress_pct;
+
+    if !(zero_sell_profile || strong_flow_profile) {
+        return Some(format!(
+            "creator_rebuy_live_profile_miss_score_{:.1}_bsr_{:.2}_pressure_{:.1}_sells_{}_buyers_{}_progress_{:.1}",
+            bc_entry.score,
+            buy_sell_ratio,
+            buy_pressure_pct,
+            sell_count,
+            unique_buyers,
+            bc_entry.bc_progress_pct
         ));
     }
 
@@ -180,7 +211,18 @@ pub fn start(
             if token.source == crate::detection::types::DetectionSource::PumpFun {
                 let bc_score = bc_entry.as_ref().map(|entry| entry.score);
 
-                if let Some(reason) = filters::check_bc_pattern(&token, &cfg.strategy.filters, bc_score) {
+                let bc_pattern_reason = filters::check_bc_pattern(&token, &cfg.strategy.filters, bc_score)
+                    .or_else(|| {
+                        if cfg.strategy.filters.reject_creator_rebuy
+                            && bc_entry.as_ref().map(|entry| entry.creator_rebuy).unwrap_or(false)
+                        {
+                            Some("creator_rebuy_detected".to_string())
+                        } else {
+                            None
+                        }
+                    });
+
+                if let Some(reason) = bc_pattern_reason {
                     let creator_rebuy_shadow_qualifies = reason == "creator_rebuy_detected"
                         && cfg.strategy.filters.creator_rebuy_shadow_enabled
                         && bc_entry
@@ -277,12 +319,23 @@ pub fn start(
                             "creator_rebuy_live_test_max_sell_count": cfg.strategy.filters.creator_rebuy_live_test_max_sell_count,
                             "creator_rebuy_live_test_min_initial_liquidity_sol": cfg.strategy.filters.creator_rebuy_live_test_min_initial_liquidity_sol,
                             "creator_rebuy_live_test_max_initial_liquidity_sol": cfg.strategy.filters.creator_rebuy_live_test_max_initial_liquidity_sol,
+                            "creator_rebuy_live_test_require_valid_identity": cfg.strategy.filters.creator_rebuy_live_test_require_valid_identity,
+                            "creator_rebuy_live_test_max_bc_progress_pct": cfg.strategy.filters.creator_rebuy_live_test_max_bc_progress_pct,
+                            "creator_rebuy_live_test_min_total_volume_sol": cfg.strategy.filters.creator_rebuy_live_test_min_total_volume_sol,
+                            "creator_rebuy_live_test_min_whale_buy_sol": cfg.strategy.filters.creator_rebuy_live_test_min_whale_buy_sol,
+                            "creator_rebuy_live_test_zero_sell_enabled": cfg.strategy.filters.creator_rebuy_live_test_zero_sell_enabled,
+                            "creator_rebuy_live_test_zero_sell_min_score": cfg.strategy.filters.creator_rebuy_live_test_zero_sell_min_score,
+                            "creator_rebuy_live_test_zero_sell_min_buy_pressure_pct": cfg.strategy.filters.creator_rebuy_live_test_zero_sell_min_buy_pressure_pct,
+                            "creator_rebuy_live_test_zero_sell_min_buy_sell_ratio": cfg.strategy.filters.creator_rebuy_live_test_zero_sell_min_buy_sell_ratio,
+                            "creator_rebuy_live_test_strong_flow_min_bc_progress_pct": cfg.strategy.filters.creator_rebuy_live_test_strong_flow_min_bc_progress_pct,
                             "creator_rebuy_live_test_buy_amount_sol": cfg.strategy.execution.creator_rebuy_live_test_buy_amount_sol,
                             "bc_score": bc_entry.score,
                             "bc_unique_buyers": bc_entry.unique_buyers,
                             "bc_buy_sell_ratio": bc_entry.buy_sell_ratio,
                             "bc_creator_rebuy": bc_entry.creator_rebuy,
                             "bc_whale_buy": bc_entry.whale_buy,
+                            "bc_max_single_buy_sol": bc_entry.max_single_buy_sol,
+                            "bc_progress_pct_at_score": bc_entry.bc_progress_pct,
                             "bc_buy_count": bc_entry.buy_count,
                             "bc_sell_count": bc_entry.sell_count,
                             "bc_total_volume_sol": bc_entry.total_volume_sol,
@@ -491,6 +544,8 @@ pub fn start(
                             "bc_buy_sell_ratio": bc_entry.buy_sell_ratio,
                             "bc_creator_rebuy": bc_entry.creator_rebuy,
                             "bc_whale_buy": bc_entry.whale_buy,
+                            "bc_max_single_buy_sol": bc_entry.max_single_buy_sol,
+                            "bc_progress_pct_at_score": bc_entry.bc_progress_pct,
                             "bc_buy_count": bc_entry.buy_count,
                             "bc_sell_count": bc_entry.sell_count,
                             "bc_total_volume_sol": bc_entry.total_volume_sol,

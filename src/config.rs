@@ -301,6 +301,35 @@ pub struct FiltersConfig {
     /// 0 = no lane-specific cap.
     #[serde(default = "default_creator_rebuy_live_test_max_open_positions")]
     pub creator_rebuy_live_test_max_open_positions: u32,
+    /// Require non-empty token identity and a non-sentinel creator wallet before
+    /// any creator-rebuy live canary can forward to execution.
+    #[serde(default = "default_true")]
+    pub creator_rebuy_live_test_require_valid_identity: bool,
+    /// Maximum BC progress at the cached signal time for creator-rebuy canary.
+    /// 0 = disabled.
+    #[serde(default = "default_creator_rebuy_live_test_max_bc_progress_pct")]
+    pub creator_rebuy_live_test_max_bc_progress_pct: f64,
+    /// Minimum cached BC volume for creator-rebuy canary.
+    #[serde(default = "default_creator_rebuy_live_test_min_total_volume_sol")]
+    pub creator_rebuy_live_test_min_total_volume_sol: f64,
+    /// Minimum largest single buy in SOL for creator-rebuy canary.
+    #[serde(default = "default_creator_rebuy_live_test_min_whale_buy_sol")]
+    pub creator_rebuy_live_test_min_whale_buy_sol: f64,
+    /// Enable the high-precision zero-sell creator-rebuy profile.
+    #[serde(default = "default_true")]
+    pub creator_rebuy_live_test_zero_sell_enabled: bool,
+    /// Minimum BC score for the zero-sell creator-rebuy profile.
+    #[serde(default = "default_creator_rebuy_live_test_zero_sell_min_score")]
+    pub creator_rebuy_live_test_zero_sell_min_score: f64,
+    /// Minimum buy pressure for the zero-sell creator-rebuy profile.
+    #[serde(default = "default_creator_rebuy_live_test_zero_sell_min_buy_pressure_pct")]
+    pub creator_rebuy_live_test_zero_sell_min_buy_pressure_pct: f64,
+    /// Minimum buy/sell ratio for the zero-sell creator-rebuy profile.
+    #[serde(default = "default_creator_rebuy_live_test_zero_sell_min_buy_sell_ratio")]
+    pub creator_rebuy_live_test_zero_sell_min_buy_sell_ratio: f64,
+    /// Minimum BC progress for the strong-flow creator-rebuy profile.
+    #[serde(default = "default_creator_rebuy_live_test_strong_flow_min_bc_progress_pct")]
+    pub creator_rebuy_live_test_strong_flow_min_bc_progress_pct: f64,
     /// Minimum buy/sell ratio on the bonding curve.
     /// Data: Q4 (>2.3) graduates at 10.9% vs Q1 (<1.1) at 3.2%.
     #[serde(default = "default_min_buy_sell_ratio")]
@@ -351,13 +380,20 @@ fn default_min_holder_count() -> usize { 8 }
 fn default_min_buy_sell_ratio() -> f64 { 1.2 }
 fn default_creator_rebuy_shadow_min_score() -> f64 { 60.0 }
 fn default_creator_rebuy_live_test_min_score() -> f64 { 63.0 }
-fn default_creator_rebuy_live_test_min_buy_pressure_pct() -> f64 { 70.0 }
-fn default_creator_rebuy_live_test_min_buy_sell_ratio() -> f64 { 2.0 }
-fn default_creator_rebuy_live_test_min_unique_buyers() -> usize { 40 }
-fn default_creator_rebuy_live_test_max_sell_count() -> u64 { 30 }
+fn default_creator_rebuy_live_test_min_buy_pressure_pct() -> f64 { 80.0 }
+fn default_creator_rebuy_live_test_min_buy_sell_ratio() -> f64 { 4.0 }
+fn default_creator_rebuy_live_test_min_unique_buyers() -> usize { 0 }
+fn default_creator_rebuy_live_test_max_sell_count() -> u64 { 3 }
 fn default_creator_rebuy_live_test_min_initial_liquidity_sol() -> f64 { 30.0 }
 fn default_creator_rebuy_live_test_max_initial_liquidity_sol() -> f64 { 80.0 }
 fn default_creator_rebuy_live_test_max_open_positions() -> u32 { 1 }
+fn default_creator_rebuy_live_test_max_bc_progress_pct() -> f64 { 45.0 }
+fn default_creator_rebuy_live_test_min_total_volume_sol() -> f64 { 30.0 }
+fn default_creator_rebuy_live_test_min_whale_buy_sol() -> f64 { 4.0 }
+fn default_creator_rebuy_live_test_zero_sell_min_score() -> f64 { 50.0 }
+fn default_creator_rebuy_live_test_zero_sell_min_buy_pressure_pct() -> f64 { 70.0 }
+fn default_creator_rebuy_live_test_zero_sell_min_buy_sell_ratio() -> f64 { 5.0 }
+fn default_creator_rebuy_live_test_strong_flow_min_bc_progress_pct() -> f64 { 20.0 }
 fn default_max_bc_sell_count() -> u64 { 40 }
 fn default_min_sniper_score() -> f64 { 60.0 }
 fn default_bc_fast_track_min_score() -> f64 { 65.0 }
@@ -431,9 +467,9 @@ pub struct ExecutionConfig {
     /// Read from `sniper_features.be_volume_24h_usd`. 0 = disabled.
     #[serde(default = "default_moonbag_vol_24h_usd_max")]
     pub moonbag_vol_24h_usd_max: f64,
-    /// Fixed tiny buy size for the creator-rebuy live canary. 0 = use normal
-    /// dynamic sizing. When set, execution uses the smaller of this and the
-    /// normal dynamic size.
+    /// Optional fixed buy size for the creator-rebuy live canary. 0 = use
+    /// normal dynamic sizing. When set, execution uses the smaller of this and
+    /// the normal dynamic size.
     #[serde(default)]
     pub creator_rebuy_live_test_buy_amount_sol: f64,
 }
