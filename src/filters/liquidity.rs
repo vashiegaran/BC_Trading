@@ -8,9 +8,9 @@ use solana_sdk::pubkey::Pubkey;
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
-use crate::config::AppConfig;
 use super::rpc_fallback::is_rate_limited;
 use super::types::FilterResult;
+use crate::config::AppConfig;
 
 const CHECK_NAME: &str = "liquidity";
 const LOCK_CHECK_NAME: &str = "liquidity_lock_duration";
@@ -64,10 +64,7 @@ impl LiquidityFilter {
                 match filter.fetch_sol_price().await {
                     Ok(price) => {
                         if price < 50.0 || price > 10000.0 {
-                            tracing::warn!(
-                                price,
-                                "SOL price looks wrong, skipping cache update"
-                            );
+                            tracing::warn!(price, "SOL price looks wrong, skipping cache update");
                         } else {
                             let mut w = cache_clone.write().await;
                             *w = price;
@@ -81,7 +78,10 @@ impl LiquidityFilter {
             }
         });
 
-        Self { http, sol_price_cache }
+        Self {
+            http,
+            sol_price_cache,
+        }
     }
 
     /// Check that the Raydium pool has enough liquidity in USD.
@@ -159,7 +159,10 @@ impl LiquidityFilter {
                     return (
                         FilterResult::fail(
                             CHECK_NAME,
-                            &format!("no_pool_liquidity_${:.0}_below_min_${:.0}", liquidity_usd, min),
+                            &format!(
+                                "no_pool_liquidity_${:.0}_below_min_${:.0}",
+                                liquidity_usd, min
+                            ),
                         ),
                         Some(liquidity_usd),
                     );
@@ -169,7 +172,10 @@ impl LiquidityFilter {
                     return (
                         FilterResult::fail(
                             CHECK_NAME,
-                            &format!("no_pool_liquidity_${:.0}_above_max_${:.0}", liquidity_usd, max),
+                            &format!(
+                                "no_pool_liquidity_${:.0}_above_max_${:.0}",
+                                liquidity_usd, max
+                            ),
                         ),
                         Some(liquidity_usd),
                     );
@@ -220,7 +226,10 @@ impl LiquidityFilter {
                         return (
                             FilterResult::fail(
                                 CHECK_NAME,
-                                &format!("pump_amm_liquidity_${:.0}_below_min_${:.0}", liquidity_usd, min),
+                                &format!(
+                                    "pump_amm_liquidity_${:.0}_below_min_${:.0}",
+                                    liquidity_usd, min
+                                ),
                             ),
                             Some(liquidity_usd),
                         );
@@ -230,7 +239,10 @@ impl LiquidityFilter {
                         return (
                             FilterResult::fail(
                                 CHECK_NAME,
-                                &format!("pump_amm_liquidity_${:.0}_above_max_${:.0}", liquidity_usd, max),
+                                &format!(
+                                    "pump_amm_liquidity_${:.0}_above_max_${:.0}",
+                                    liquidity_usd, max
+                                ),
                             ),
                             Some(liquidity_usd),
                         );
@@ -281,7 +293,10 @@ impl LiquidityFilter {
         // 4. Check liquidity lock duration if locking is required
         if cfg.strategy.filters.require_liquidity_locked {
             let min_days = cfg.strategy.filters.min_lock_duration_days;
-            match self.check_lock_duration(pool_address, rpc, backup_rpc, min_days).await {
+            match self
+                .check_lock_duration(pool_address, rpc, backup_rpc, min_days)
+                .await
+            {
                 Ok(()) => {
                     debug!(pool = %pool_address, "liquidity lock duration OK");
                 }
@@ -324,8 +339,7 @@ impl LiquidityFilter {
             lock_result
         };
 
-        let account_data = lock_result
-            .map_err(|e| format!("lock_account_fetch_failed: {}", e))?;
+        let account_data = lock_result.map_err(|e| format!("lock_account_fetch_failed: {}", e))?;
 
         let unlock_timestamp = parse_lock_timestamp(&account_data)?;
 
@@ -340,9 +354,7 @@ impl LiquidityFilter {
 
         debug!(
             unlock_timestamp,
-            lock_duration_days,
-            min_days,
-            "liquidity lock duration check"
+            lock_duration_days, min_days, "liquidity lock duration check"
         );
 
         if lock_duration_days < min_days {
@@ -425,7 +437,9 @@ impl LiquidityFilter {
             .await
             .map_err(|e| format!("parse_failed: {}", e))?;
 
-        let pairs = body.pairs.ok_or_else(|| "no_pairs_in_response".to_string())?;
+        let pairs = body
+            .pairs
+            .ok_or_else(|| "no_pairs_in_response".to_string())?;
         let pair = pairs
             .iter()
             .find(|p| p.chain_id == "solana")

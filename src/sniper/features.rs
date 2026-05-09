@@ -35,10 +35,7 @@ pub fn build_sniper_features(
     let is_us_hours = hour_utc >= 13 && hour_utc <= 23; // 9am-7pm EST
 
     // Detection-time price from Birdeye if available (Gap 2)
-    let detection_price_usd = enrichment
-        .birdeye_overview
-        .as_ref()
-        .and_then(|bo| bo.price);
+    let detection_price_usd = enrichment.birdeye_overview.as_ref().and_then(|bo| bo.price);
 
     let mut features = json!({
         // ── Detection context ──
@@ -104,7 +101,10 @@ pub fn build_sniper_features(
         map.insert("st_total_buys".into(), json!(st.total_buys));
         map.insert("st_total_sells".into(), json!(st.total_sells));
         map.insert("st_lp_burn_pct".into(), json!(st.lp_burn_pct));
-        map.insert("st_has_freeze_authority".into(), json!(st.has_freeze_authority));
+        map.insert(
+            "st_has_freeze_authority".into(),
+            json!(st.has_freeze_authority),
+        );
         map.insert("st_has_mint_authority".into(), json!(st.has_mint_authority));
         map.insert("st_jupiter_verified".into(), json!(st.jupiter_verified));
         map.insert("st_rugged".into(), json!(st.rugged));
@@ -139,17 +139,26 @@ pub fn build_sniper_features(
         // Derived ratios
         if let (Some(holders), Some(bundlers)) = (st.holders, st.bundler_count) {
             if holders > 0 {
-                map.insert("bundler_to_holder_ratio".into(), json!(bundlers as f64 / holders as f64));
+                map.insert(
+                    "bundler_to_holder_ratio".into(),
+                    json!(bundlers as f64 / holders as f64),
+                );
             }
         }
         if let (Some(holders), Some(snipers)) = (st.holders, st.sniper_count) {
             if holders > 0 {
-                map.insert("sniper_to_holder_ratio".into(), json!(snipers as f64 / holders as f64));
+                map.insert(
+                    "sniper_to_holder_ratio".into(),
+                    json!(snipers as f64 / holders as f64),
+                );
             }
         }
         if let (Some(holders), Some(insiders)) = (st.holders, st.insider_count) {
             if holders > 0 {
-                map.insert("insider_to_holder_ratio".into(), json!(insiders as f64 / holders as f64));
+                map.insert(
+                    "insider_to_holder_ratio".into(),
+                    json!(insiders as f64 / holders as f64),
+                );
             }
         }
         if let (Some(buys), Some(sells)) = (st.total_buys, st.total_sells) {
@@ -161,8 +170,14 @@ pub fn build_sniper_features(
 
     // ── On-chain mint data ──
     if let Some(m) = &enrichment.on_chain_mint {
-        map.insert("mint_authority_revoked".into(), json!(m.mint_authority_revoked));
-        map.insert("freeze_authority_revoked".into(), json!(m.freeze_authority_revoked));
+        map.insert(
+            "mint_authority_revoked".into(),
+            json!(m.mint_authority_revoked),
+        );
+        map.insert(
+            "freeze_authority_revoked".into(),
+            json!(m.freeze_authority_revoked),
+        );
         map.insert("token_supply".into(), json!(m.supply));
     }
 
@@ -175,7 +190,10 @@ pub fn build_sniper_features(
     // ── Creator analysis ──
     if let Some(c) = &enrichment.creator_history {
         map.insert("creator_wallet_age_days".into(), json!(c.wallet_age_days));
-        map.insert("creator_previous_tokens".into(), json!(c.previous_token_count));
+        map.insert(
+            "creator_previous_tokens".into(),
+            json!(c.previous_token_count),
+        );
         map.insert("creator_is_serial".into(), json!(c.is_serial_creator));
     }
 
@@ -201,7 +219,10 @@ pub fn build_sniper_features(
     // ── Birdeye token security ──
     if let Some(bs) = &enrichment.birdeye_security {
         map.insert("be_owner_balance_pct".into(), json!(bs.owner_percentage));
-        map.insert("be_creator_balance_pct".into(), json!(bs.creator_percentage));
+        map.insert(
+            "be_creator_balance_pct".into(),
+            json!(bs.creator_percentage),
+        );
         map.insert("be_top10_holder_pct".into(), json!(bs.top10_holder_percent));
         map.insert("be_is_token_2022".into(), json!(bs.is_token_2022));
         map.insert("be_is_proxy".into(), json!(bs.is_proxy));
@@ -222,13 +243,34 @@ pub fn build_sniper_features(
 
     // ── GoPlus security ──
     if let Some(gp) = &enrichment.goplus {
-        map.insert("gp_is_honeypot".into(), json!(GoPlusResult::is_flag_set(&gp.is_honeypot)));
-        map.insert("gp_is_mintable".into(), json!(GoPlusResult::is_flag_set(&gp.is_mintable)));
-        map.insert("gp_transfer_pausable".into(), json!(GoPlusResult::is_flag_set(&gp.transfer_pausable)));
-        map.insert("gp_is_blacklisted".into(), json!(GoPlusResult::is_flag_set(&gp.is_blacklisted)));
-        map.insert("gp_can_reclaim_ownership".into(), json!(GoPlusResult::is_flag_set(&gp.can_take_back_ownership)));
-        map.insert("gp_is_proxy".into(), json!(GoPlusResult::is_flag_set(&gp.is_proxy)));
-        map.insert("gp_is_open_source".into(), json!(GoPlusResult::is_flag_set(&gp.is_open_source)));
+        map.insert(
+            "gp_is_honeypot".into(),
+            json!(GoPlusResult::is_flag_set(&gp.is_honeypot)),
+        );
+        map.insert(
+            "gp_is_mintable".into(),
+            json!(GoPlusResult::is_flag_set(&gp.is_mintable)),
+        );
+        map.insert(
+            "gp_transfer_pausable".into(),
+            json!(GoPlusResult::is_flag_set(&gp.transfer_pausable)),
+        );
+        map.insert(
+            "gp_is_blacklisted".into(),
+            json!(GoPlusResult::is_flag_set(&gp.is_blacklisted)),
+        );
+        map.insert(
+            "gp_can_reclaim_ownership".into(),
+            json!(GoPlusResult::is_flag_set(&gp.can_take_back_ownership)),
+        );
+        map.insert(
+            "gp_is_proxy".into(),
+            json!(GoPlusResult::is_flag_set(&gp.is_proxy)),
+        );
+        map.insert(
+            "gp_is_open_source".into(),
+            json!(GoPlusResult::is_flag_set(&gp.is_open_source)),
+        );
         map.insert("gp_holder_count".into(), json!(gp.holder_count));
     }
 
@@ -238,33 +280,55 @@ pub fn build_sniper_features(
         map.insert("sw_suspicious_count".into(), json!(sw.suspicious_count));
         map.insert("sw_genuine_count".into(), json!(sw.genuine_count));
         map.insert("sw_suspicious_ratio".into(), json!(sw.suspicious_ratio));
-        map.insert("sw_max_same_funder_count".into(), json!(sw.max_same_funder_count));
+        map.insert(
+            "sw_max_same_funder_count".into(),
+            json!(sw.max_same_funder_count),
+        );
         map.insert("sw_avg_tx_count".into(), json!(sw.avg_tx_count));
-        map.insert("sw_avg_wallet_age_secs".into(), json!(sw.avg_wallet_age_secs));
-        map.insert("sw_min_wallet_age_secs".into(), json!(sw.min_wallet_age_secs));
+        map.insert(
+            "sw_avg_wallet_age_secs".into(),
+            json!(sw.avg_wallet_age_secs),
+        );
+        map.insert(
+            "sw_min_wallet_age_secs".into(),
+            json!(sw.min_wallet_age_secs),
+        );
     }
 
     // ── Whale buy metrics (conviction signal) ──
     if let Some(wb) = &enrichment.whale_buys {
-        map.insert("whale_max_single_buy_sol".into(), json!(wb.max_single_buy_sol));
+        map.insert(
+            "whale_max_single_buy_sol".into(),
+            json!(wb.max_single_buy_sol),
+        );
         map.insert("whale_buy_count".into(), json!(wb.whale_buy_count));
-        map.insert("whale_buy_volume_sol".into(), json!(wb.whale_buy_volume_sol));
+        map.insert(
+            "whale_buy_volume_sol".into(),
+            json!(wb.whale_buy_volume_sol),
+        );
         map.insert("whale_avg_buy_size_sol".into(), json!(wb.avg_buy_size_sol));
         map.insert("whale_total_trades".into(), json!(wb.total_trades));
-        map.insert("whale_buy_sell_volume_ratio".into(), json!(wb.buy_sell_volume_ratio));
+        map.insert(
+            "whale_buy_sell_volume_ratio".into(),
+            json!(wb.buy_sell_volume_ratio),
+        );
     }
 
     // ── Cross-source consistency checks ──
     if let (Some(st), Some(bo)) = (&enrichment.solana_tracker, &enrichment.birdeye_overview) {
         if let (Some(st_holders), Some(be_holders)) = (st.holders, bo.holder) {
-            map.insert("holder_count_delta_st_be".into(),
-                json!((st_holders as i64 - be_holders as i64).abs()));
+            map.insert(
+                "holder_count_delta_st_be".into(),
+                json!((st_holders as i64 - be_holders as i64).abs()),
+            );
         }
     }
     if let (Some(st), Some(bs)) = (&enrichment.solana_tracker, &enrichment.birdeye_security) {
         if let (Some(st_top10), Some(be_top10)) = (st.top10_pct, bs.top10_holder_percent) {
-            map.insert("top10_pct_delta_st_be".into(),
-                json!((st_top10 - be_top10).abs()));
+            map.insert(
+                "top10_pct_delta_st_be".into(),
+                json!((st_top10 - be_top10).abs()),
+            );
         }
     }
 

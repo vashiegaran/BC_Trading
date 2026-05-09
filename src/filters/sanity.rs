@@ -1,8 +1,8 @@
 use tracing::warn;
 
+use super::types::FilterResult;
 use crate::config::AppConfig;
 use crate::detection::types::GraduatedToken;
-use super::types::FilterResult;
 
 const CHECK_NAME: &str = "sanity";
 

@@ -22,10 +22,10 @@ use std::sync::Arc;
 
 use solana_client::nonblocking::rpc_client::RpcClient;
 use tokio::sync::mpsc;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 use crate::config::{AppConfig, FiltersConfig};
-use crate::detection::types::{GraduatedToken, BcScoreCache, BcScoreEntry};
+use crate::detection::types::{BcScoreCache, BcScoreEntry, GraduatedToken};
 use crate::execution::jupiter::{JupiterClient, SOL_MINT};
 use crate::logger::SupabaseClient;
 
@@ -124,7 +124,8 @@ fn creator_rebuy_live_test_rejection_reason(
         && buy_sell_ratio >= filters_cfg.creator_rebuy_live_test_min_buy_sell_ratio
         && unique_buyers >= filters_cfg.creator_rebuy_live_test_min_unique_buyers
         && sell_count <= filters_cfg.creator_rebuy_live_test_max_sell_count
-        && bc_entry.bc_progress_pct >= filters_cfg.creator_rebuy_live_test_strong_flow_min_bc_progress_pct;
+        && bc_entry.bc_progress_pct
+            >= filters_cfg.creator_rebuy_live_test_strong_flow_min_bc_progress_pct;
 
     if !(zero_sell_profile || strong_flow_profile) {
         return Some(format!(
@@ -178,10 +179,10 @@ pub fn start(
             // pipeline with 7-whale-buy false positive before liquidity filter
             // finally caught it.
             const SENTINEL_MINTS: &[&str] = &[
-                "11111111111111111111111111111111",             // System Program
-                "So11111111111111111111111111111111111111112",   // Wrapped SOL
-                "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",  // SPL Token Program
-                "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",   // Token-2022
+                "11111111111111111111111111111111",            // System Program
+                "So11111111111111111111111111111111111111112", // Wrapped SOL
+                "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", // SPL Token Program
+                "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", // Token-2022
             ];
             if SENTINEL_MINTS.contains(&mint_str.as_str()) {
                 warn!(
@@ -211,33 +212,46 @@ pub fn start(
             if token.source == crate::detection::types::DetectionSource::PumpFun {
                 let bc_score = bc_entry.as_ref().map(|entry| entry.score);
 
-                let bc_pattern_reason = filters::check_bc_pattern(&token, &cfg.strategy.filters, bc_score)
-                    .or_else(|| {
-                        if cfg.strategy.filters.reject_creator_rebuy
-                            && bc_entry.as_ref().map(|entry| entry.creator_rebuy).unwrap_or(false)
-                        {
-                            Some("creator_rebuy_detected".to_string())
-                        } else {
-                            None
-                        }
-                    });
+                let bc_pattern_reason =
+                    filters::check_bc_pattern(&token, &cfg.strategy.filters, bc_score).or_else(
+                        || {
+                            if cfg.strategy.filters.reject_creator_rebuy
+                                && bc_entry
+                                    .as_ref()
+                                    .map(|entry| entry.creator_rebuy)
+                                    .unwrap_or(false)
+                            {
+                                Some("creator_rebuy_detected".to_string())
+                            } else {
+                                None
+                            }
+                        },
+                    );
 
                 if let Some(reason) = bc_pattern_reason {
                     let creator_rebuy_shadow_qualifies = reason == "creator_rebuy_detected"
                         && cfg.strategy.filters.creator_rebuy_shadow_enabled
                         && bc_entry
                             .as_ref()
-                            .map(|entry| entry.score >= cfg.strategy.filters.creator_rebuy_shadow_min_score)
+                            .map(|entry| {
+                                entry.score >= cfg.strategy.filters.creator_rebuy_shadow_min_score
+                            })
                             .unwrap_or(false);
-                    let creator_rebuy_live_test_score_qualifies = reason == "creator_rebuy_detected"
+                    let creator_rebuy_live_test_score_qualifies = reason
+                        == "creator_rebuy_detected"
                         && cfg.strategy.filters.creator_rebuy_live_test_enabled
                         && bc_entry
                             .as_ref()
-                            .map(|entry| entry.score >= cfg.strategy.filters.creator_rebuy_live_test_min_score)
+                            .map(|entry| {
+                                entry.score
+                                    >= cfg.strategy.filters.creator_rebuy_live_test_min_score
+                            })
                             .unwrap_or(false);
 
                     if creator_rebuy_shadow_qualifies || creator_rebuy_live_test_score_qualifies {
-                        let bc_entry = bc_entry.clone().expect("creator-rebuy experiment qualification requires BC entry");
+                        let bc_entry = bc_entry
+                            .clone()
+                            .expect("creator-rebuy experiment qualification requires BC entry");
                         warn!(
                             mint = %mint_str,
                             bc_score = format!("{:.1}", bc_entry.score),
@@ -253,9 +267,12 @@ pub fn start(
                         };
                         token.pipeline_timing.detection_to_sniper_ms = Some(detection_to_sniper_ms);
 
-                        let shadow_enrichment = enrichment::enrich_token_fast(&rpc, &mint_str).await;
-                        token.pipeline_timing.enrichment_total_ms = Some(shadow_enrichment.enrichment_duration_ms);
-                        token.pipeline_timing.enrichment_per_source = shadow_enrichment.per_source_ms.clone();
+                        let shadow_enrichment =
+                            enrichment::enrich_token_fast(&rpc, &mint_str).await;
+                        token.pipeline_timing.enrichment_total_ms =
+                            Some(shadow_enrichment.enrichment_duration_ms);
+                        token.pipeline_timing.enrichment_per_source =
+                            shadow_enrichment.per_source_ms.clone();
 
                         let shadow_filter = filters::apply_fast_track_filters(&shadow_enrichment);
                         let shadow_elapsed = shadow_start.elapsed();
@@ -274,7 +291,8 @@ pub fn start(
                                     .unwrap_or_else(|| "fast_track_safety_unknown".to_string()),
                             )
                         };
-                        let live_test_qualifies = shadow_filter.passed && live_test_rejection_reason.is_none();
+                        let live_test_qualifies =
+                            shadow_filter.passed && live_test_rejection_reason.is_none();
 
                         let shadow_action = if live_test_qualifies {
                             "creator_rebuy_live_test_passed"
@@ -355,7 +373,11 @@ pub fn start(
                             &mint_str,
                             &token.name,
                             &token.symbol,
-                            token.pool_address.as_ref().map(|p| p.to_string()).as_deref(),
+                            token
+                                .pool_address
+                                .as_ref()
+                                .map(|p| p.to_string())
+                                .as_deref(),
                             &creator_str,
                             initial_liquidity_sol,
                             shadow_action,
@@ -363,7 +385,8 @@ pub fn start(
                             shadow_filter_name,
                             bc_entry.score,
                             &shadow_features,
-                        ).await;
+                        )
+                        .await;
 
                         if live_test_qualifies {
                             info!(
@@ -395,7 +418,8 @@ pub fn start(
                                     deferred_liq,
                                     deferred_detected_at,
                                     deferred_candidate_id,
-                                ).await;
+                                )
+                                .await;
                             });
 
                             if tx.send(token).await.is_err() {
@@ -411,9 +435,12 @@ pub fn start(
                                 elapsed_ms = shadow_elapsed.as_millis() as u64,
                                 "🧪 CREATOR-REBUY SHADOW PASS — counterfactual tracked, live execution still blocked"
                             );
-                            token.pipeline_timing.outcome = Some("shadow_creator_rebuy_fast_track_passed".to_string());
-                            token.pipeline_timing.rejection_stage = Some("creator_rebuy_shadow".to_string());
-                            token.pipeline_timing.rejection_reason = Some("creator_rebuy_detected_live_block".to_string());
+                            token.pipeline_timing.outcome =
+                                Some("shadow_creator_rebuy_fast_track_passed".to_string());
+                            token.pipeline_timing.rejection_stage =
+                                Some("creator_rebuy_shadow".to_string());
+                            token.pipeline_timing.rejection_reason =
+                                Some("creator_rebuy_detected_live_block".to_string());
                         } else {
                             warn!(
                                 mint = %mint_str,
@@ -421,8 +448,10 @@ pub fn start(
                                 bc_score = format!("{:.1}", bc_entry.score),
                                 "🧪 CREATOR-REBUY SHADOW REJECT — Fast-Track safety filter blocked"
                             );
-                            token.pipeline_timing.outcome = Some("shadow_creator_rebuy_fast_track_rejected".to_string());
-                            token.pipeline_timing.rejection_stage = Some("creator_rebuy_shadow_fast_track_filter".to_string());
+                            token.pipeline_timing.outcome =
+                                Some("shadow_creator_rebuy_fast_track_rejected".to_string());
+                            token.pipeline_timing.rejection_stage =
+                                Some("creator_rebuy_shadow_fast_track_filter".to_string());
                             token.pipeline_timing.rejection_reason = shadow_filter
                                 .rejection_reason
                                 .clone()
@@ -468,7 +497,11 @@ pub fn start(
                         &mint_str,
                         &token.name,
                         &token.symbol,
-                        token.pool_address.as_ref().map(|p| p.to_string()).as_deref(),
+                        token
+                            .pool_address
+                            .as_ref()
+                            .map(|p| p.to_string())
+                            .as_deref(),
                         &creator_str,
                         initial_liquidity_sol,
                         "rejected",
@@ -476,14 +509,20 @@ pub fn start(
                         Some("bc_pattern"),
                         0.0,
                         &serde_json::json!({}),
-                    ).await;
+                    )
+                    .await;
 
                     // Log pipeline_latency
                     let supabase_clone = Arc::clone(&supabase);
                     let timing_json = token.pipeline_timing.to_json(&mint_str);
                     tokio::spawn(async move {
                         let url = format!("{}/pipeline_latency", supabase_clone.base_url);
-                        let _ = supabase_clone.client.post(&url).json(&timing_json).send().await;
+                        let _ = supabase_clone
+                            .client
+                            .post(&url)
+                            .json(&timing_json)
+                            .send()
+                            .await;
                     });
                     continue;
                 }
@@ -529,8 +568,10 @@ pub fn start(
 
                         // Fast enrichment: only mint + GoPlus (~250ms)
                         let ft_enrichment = enrichment::enrich_token_fast(&rpc, &mint_str).await;
-                        token.pipeline_timing.enrichment_total_ms = Some(ft_enrichment.enrichment_duration_ms);
-                        token.pipeline_timing.enrichment_per_source = ft_enrichment.per_source_ms.clone();
+                        token.pipeline_timing.enrichment_total_ms =
+                            Some(ft_enrichment.enrichment_duration_ms);
+                        token.pipeline_timing.enrichment_per_source =
+                            ft_enrichment.per_source_ms.clone();
 
                         // Fast-track filters: mint_auth, freeze_auth, honeypot, GoPlus critical
                         let ft_filter = filters::apply_fast_track_filters(&ft_enrichment);
@@ -561,15 +602,24 @@ pub fn start(
                             &mint_str,
                             &token.name,
                             &token.symbol,
-                            token.pool_address.as_ref().map(|p| p.to_string()).as_deref(),
+                            token
+                                .pool_address
+                                .as_ref()
+                                .map(|p| p.to_string())
+                                .as_deref(),
                             &creator_str,
                             initial_liquidity_sol,
-                            if ft_filter.passed { "fast_track_passed" } else { "rejected" },
+                            if ft_filter.passed {
+                                "fast_track_passed"
+                            } else {
+                                "rejected"
+                            },
                             ft_filter.rejection_reason.as_deref(),
                             ft_filter.filter_name.as_deref(),
                             bc_entry.score,
                             &ft_features,
-                        ).await;
+                        )
+                        .await;
 
                         if ft_filter.passed {
                             info!(
@@ -600,7 +650,8 @@ pub fn start(
                                     deferred_liq,
                                     deferred_detected_at,
                                     deferred_candidate_id,
-                                ).await;
+                                )
+                                .await;
                             });
 
                             if tx.send(token).await.is_err() {
@@ -615,8 +666,10 @@ pub fn start(
                                 "❌ FAST-TRACK REJECT — safety filter blocked"
                             );
 
-                            token.pipeline_timing.outcome = Some("rejected_fast_track_filter".to_string());
-                            token.pipeline_timing.rejection_stage = Some("fast_track_filter".to_string());
+                            token.pipeline_timing.outcome =
+                                Some("rejected_fast_track_filter".to_string());
+                            token.pipeline_timing.rejection_stage =
+                                Some("fast_track_filter".to_string());
                             token.pipeline_timing.rejection_reason = ft_filter.rejection_reason;
                             let timing_payload = token.pipeline_timing.to_json(&mint_str);
                             let supabase_bg = Arc::clone(&supabase);
@@ -722,7 +775,8 @@ pub fn start(
                     "❌ SNIPER REJECT — sniper_score {:.1} < {:.0}",
                     score.score, min_score
                 );
-                let rejection_reason = format!("sniper_score={:.1} < {:.0}", score.score, min_score);
+                let rejection_reason =
+                    format!("sniper_score={:.1} < {:.0}", score.score, min_score);
                 let filter_name = "sniper_score";
                 let enrichment_elapsed = enrichment_start.elapsed();
                 let _candidate_id = log_sniper_candidate(
@@ -730,7 +784,11 @@ pub fn start(
                     &mint_str,
                     &token.name,
                     &token.symbol,
-                    token.pool_address.as_ref().map(|p| p.to_string()).as_deref(),
+                    token
+                        .pool_address
+                        .as_ref()
+                        .map(|p| p.to_string())
+                        .as_deref(),
                     &creator_str,
                     initial_liquidity_sol,
                     "rejected",
@@ -764,13 +822,21 @@ pub fn start(
             // ── Step 7: Log to sniper_candidates ──
             // NOTE: "sniper_passed" means it passed hard filters. JOIN with positions
             // table to confirm it was actually bought (downstream filters/execution may reject).
-            let action = if filter_result.passed { "sniper_passed" } else { "rejected" };
+            let action = if filter_result.passed {
+                "sniper_passed"
+            } else {
+                "rejected"
+            };
             let candidate_id = log_sniper_candidate(
                 &supabase,
                 &mint_str,
                 &token.name,
                 &token.symbol,
-                token.pool_address.as_ref().map(|p| p.to_string()).as_deref(),
+                token
+                    .pool_address
+                    .as_ref()
+                    .map(|p| p.to_string())
+                    .as_deref(),
                 &creator_str,
                 initial_liquidity_sol,
                 action,
@@ -823,13 +889,8 @@ pub fn start(
 
                 // Spawn rejected token price tracker (counterfactual data)
                 if let Some(cid) = candidate_id {
-                    tracker::spawn_rejected_tracker(
-                        Arc::clone(&supabase),
-                        cid,
-                        mint_str.clone(),
-                    );
+                    tracker::spawn_rejected_tracker(Arc::clone(&supabase), cid, mint_str.clone());
                 }
-
             }
         }
 
@@ -882,7 +943,10 @@ async fn log_sniper_candidate(
     {
         Ok(resp) if resp.status().is_success() => {
             let rows: Vec<serde_json::Value> = resp.json().await.unwrap_or_default();
-            let id = rows.first().and_then(|r| r.get("id")).and_then(|v| v.as_i64());
+            let id = rows
+                .first()
+                .and_then(|r| r.get("id"))
+                .and_then(|v| v.as_i64());
             if id.is_some() {
                 info!(mint = %mint, action = action, "Sniper candidate logged");
             }
@@ -907,7 +971,10 @@ pub async fn log_pipeline_latency(supabase: &SupabaseClient, payload: &serde_jso
         Ok(resp) if resp.status().is_success() => { /* ok */ }
         Ok(resp) => {
             let body = resp.text().await.unwrap_or_default();
-            warn!("Failed to write pipeline_latency: {}", &body[..body.len().min(200)]);
+            warn!(
+                "Failed to write pipeline_latency: {}",
+                &body[..body.len().min(200)]
+            );
         }
         Err(e) => {
             warn!("pipeline_latency write error: {}", e);
@@ -949,7 +1016,8 @@ async fn run_deferred_verification(
         &creator_wallet,
         initial_liquidity_sol,
         detected_at,
-    ).await;
+    )
+    .await;
 
     // Apply deferred filters
     let filter_result = filters::apply_deferred_filters(&enrichment, initial_liquidity_sol);
@@ -963,10 +1031,7 @@ async fn run_deferred_verification(
 
         // Update sniper_candidates with deferred result
         if let Some(cid) = candidate_id {
-            let url = format!(
-                "{}/sniper_candidates?id=eq.{}",
-                supabase.base_url, cid
-            );
+            let url = format!("{}/sniper_candidates?id=eq.{}", supabase.base_url, cid);
             let payload = serde_json::json!({
                 "sniper_features": {
                     "deferred_verification": "passed",
@@ -978,7 +1043,10 @@ async fn run_deferred_verification(
             let _ = supabase.client.patch(&url).json(&payload).send().await;
         }
     } else {
-        let reason = filter_result.rejection_reason.as_deref().unwrap_or("unknown");
+        let reason = filter_result
+            .rejection_reason
+            .as_deref()
+            .unwrap_or("unknown");
         warn!(
             mint = %mint,
             reason = reason,
@@ -987,10 +1055,7 @@ async fn run_deferred_verification(
 
         // Update sniper_candidates to signal deferred rejection
         if let Some(cid) = candidate_id {
-            let url = format!(
-                "{}/sniper_candidates?id=eq.{}",
-                supabase.base_url, cid
-            );
+            let url = format!("{}/sniper_candidates?id=eq.{}", supabase.base_url, cid);
             let payload = serde_json::json!({
                 "action": "deferred_rejected",
                 "rejection_reason": format!("deferred: {}", reason),

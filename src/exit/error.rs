@@ -185,9 +185,7 @@ mod tests {
 
     #[test]
     fn classifies_sanity_fail() {
-        let e = ExitError::classify(
-            "Quote sanity check failed: ratio=0.800, would lose money",
-        );
+        let e = ExitError::classify("Quote sanity check failed: ratio=0.800, would lose money");
         assert!(matches!(e, ExitError::QuoteSanityFailed(_)));
         assert!(e.is_retryable());
     }

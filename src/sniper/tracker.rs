@@ -16,11 +16,7 @@ use crate::logger::SupabaseClient;
 
 /// Schedule async price checks for a rejected/skipped token.
 /// Spawns as a fire-and-forget background task.
-pub fn spawn_rejected_tracker(
-    supabase: Arc<SupabaseClient>,
-    candidate_id: i64,
-    mint: String,
-) {
+pub fn spawn_rejected_tracker(supabase: Arc<SupabaseClient>, candidate_id: i64, mint: String) {
     tokio::spawn(async move {
         track_rejected_prices(&supabase, candidate_id, &mint, 0).await;
     });
@@ -37,7 +33,8 @@ pub async fn recover_pending_trackers(supabase: Arc<SupabaseClient>) {
         .to_rfc3339();
     let created_at_filter = format!("gte.{}", cutoff);
 
-    let resp = match supabase.client
+    let resp = match supabase
+        .client
         .get(&url)
         .query(&[
             ("price_1h", "is.null"),
@@ -167,10 +164,18 @@ async fn track_rejected_prices(
         }
 
         // Update price column in sniper_candidates
-        let url = format!("{}/sniper_candidates?id=eq.{}", supabase.base_url, candidate_id);
+        let url = format!(
+            "{}/sniper_candidates?id=eq.{}",
+            supabase.base_url, candidate_id
+        );
         let mut payload = serde_json::Map::new();
         payload.insert(column.to_string(), serde_json::json!(price));
-        let _ = supabase.client.patch(&url).json(&serde_json::Value::Object(payload)).send().await;
+        let _ = supabase
+            .client
+            .patch(&url)
+            .json(&serde_json::Value::Object(payload))
+            .send()
+            .await;
 
         debug!(
             mint = %mint,
@@ -183,7 +188,10 @@ async fn track_rejected_prices(
     // Update peak price and multiplier
     if peak_price > 0.0 && entry_price > 0.0 {
         let peak_multiplier = peak_price / entry_price;
-        let url = format!("{}/sniper_candidates?id=eq.{}", supabase.base_url, candidate_id);
+        let url = format!(
+            "{}/sniper_candidates?id=eq.{}",
+            supabase.base_url, candidate_id
+        );
         let payload = serde_json::json!({
             "peak_multiplier": peak_multiplier,
         });

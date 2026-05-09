@@ -4,8 +4,8 @@ use reqwest::Client;
 use serde::Deserialize;
 use tracing::{debug, warn};
 
-use crate::config::AppConfig;
 use super::types::FilterResult;
+use crate::config::AppConfig;
 
 const CHECK_NAME: &str = "helius_das";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
@@ -107,20 +107,14 @@ impl HeliusDasFilter {
             // Mint authority: if present and non-empty, someone can mint new tokens
             if let Some(ref authority) = token_info.mint_authority {
                 if !authority.is_empty() {
-                    return FilterResult::fail(
-                        CHECK_NAME,
-                        "mint_authority_not_revoked",
-                    );
+                    return FilterResult::fail(CHECK_NAME, "mint_authority_not_revoked");
                 }
             }
 
             // Freeze authority: if present and non-empty, someone can freeze your account
             if let Some(ref authority) = token_info.freeze_authority {
                 if !authority.is_empty() {
-                    return FilterResult::fail(
-                        CHECK_NAME,
-                        "freeze_authority_not_revoked",
-                    );
+                    return FilterResult::fail(CHECK_NAME, "freeze_authority_not_revoked");
                 }
             }
         }

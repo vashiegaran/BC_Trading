@@ -71,7 +71,10 @@ pub fn compute_sniper_score(features: &serde_json::Value) -> SniperScore {
     }
 
     // Liquidity depth: higher liq = lower rug risk, better exits
-    if let Some(liq) = features.get("initial_liquidity_sol").and_then(|v| v.as_f64()) {
+    if let Some(liq) = features
+        .get("initial_liquidity_sol")
+        .and_then(|v| v.as_f64())
+    {
         let bonus = if liq >= 80.0 {
             5.0
         } else if liq >= 50.0 {
@@ -105,7 +108,10 @@ pub fn compute_sniper_score(features: &serde_json::Value) -> SniperScore {
     }
 
     // Volume acceleration: 5m normalized rate > 15m normalized rate = momentum building
-    if let Some(accel) = features.get("volume_accel_5m_vs_15m").and_then(|v| v.as_f64()) {
+    if let Some(accel) = features
+        .get("volume_accel_5m_vs_15m")
+        .and_then(|v| v.as_f64())
+    {
         if accel > 1.5 {
             score += 4.0;
             map.insert("volume_accel_bonus".into(), serde_json::json!(4.0));
@@ -131,7 +137,10 @@ pub fn compute_sniper_score(features: &serde_json::Value) -> SniperScore {
 
     // ── Advanced tier: Smart money signal (Jito tips) ──
     // High tips-to-trading ratio = sophisticated traders using priority fees
-    if let Some(tips_ratio) = features.get("tips_to_trading_ratio").and_then(|v| v.as_f64()) {
+    if let Some(tips_ratio) = features
+        .get("tips_to_trading_ratio")
+        .and_then(|v| v.as_f64())
+    {
         if tips_ratio > 0.3 {
             score += 4.0;
             map.insert("jito_tips_bonus".into(), serde_json::json!(4.0));
@@ -143,7 +152,10 @@ pub fn compute_sniper_score(features: &serde_json::Value) -> SniperScore {
 
     // ── Detection latency: strongest predictor in Phase 3 data ──
     // <120s = 83% win rate, +109% avg PnL. <300s = 68% win rate.
-    if let Some(latency_ms) = features.get("detection_latency_ms").and_then(|v| v.as_i64()) {
+    if let Some(latency_ms) = features
+        .get("detection_latency_ms")
+        .and_then(|v| v.as_i64())
+    {
         let latency_secs = latency_ms as f64 / 1000.0;
         let bonus = if latency_secs < 120.0 {
             10.0

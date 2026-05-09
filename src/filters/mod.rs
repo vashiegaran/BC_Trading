@@ -15,17 +15,17 @@ pub mod smart_wallet;
 pub mod token_safety;
 pub mod types;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use tokio::sync::mpsc;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 use crate::config::AppConfig;
 use crate::detection::types::{DetectionSource, GraduatedToken};
 use crate::execution::wallet::BotWallet;
-use crate::sniper::log_pipeline_latency;
 use crate::logger::SupabaseClient;
+use crate::sniper::log_pipeline_latency;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use types::{FilterSummary, FilteredToken};
 
@@ -115,8 +115,12 @@ pub fn start(
             );
 
             match token.source {
-                DetectionSource::PumpFun => { pumpfun_count.fetch_add(1, Ordering::Relaxed); }
-                DetectionSource::Poll => { raydium_count.fetch_add(1, Ordering::Relaxed); }
+                DetectionSource::PumpFun => {
+                    pumpfun_count.fetch_add(1, Ordering::Relaxed);
+                }
+                DetectionSource::Poll => {
+                    raydium_count.fetch_add(1, Ordering::Relaxed);
+                }
                 _ => {}
             }
 
@@ -147,7 +151,9 @@ pub fn start(
                 );
                 // Write pipeline_latency for sanity rejection
                 let mut timing = token.pipeline_timing.clone();
-                timing.filter_per_check.insert("sanity".to_string(), sanity_ms);
+                timing
+                    .filter_per_check
+                    .insert("sanity".to_string(), sanity_ms);
                 timing.filter_engine_total_ms = Some(sanity_ms);
                 timing.outcome = Some("rejected_filter".to_string());
                 timing.rejection_stage = Some("filter_engine".to_string());
@@ -183,23 +189,47 @@ pub fn start(
             // Note: token_safety (RPC mint/freeze authority check) removed — redundant
             // with sniper enrichment's cross-source mint/freeze validation.
             let liq_start = std::time::Instant::now();
-            let (liquidity_result, liquidity_usd) =
-                liquidity.check(token.pool_address.as_ref(), &token.mint, token.initial_liquidity_sol, &cfg, &rpc, &backup_rpc).await;
+            let (liquidity_result, liquidity_usd) = liquidity
+                .check(
+                    token.pool_address.as_ref(),
+                    &token.mint,
+                    token.initial_liquidity_sol,
+                    &cfg,
+                    &rpc,
+                    &backup_rpc,
+                )
+                .await;
             let liq_ms = liq_start.elapsed().as_millis() as u64;
 
             // Price impact: estimated from AMM math (zero API calls, instant)
             let impact_start = std::time::Instant::now();
-            let impact_result = price_impact.check_from_liquidity(token.initial_liquidity_sol, &cfg);
+            let impact_result =
+                price_impact.check_from_liquidity(token.initial_liquidity_sol, &cfg);
             let impact_ms = impact_start.elapsed().as_millis() as u64;
 
             let filter_elapsed = filter_start.elapsed();
 
             // Populate per-check timing
-            token.pipeline_timing.filter_per_check.insert("sanity".to_string(), sanity_ms);
-            token.pipeline_timing.filter_per_check.insert("age".to_string(), age_ms);
-            token.pipeline_timing.filter_per_check.insert("buy_pressure".to_string(), bp_ms);
-            token.pipeline_timing.filter_per_check.insert("liquidity".to_string(), liq_ms);
-            token.pipeline_timing.filter_per_check.insert("price_impact".to_string(), impact_ms);
+            token
+                .pipeline_timing
+                .filter_per_check
+                .insert("sanity".to_string(), sanity_ms);
+            token
+                .pipeline_timing
+                .filter_per_check
+                .insert("age".to_string(), age_ms);
+            token
+                .pipeline_timing
+                .filter_per_check
+                .insert("buy_pressure".to_string(), bp_ms);
+            token
+                .pipeline_timing
+                .filter_per_check
+                .insert("liquidity".to_string(), liq_ms);
+            token
+                .pipeline_timing
+                .filter_per_check
+                .insert("price_impact".to_string(), impact_ms);
             token.pipeline_timing.filter_engine_total_ms = Some(filter_elapsed.as_millis() as u64);
 
             tracing::info!(
@@ -213,12 +243,7 @@ pub fn start(
                 "⚡ Fast gate completed"
             );
 
-            let results = vec![
-                age_result,
-                bp_result,
-                liquidity_result,
-                impact_result,
-            ];
+            let results = vec![age_result, bp_result, liquidity_result, impact_result];
 
             let summary = FilterSummary::from_results(results);
 
@@ -241,7 +266,8 @@ pub fn start(
                     None, // market_cap_usd — runs in post-buy
                     estimated_impact,
                     None, // top_10_holder_pct — runs in post-buy,
-                ).await;
+                )
+                .await;
             });
 
             if summary.overall_passed {
@@ -332,8 +358,12 @@ async fn log_filter_result(
         .filter_map(|r| r.fail_reason.as_deref())
         .collect();
 
-    let mint_authority = fail_reasons.iter().any(|r| r.contains("mint_authority_not_revoked"));
-    let freeze_authority = fail_reasons.iter().any(|r| r.contains("freeze_authority_not_revoked"));
+    let mint_authority = fail_reasons
+        .iter()
+        .any(|r| r.contains("mint_authority_not_revoked"));
+    let freeze_authority = fail_reasons
+        .iter()
+        .any(|r| r.contains("freeze_authority_not_revoked"));
     let bundled = fail_reasons.iter().any(|r| r.contains("token_is_bundled"));
 
     let price_impact_pct: Option<f64> = estimated_price_impact_pct;

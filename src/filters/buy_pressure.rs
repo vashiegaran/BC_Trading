@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use tracing::{debug, warn};
 
+use super::types::FilterResult;
 use crate::config::AppConfig;
 use crate::detection::types::GraduatedToken;
-use super::types::FilterResult;
 
 const CHECK_NAME: &str = "buy_pressure";
 
@@ -165,7 +165,8 @@ fn detect_coordinated_buys(
         let window_size = window_end - window_start + 1;
         if window_size > coordinated_buy_threshold {
             // Check if all wallets in this window are "new" (appear only once overall)
-            let window_wallets: Vec<&solana_sdk::pubkey::Pubkey> = sorted[window_start..=window_end]
+            let window_wallets: Vec<&solana_sdk::pubkey::Pubkey> = sorted
+                [window_start..=window_end]
                 .iter()
                 .map(|(_, w)| w)
                 .collect();
@@ -182,14 +183,12 @@ fn detect_coordinated_buys(
                     buys_in_window = window_size,
                     window_ms = coordinated_window_ms,
                     "Coordinated buy pattern detected: {} new wallets in {}ms window",
-                    window_size
-                    ,
+                    window_size,
                     coordinated_window_ms
                 );
                 return Some(format!(
                     "coordinated_buy_detected: {} new wallets in {}ms window",
-                    window_size,
-                    coordinated_window_ms
+                    window_size, coordinated_window_ms
                 ));
             }
         }

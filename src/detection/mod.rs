@@ -11,14 +11,17 @@ use tracing::{info, warn};
 
 use crate::config::AppConfig;
 use crate::logger::SupabaseClient;
-use types::{GraduatedToken, BcScoreCache, new_bc_score_cache};
+use types::{new_bc_score_cache, BcScoreCache, GraduatedToken};
 
 /// Channel capacity for the detection → downstream pipeline.
 const CHANNEL_CAPACITY: usize = 100;
 
 /// Starts the detection engine and returns a receiver for [`GraduatedToken`]s
 /// plus the shared BC score cache (for the sniper fast-track pipeline).
-pub fn start(cfg: Arc<AppConfig>, supabase: Arc<SupabaseClient>) -> (mpsc::Receiver<GraduatedToken>, BcScoreCache) {
+pub fn start(
+    cfg: Arc<AppConfig>,
+    supabase: Arc<SupabaseClient>,
+) -> (mpsc::Receiver<GraduatedToken>, BcScoreCache) {
     let (tx, rx) = mpsc::channel::<GraduatedToken>(CHANNEL_CAPACITY);
     let bc_cache = new_bc_score_cache();
 
@@ -49,7 +52,9 @@ pub fn start(cfg: Arc<AppConfig>, supabase: Arc<SupabaseClient>) -> (mpsc::Recei
                     )
                     .await;
                 });
-                info!("Detection: Yellowstone gRPC pump.fun source spawned (PumpPortal WS disabled)");
+                info!(
+                    "Detection: Yellowstone gRPC pump.fun source spawned (PumpPortal WS disabled)"
+                );
             }
             _ => {
                 warn!(
@@ -57,14 +62,28 @@ pub fn start(cfg: Arc<AppConfig>, supabase: Arc<SupabaseClient>) -> (mpsc::Recei
                      falling back to PumpPortal WebSocket"
                 );
                 tokio::spawn(async move {
-                    pumpfun_ws::run(pumpfun_tx, pumpfun_supabase, rpc_url, pumpfun_cfg, pumpfun_cache).await;
+                    pumpfun_ws::run(
+                        pumpfun_tx,
+                        pumpfun_supabase,
+                        rpc_url,
+                        pumpfun_cfg,
+                        pumpfun_cache,
+                    )
+                    .await;
                 });
                 info!("Detection: PumpFun WebSocket task spawned (fallback)");
             }
         }
     } else {
         tokio::spawn(async move {
-            pumpfun_ws::run(pumpfun_tx, pumpfun_supabase, rpc_url, pumpfun_cfg, pumpfun_cache).await;
+            pumpfun_ws::run(
+                pumpfun_tx,
+                pumpfun_supabase,
+                rpc_url,
+                pumpfun_cfg,
+                pumpfun_cache,
+            )
+            .await;
         });
         info!("Detection: PumpFun WebSocket task spawned");
     }
@@ -73,7 +92,9 @@ pub fn start(cfg: Arc<AppConfig>, supabase: Arc<SupabaseClient>) -> (mpsc::Recei
     if cfg.strategy.detection.poll_raydium {
         let raydium_tx = tx.clone();
         // Convert HTTP RPC URL to WebSocket URL
-        let rpc_ws_url = cfg.env.solana_rpc_url
+        let rpc_ws_url = cfg
+            .env
+            .solana_rpc_url
             .replace("https://", "wss://")
             .replace("http://", "ws://");
 

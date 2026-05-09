@@ -27,12 +27,9 @@ impl HeliusSenderClient {
         &self,
         signed_tx: &VersionedTransaction,
     ) -> Result<solana_sdk::signature::Signature> {
-        let tx_bytes = bincode::serialize(signed_tx)
-            .map_err(|e| anyhow!("Failed to serialize tx: {}", e))?;
-        let tx_b64 = base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            &tx_bytes,
-        );
+        let tx_bytes =
+            bincode::serialize(signed_tx).map_err(|e| anyhow!("Failed to serialize tx: {}", e))?;
+        let tx_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &tx_bytes);
 
         let payload = serde_json::json!({
             "jsonrpc": "2.0",
@@ -67,11 +64,7 @@ impl HeliusSenderClient {
             .map_err(|e| anyhow!("Failed to parse TX sender response: {}", e))?;
 
         if let Some(error) = body.get("error") {
-            return Err(anyhow!(
-                "TX sender error: {} (HTTP {})",
-                error,
-                status
-            ));
+            return Err(anyhow!("TX sender error: {} (HTTP {})", error, status));
         }
 
         let sig_str = body
@@ -93,7 +86,13 @@ impl HeliusSenderClient {
             "id": "warmup",
             "method": "getHealth"
         });
-        match self.client.post(&self.sender_url).json(&payload).send().await {
+        match self
+            .client
+            .post(&self.sender_url)
+            .json(&payload)
+            .send()
+            .await
+        {
             Ok(_) => info!("⚡ TX sender connection pre-warmed"),
             Err(e) => warn!("TX sender ping failed (non-fatal): {}", e),
         }
@@ -162,5 +161,3 @@ pub async fn get_priority_fee_estimate(
         }
     }
 }
-
-

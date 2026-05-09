@@ -13,12 +13,12 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 
 use crate::config::AppConfig;
 use crate::logger::SupabaseClient;
-use crate::monitoring::types::{ExitReason, ExitSignal};
+use crate::monitoring::types::{ExitReason, ExitResult, ExitSignal};
 use crate::narrative::{self, NarrativeContext, NarrativeResult, NarrativeState};
 
 // ── Types ────────────────────────────────────────────────────
@@ -68,15 +68,15 @@ impl std::fmt::Display for PromotionSource {
 /// decisions and for the `path_eval_log` debug table (migration 024).
 #[derive(Debug, Clone, Default)]
 pub struct PaperPathEval {
-    pub is_us_hours:        Option<bool>,
-    pub be_volume_24h_usd:  Option<f64>,
-    pub be_liquidity_usd:   Option<f64>,
-    pub bc_score:           Option<f64>,
+    pub is_us_hours: Option<bool>,
+    pub be_volume_24h_usd: Option<f64>,
+    pub be_liquidity_usd: Option<f64>,
+    pub bc_score: Option<f64>,
     pub match_off_hours_low_vol: bool,
-    pub match_liquidity_floor:   bool,
-    pub match_bc_score_80:       bool,
-    pub eligible_count:     u32,
-    pub selected:           Option<PromotionSource>,
+    pub match_liquidity_floor: bool,
+    pub match_bc_score_80: bool,
+    pub eligible_count: u32,
+    pub selected: Option<PromotionSource>,
 }
 
 /// Evaluate the v14 data-driven paper paths against `sniper_features`.
@@ -85,14 +85,16 @@ pub struct PaperPathEval {
 /// the rest for `path_eval_log`.
 pub fn evaluate_paper_paths_detail(features: Option<&serde_json::Value>) -> PaperPathEval {
     let mut out = PaperPathEval::default();
-    let Some(f) = features else { return out; };
+    let Some(f) = features else {
+        return out;
+    };
     let num = |k: &str| f.get(k).and_then(|v| v.as_f64());
     let boolean = |k: &str| f.get(k).and_then(|v| v.as_bool());
 
-    out.is_us_hours       = boolean("is_us_hours");
+    out.is_us_hours = boolean("is_us_hours");
     out.be_volume_24h_usd = num("be_volume_24h_usd");
-    out.be_liquidity_usd  = num("be_liquidity_usd");
-    out.bc_score          = num("bc_score");
+    out.be_liquidity_usd = num("be_liquidity_usd");
+    out.bc_score = num("bc_score");
 
     // Path C — off-hours + low 24h vol (highest precision)
     let off_hours = out.is_us_hours == Some(false);
@@ -106,8 +108,7 @@ pub fn evaluate_paper_paths_detail(features: Option<&serde_json::Value>) -> Pape
     // Path D — bc_score gate (lowered to 70 after live data; see PromotionSource::BcScore80)
     out.match_bc_score_80 = out.bc_score.unwrap_or(0.0) >= 70.0;
 
-    out.eligible_count =
-        u32::from(out.match_off_hours_low_vol)
+    out.eligible_count = u32::from(out.match_off_hours_low_vol)
         + u32::from(out.match_liquidity_floor)
         + u32::from(out.match_bc_score_80);
 
@@ -184,6 +185,55 @@ pub struct MoonbagCommand {
     pub price_at_promotion: f64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct MoonbagRuntimeConfig {
+    early_trailing_grace_secs: u64,
+    partial_3x_pct: u8,
+    partial_5x_pct: u8,
+    min_hold_secs: u64,
+    trailing_confirm_checks: u32,
+    trail_2x_5x: f64,
+    trail_5x_10x: f64,
+    trail_10x_15x: f64,
+    trail_15x_20x: f64,
+    trail_20x_plus: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MoonbagPartialStage {
+    ThreeX,
+    FiveX,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MoonbagExitAction {
+    Partial(MoonbagPartialStage),
+    Final,
+}
+
+impl MoonbagPartialStage {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ThreeX => "moonbag_partial_3x",
+            Self::FiveX => "moonbag_partial_5x",
+        }
+    }
+
+    fn trigger_multiplier(self) -> f64 {
+        match self {
+            Self::ThreeX => 3.0,
+            Self::FiveX => 5.0,
+        }
+    }
+
+    fn exit_reason(self) -> ExitReason {
+        match self {
+            Self::ThreeX => ExitReason::TakeProfit1,
+            Self::FiveX => ExitReason::TakeProfit2,
+        }
+    }
+}
+
 /// Internal state for a tracked moonbag position.
 struct MoonbagPosition {
     position_id: i64,
@@ -191,6 +241,7 @@ struct MoonbagPosition {
     token_name: String,
     token_symbol: String,
     entry_price_usd: f64,
+    original_token_amount: f64,
     token_amount: f64,
     sol_value: f64,
     peak_price: f64,
@@ -208,6 +259,25 @@ struct MoonbagPosition {
     profit_gate_multiplier: f64,
     /// Early post-promotion grace where 2x-5x runners get wider trailing.
     early_trailing_grace_secs: u64,
+    /// Moonbag split-exit percentages, expressed as % of the promoted stack.
+    partial_3x_pct: u8,
+    partial_5x_pct: u8,
+    /// Partial-exit stage flags.
+    partial_3x_done: bool,
+    partial_5x_done: bool,
+    /// Cumulative % of the promoted stack sold by moonbag split exits.
+    partial_sold_pct: f64,
+    /// Minimum age before soft/full trailing exits can close the moonbag tail.
+    min_hold_secs: u64,
+    /// Price-only confirmation checks required before a trailing tail exit.
+    trailing_confirm_checks: u32,
+    trailing_breach_count: u32,
+    /// Configurable multiplier-based trailing tiers.
+    trail_2x_5x: f64,
+    trail_5x_10x: f64,
+    trail_10x_15x: f64,
+    trail_15x_20x: f64,
+    trail_20x_plus: f64,
     /// Whether the profit gate has been reached at any point.
     profit_gate_reached: bool,
     /// Whether a 24h+ extension check has been performed (RUNNER_CONFIRMED only).
@@ -233,16 +303,21 @@ impl MoonbagPosition {
         initial_trailing_pct: f64,
         max_hold_secs: u64,
         profit_gate: f64,
-        early_trailing_grace_secs: u64,
+        runtime_cfg: MoonbagRuntimeConfig,
     ) -> Self {
         let now = Instant::now();
-        let peak_mult = if cmd.entry_price_usd > 0.0 { cmd.peak_price / cmd.entry_price_usd } else { 1.0 };
+        let peak_mult = if cmd.entry_price_usd > 0.0 {
+            cmd.peak_price / cmd.entry_price_usd
+        } else {
+            1.0
+        };
         Self {
             position_id: cmd.position_id,
             mint: cmd.mint,
             token_name: cmd.token_name,
             token_symbol: cmd.token_symbol,
             entry_price_usd: cmd.entry_price_usd,
+            original_token_amount: cmd.token_amount,
             token_amount: cmd.token_amount,
             sol_value: cmd.sol_value,
             peak_price: cmd.peak_price,
@@ -255,7 +330,20 @@ impl MoonbagPosition {
             is_paper_trade: cmd.is_paper_trade,
             max_hold_secs,
             profit_gate_multiplier: profit_gate,
-            early_trailing_grace_secs,
+            early_trailing_grace_secs: runtime_cfg.early_trailing_grace_secs,
+            partial_3x_pct: runtime_cfg.partial_3x_pct,
+            partial_5x_pct: runtime_cfg.partial_5x_pct,
+            partial_3x_done: false,
+            partial_5x_done: false,
+            partial_sold_pct: 0.0,
+            min_hold_secs: runtime_cfg.min_hold_secs,
+            trailing_confirm_checks: runtime_cfg.trailing_confirm_checks,
+            trailing_breach_count: 0,
+            trail_2x_5x: runtime_cfg.trail_2x_5x,
+            trail_5x_10x: runtime_cfg.trail_5x_10x,
+            trail_10x_15x: runtime_cfg.trail_10x_15x,
+            trail_15x_20x: runtime_cfg.trail_15x_20x,
+            trail_20x_plus: runtime_cfg.trail_20x_plus,
             profit_gate_reached: peak_mult >= profit_gate,
             extension_checked: false,
             consecutive_low_checks: 0,
@@ -275,10 +363,10 @@ impl MoonbagPosition {
             return 5; // Fast runner: 5s polling for first 60s
         }
         match age_secs {
-            0..=300 => 30,       // first 5 min: every 30s
-            301..=900 => 60,     // 5-15 min: every 60s
-            901..=3600 => 120,   // 15-60 min: every 2 min
-            _ => 300,            // after 1h: every 5 min
+            0..=300 => 30,     // first 5 min: every 30s
+            301..=900 => 60,   // 5-15 min: every 60s
+            901..=3600 => 120, // 15-60 min: every 2 min
+            _ => 300,          // after 1h: every 5 min
         }
     }
 
@@ -297,41 +385,64 @@ impl MoonbagPosition {
     }
 
     /// Compute the effective trailing stop % based on current multiplier from entry.
-    ///
-    /// Multiplier-based tiers (higher mcap = tighter stop):
-    ///   < 2x:   55% — still marginal, give max room
-    ///   2x-5x:  40% — growing but volatile
-    ///   5x-10x: 30% — solid runner, moderate protection
-    ///   10x-20x: 20% — big winner, protect gains
-    ///   20x+:   15% — massive runner, lock it in
-    ///
-    /// Before profit_gate is reached, use the initial wide trail (45/55%)
-    /// so marginal tokens don't get chopped on noise.
+    /// Wider early tiers prevent real moonbags from getting clipped by first-hour
+    /// volatility; higher-multiple tiers tighten progressively to protect gains.
     fn effective_trailing_pct(&self, current_multiplier: f64) -> f64 {
         if !self.profit_gate_reached {
             return self.initial_trailing_pct;
         }
 
         let age_secs = self.promoted_at.elapsed().as_secs();
-        let in_early_grace = self.early_trailing_grace_secs > 0
-            && age_secs < self.early_trailing_grace_secs;
+        let in_early_grace =
+            self.early_trailing_grace_secs > 0 && age_secs < self.early_trailing_grace_secs;
 
-        let mult_based: f64 = if in_early_grace && current_multiplier >= 2.0 && current_multiplier < 5.0 {
-            55.0
+        if in_early_grace && current_multiplier >= 2.0 && current_multiplier < 5.0 {
+            self.initial_trailing_pct.max(self.trail_2x_5x)
         } else if current_multiplier >= 20.0 {
-            15.0
+            self.trail_20x_plus
+        } else if current_multiplier >= 15.0 {
+            self.trail_15x_20x
         } else if current_multiplier >= 10.0 {
-            20.0
+            self.trail_10x_15x
         } else if current_multiplier >= 5.0 {
-            30.0
+            self.trail_5x_10x
         } else if current_multiplier >= 2.0 {
-            40.0
+            self.trail_2x_5x
         } else {
-            55.0 // below 2x, very wide — token barely above entry
-        };
+            self.initial_trailing_pct
+        }
+    }
 
-        // Never go wider than initial — multiplier can only tighten.
-        mult_based.min(self.initial_trailing_pct)
+    fn next_partial_stage(&self, current_multiplier: f64) -> Option<MoonbagPartialStage> {
+        if !self.partial_3x_done
+            && self.partial_3x_pct > 0
+            && current_multiplier >= MoonbagPartialStage::ThreeX.trigger_multiplier()
+        {
+            return Some(MoonbagPartialStage::ThreeX);
+        }
+
+        if self.partial_3x_done
+            && !self.partial_5x_done
+            && self.partial_5x_pct > 0
+            && current_multiplier >= MoonbagPartialStage::FiveX.trigger_multiplier()
+        {
+            return Some(MoonbagPartialStage::FiveX);
+        }
+
+        None
+    }
+
+    /// Convert a stage target expressed as % of the promoted stack into the
+    /// `ExitSignal` format: % of the currently remaining moonbag stack.
+    fn pct_of_remaining_for_stage(&self, stage: MoonbagPartialStage) -> u8 {
+        let target_original_pct = match stage {
+            MoonbagPartialStage::ThreeX => self.partial_3x_pct as f64,
+            MoonbagPartialStage::FiveX => self.partial_5x_pct as f64,
+        };
+        let remaining_original_pct = (100.0 - self.partial_sold_pct).max(1.0);
+        ((target_original_pct / remaining_original_pct) * 100.0)
+            .ceil()
+            .clamp(1.0, 100.0) as u8
     }
 }
 
@@ -342,6 +453,7 @@ impl MoonbagPosition {
 pub async fn run_moonbag_tracker(
     mut rx: mpsc::Receiver<MoonbagCommand>,
     exit_tx: mpsc::Sender<ExitSignal>,
+    mut confirm_rx: broadcast::Receiver<ExitResult>,
     cfg: Arc<AppConfig>,
     supabase: Arc<SupabaseClient>,
 ) {
@@ -391,7 +503,12 @@ pub async fn run_moonbag_tracker(
                                 "hold_duration_secs": hold_secs,
                                 "exited_at": now.to_rfc3339(),
                             });
-                            let _ = supabase.client.patch(&mb_url).json(&mb_payload).send().await;
+                            let _ = supabase
+                                .client
+                                .patch(&mb_url)
+                                .json(&mb_payload)
+                                .send()
+                                .await;
 
                             let pos_url = format!(
                                 "{}/positions?id=eq.{}",
@@ -402,12 +519,16 @@ pub async fn run_moonbag_tracker(
                                 "moonbag_hold_duration_secs": hold_secs,
                                 "status": "closed",
                             });
-                            let _ = supabase.client.patch(&pos_url).json(&pos_payload).send().await;
+                            let _ = supabase
+                                .client
+                                .patch(&pos_url)
+                                .json(&pos_payload)
+                                .send()
+                                .await;
 
                             info!(
                                 position_id = row.position_id,
-                                hold_secs,
-                                "🌙 Orphan moonbag closed"
+                                hold_secs, "🌙 Orphan moonbag closed"
                             );
                         }
                     }
@@ -437,7 +558,22 @@ pub async fn run_moonbag_tracker(
     let trailing_expanding = cfg.strategy.monitoring.moonbag_trailing_expanding;
     let trailing_confirmed = cfg.strategy.monitoring.moonbag_trailing_confirmed;
     let profit_gate = cfg.strategy.monitoring.moonbag_profit_gate_multiplier;
-    let early_trailing_grace_secs = cfg.strategy.monitoring.moonbag_early_trailing_grace_secs;
+    let runtime_cfg = MoonbagRuntimeConfig {
+        early_trailing_grace_secs: cfg.strategy.monitoring.moonbag_early_trailing_grace_secs,
+        partial_3x_pct: cfg.strategy.monitoring.moonbag_partial_3x_pct,
+        partial_5x_pct: cfg.strategy.monitoring.moonbag_partial_5x_pct,
+        min_hold_secs: cfg.strategy.monitoring.moonbag_min_hold_secs,
+        trailing_confirm_checks: cfg
+            .strategy
+            .monitoring
+            .moonbag_trailing_confirm_checks
+            .max(1),
+        trail_2x_5x: cfg.strategy.monitoring.moonbag_trail_2x_5x,
+        trail_5x_10x: cfg.strategy.monitoring.moonbag_trail_5x_10x,
+        trail_10x_15x: cfg.strategy.monitoring.moonbag_trail_10x_15x,
+        trail_15x_20x: cfg.strategy.monitoring.moonbag_trail_15x_20x,
+        trail_20x_plus: cfg.strategy.monitoring.moonbag_trail_20x_plus,
+    };
     let downgrade_threshold = cfg.strategy.monitoring.moonbag_downgrade_consecutive;
 
     let mut positions: Vec<MoonbagPosition> = Vec::new();
@@ -617,7 +753,7 @@ pub async fn run_moonbag_tracker(
                     trailing_pct,
                     hold_cap,
                     profit_gate,
-                    early_trailing_grace_secs,
+                    runtime_cfg,
                 ));
 
                 // For fast runners: fire background narrative check immediately
@@ -663,7 +799,7 @@ pub async fn run_moonbag_tracker(
                 }
             }
             _ = tick.tick() => {
-                let mut exits_to_send: Vec<(usize, ExitSignal, String)> = Vec::new();
+                let mut exits_to_send: Vec<(usize, ExitSignal, String, MoonbagExitAction)> = Vec::new();
 
                 for (idx, pos) in positions.iter_mut().enumerate() {
                     // ── Poll pending background narrative check (fast-runner) ──
@@ -846,7 +982,13 @@ pub async fn run_moonbag_tracker(
                             state = %pos.narrative_state,
                             "🌙 Moonbag max hold expired — exiting"
                         );
-                        exits_to_send.push((idx, build_exit_signal(pos, pos.peak_price * 0.5), "max_hold_expired".to_string()));
+                        exits_to_send.push((idx, build_exit_signal(
+                            pos,
+                            pos.peak_price * 0.5,
+                            100,
+                            ExitReason::TimeStop,
+                            Some("max_hold_expired".to_string()),
+                        ), "max_hold_expired".to_string(), MoonbagExitAction::Final));
                         continue;
                     }
 
@@ -897,7 +1039,13 @@ pub async fn run_moonbag_tracker(
                             floor_mult,
                             "🌙 Moonbag hit floor — exiting to protect profit"
                         );
-                        exits_to_send.push((idx, build_exit_signal(pos, current_price), "floor_hit".to_string()));
+                        exits_to_send.push((idx, build_exit_signal(
+                            pos,
+                            current_price,
+                            100,
+                            ExitReason::TrailingStop,
+                            Some("moonbag_floor_hit".to_string()),
+                        ), "floor_hit".to_string(), MoonbagExitAction::Final));
                         continue;
                     }
 
@@ -912,18 +1060,70 @@ pub async fn run_moonbag_tracker(
                     } else { 0.0 };
 
                     if drawdown_from_peak >= effective_trail && !in_grace_period {
+                        if age_secs < pos.min_hold_secs {
+                            debug!(
+                                mint = %pos.mint,
+                                drawdown = format!("{:.1}%", drawdown_from_peak),
+                                trailing = format!("{:.0}%", effective_trail),
+                                age_min = age_secs / 60,
+                                min_hold_min = pos.min_hold_secs / 60,
+                                "🌙 Moonbag trailing breach suppressed — minimum tail hold active"
+                            );
+                        } else {
+                            pos.trailing_breach_count = pos.trailing_breach_count.saturating_add(1);
+                            if pos.trailing_breach_count >= pos.trailing_confirm_checks {
+                                info!(
+                                    mint = %pos.mint,
+                                    peak = pos.peak_price,
+                                    current = current_price,
+                                    drawdown = format!("{:.1}%", drawdown_from_peak),
+                                    trailing = format!("{:.0}%", effective_trail),
+                                    multiplier = format!("{:.2}x", multiplier),
+                                    age_min = age_secs / 60,
+                                    confirmations = pos.trailing_breach_count,
+                                    profit_gate = pos.profit_gate_reached,
+                                    "🌙 Moonbag trailing stop confirmed — exiting tail"
+                                );
+                                exits_to_send.push((idx, build_exit_signal(
+                                    pos,
+                                    current_price,
+                                    100,
+                                    ExitReason::TrailingStop,
+                                    Some("moonbag_tail_trailing_confirmed".to_string()),
+                                ), "trailing_stop".to_string(), MoonbagExitAction::Final));
+                                continue;
+                            } else {
+                                info!(
+                                    mint = %pos.mint,
+                                    drawdown = format!("{:.1}%", drawdown_from_peak),
+                                    trailing = format!("{:.0}%", effective_trail),
+                                    confirmations = pos.trailing_breach_count,
+                                    required = pos.trailing_confirm_checks,
+                                    "🌙 Moonbag trailing breach armed — waiting for confirmation"
+                                );
+                            }
+                        }
+                    } else {
+                        pos.trailing_breach_count = 0;
+                    }
+
+                    if let Some(stage) = pos.next_partial_stage(multiplier) {
+                        let pct_to_sell = pos.pct_of_remaining_for_stage(stage);
                         info!(
                             mint = %pos.mint,
-                            peak = pos.peak_price,
-                            current = current_price,
-                            drawdown = format!("{:.1}%", drawdown_from_peak),
-                            trailing = format!("{:.0}%", effective_trail),
+                            stage = stage.label(),
+                            pct_of_remaining = pct_to_sell,
                             multiplier = format!("{:.2}x", multiplier),
-                            age_min = age_secs / 60,
-                            profit_gate = pos.profit_gate_reached,
-                            "🌙 Moonbag trailing stop hit — exiting"
+                            remaining_tokens = pos.token_amount,
+                            "🌙 Moonbag split exit triggered"
                         );
-                        exits_to_send.push((idx, build_exit_signal(pos, current_price), "trailing_stop".to_string()));
+                        exits_to_send.push((idx, build_exit_signal(
+                            pos,
+                            current_price,
+                            pct_to_sell,
+                            stage.exit_reason(),
+                            Some(stage.label().to_string()),
+                        ), stage.label().to_string(), MoonbagExitAction::Partial(stage)));
                         continue;
                     }
 
@@ -1095,72 +1295,159 @@ pub async fn run_moonbag_tracker(
 
                 // Process exits (iterate in reverse to preserve indices)
                 exits_to_send.sort_by(|a, b| b.0.cmp(&a.0));
-                for (idx, signal, reason) in exits_to_send {
-                    let pos = &positions[idx];
+                for (idx, signal, reason, action) in exits_to_send {
+                    let Some(pos) = positions.get(idx) else { continue; };
+                    let mint_for_confirm = pos.mint.clone();
+                    let position_id = pos.position_id;
+                    let state_log = pos.narrative_state.to_string();
+                    let hold_secs = pos.promoted_at.elapsed().as_secs() as i64;
                     let multiplier = if pos.entry_price_usd > 0.0 {
                         signal.current_price / pos.entry_price_usd
                     } else { 0.0 };
-
-                    // Log exit to Supabase
-                    let supa = Arc::clone(&supabase);
-                    let mint_log = pos.mint.clone();
-                    let reason_log = reason.clone();
-                    let state_log = pos.narrative_state.to_string();
-                    let hold_secs = pos.promoted_at.elapsed().as_secs() as i64;
-                    let exit_price = signal.current_price;
-                    let exit_mult = multiplier;
+                    let peak_multiplier = if pos.entry_price_usd > 0.0 {
+                        pos.peak_price / pos.entry_price_usd
+                    } else { 0.0 };
                     let final_trail = pos.effective_trailing_pct(multiplier);
-                    let pos_id = pos.position_id;
-                    tokio::spawn(async move {
-                        let payload = serde_json::json!({
-                            "event_type": "moonbag_exit",
-                            "message": format!(
-                                "Mint: {} | reason: {} | state: {} | mult: {:.2}x",
-                                mint_log, reason_log, state_log, exit_mult
-                            ),
-                        });
-                        let url = format!("{}/system_events", supa.base_url);
-                        let _ = supa.client.post(&url).json(&payload).send().await;
+                    let token_amount_before = pos.token_amount;
+                    let sell_fraction = signal.pct_to_sell as f64 / 100.0;
+                    let token_amount_requested = token_amount_before * sell_fraction;
+                    let estimated_sol_value = if pos.entry_price_usd > 0.0 {
+                        pos.sol_value * (signal.current_price / pos.entry_price_usd) * sell_fraction
+                    } else {
+                        pos.sol_value * sell_fraction
+                    };
 
-                        // Update moonbag_positions with exit data
-                        let url = format!(
-                            "{}/moonbag_positions?position_id=eq.{}",
-                            supa.base_url, pos_id
-                        );
-                        let payload = serde_json::json!({
-                            "exit_reason": reason_log,
-                            "exit_price_usd": exit_price,
-                            "exit_multiplier": exit_mult,
-                            "final_trailing_pct": final_trail,
-                            "hold_duration_secs": hold_secs,
-                            "exited_at": chrono::Utc::now().to_rfc3339(),
-                            "narrative_state": state_log,
-                        });
-                        let _ = supa.client.patch(&url).json(&payload).send().await;
-
-                        // Also mirror moonbag exit data onto the parent `positions` row so
-                        // analytics queries on `positions` (without joining moonbag_positions)
-                        // see the realised tail outcome. Only the moonbag-specific columns
-                        // are written here — `status`, `pnl_sol`, `sol_received`, etc. are
-                        // owned by the exit engine when it processes the ExitSignal.
-                        let pos_url = format!(
-                            "{}/positions?id=eq.{}",
-                            supa.base_url, pos_id
-                        );
-                        let pos_payload = serde_json::json!({
-                            "moonbag_exit_reason": reason_log,
-                            "moonbag_exit_multiplier": exit_mult,
-                            "moonbag_hold_duration_secs": hold_secs,
-                        });
-                        if let Err(e) = supa.client.patch(&pos_url).json(&pos_payload).send().await {
-                            tracing::warn!(position_id = pos_id, "positions moonbag_exit_* sync error: {}", e);
-                        }
-                    });
-
-                    if exit_tx.send(signal).await.is_err() {
-                        warn!(mint = %pos.mint, "Moonbag → exit channel closed");
+                    if exit_tx.send(signal.clone()).await.is_err() {
+                        warn!(mint = %mint_for_confirm, "Moonbag → exit channel closed");
+                        continue;
                     }
-                    positions.remove(idx);
+
+                    let confirmation = wait_for_exit_confirmation(&mut confirm_rx, &mint_for_confirm).await;
+                    if !confirmation.success {
+                        warn!(
+                            mint = %mint_for_confirm,
+                            position_id,
+                            reason = %reason,
+                            permanent = confirmation.permanent,
+                            "🌙 Moonbag exit did not confirm — state not advanced"
+                        );
+                        if confirmation.permanent {
+                            log_moonbag_exit_event(
+                                Arc::clone(&supabase),
+                                position_id,
+                                mint_for_confirm.clone(),
+                                "permanent_failed".to_string(),
+                                reason.clone(),
+                                signal.pct_to_sell,
+                                token_amount_before,
+                                token_amount_requested,
+                                token_amount_before,
+                                signal.current_price,
+                                multiplier,
+                                peak_multiplier,
+                                estimated_sol_value,
+                                false,
+                                signal.is_paper_trade,
+                                cfg.strategy.strategy_version.clone().unwrap_or_else(|| "unknown".to_string()),
+                            );
+                            positions.remove(idx);
+                        }
+                        continue;
+                    }
+
+                    match action {
+                        MoonbagExitAction::Partial(stage) => {
+                            let Some(pos) = positions.get_mut(idx) else { continue; };
+                            if pos.mint != mint_for_confirm {
+                                warn!(
+                                    mint = %mint_for_confirm,
+                                    position_id,
+                                    "Moonbag partial confirmation index mismatch — skipping state update"
+                                );
+                                continue;
+                            }
+
+                            let token_amount_after = (pos.token_amount - token_amount_requested).max(0.0);
+                            let sold_pct_of_stack = if pos.original_token_amount > 0.0 {
+                                token_amount_requested / pos.original_token_amount * 100.0
+                            } else {
+                                signal.pct_to_sell as f64
+                            };
+                            pos.token_amount = token_amount_after;
+                            pos.sol_value *= 1.0 - sell_fraction;
+                            pos.partial_sold_pct = (pos.partial_sold_pct + sold_pct_of_stack).min(100.0);
+                            pos.trailing_breach_count = 0;
+                            match stage {
+                                MoonbagPartialStage::ThreeX => pos.partial_3x_done = true,
+                                MoonbagPartialStage::FiveX => pos.partial_5x_done = true,
+                            }
+
+                            info!(
+                                mint = %pos.mint,
+                                stage = stage.label(),
+                                sold_pct_remaining = signal.pct_to_sell,
+                                cumulative_sold_pct = format!("{:.1}%", pos.partial_sold_pct),
+                                remaining_tokens = pos.token_amount,
+                                "🌙 Moonbag split exit confirmed — tail remains active"
+                            );
+
+                            log_moonbag_exit_event(
+                                Arc::clone(&supabase),
+                                position_id,
+                                mint_for_confirm.clone(),
+                                "partial_exit".to_string(),
+                                stage.label().to_string(),
+                                signal.pct_to_sell,
+                                token_amount_before,
+                                token_amount_requested,
+                                token_amount_after,
+                                signal.current_price,
+                                multiplier,
+                                peak_multiplier,
+                                estimated_sol_value,
+                                true,
+                                signal.is_paper_trade,
+                                cfg.strategy.strategy_version.clone().unwrap_or_else(|| "unknown".to_string()),
+                            );
+                            mark_parent_position_moonbag_after_partial(
+                                Arc::clone(&supabase),
+                                position_id,
+                                mint_for_confirm,
+                            );
+                        }
+                        MoonbagExitAction::Final => {
+                            log_final_moonbag_exit(
+                                Arc::clone(&supabase),
+                                position_id,
+                                mint_for_confirm.clone(),
+                                reason.clone(),
+                                state_log,
+                                hold_secs,
+                                signal.current_price,
+                                multiplier,
+                                final_trail,
+                            );
+                            log_moonbag_exit_event(
+                                Arc::clone(&supabase),
+                                position_id,
+                                mint_for_confirm,
+                                "tail_exit".to_string(),
+                                reason,
+                                signal.pct_to_sell,
+                                token_amount_before,
+                                token_amount_requested,
+                                0.0,
+                                signal.current_price,
+                                multiplier,
+                                peak_multiplier,
+                                estimated_sol_value,
+                                true,
+                                signal.is_paper_trade,
+                                cfg.strategy.strategy_version.clone().unwrap_or_else(|| "unknown".to_string()),
+                            );
+                            positions.remove(idx);
+                        }
+                    }
                 }
             }
             else => break,
@@ -1173,12 +1460,7 @@ pub async fn run_moonbag_tracker(
 // ── Helpers ──────────────────────────────────────────────────
 
 /// Get the initial trailing stop % for a given narrative state.
-fn trailing_for_state(
-    state: NarrativeState,
-    early: f64,
-    expanding: f64,
-    confirmed: f64,
-) -> f64 {
+fn trailing_for_state(state: NarrativeState, early: f64, expanding: f64, confirmed: f64) -> f64 {
     match state {
         NarrativeState::NoSignal => early,
         NarrativeState::EarlyAttention => early,
@@ -1234,18 +1516,182 @@ async fn fetch_dexscreener_price(client: &reqwest::Client, mint: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ExitConfirmation {
+    success: bool,
+    permanent: bool,
+}
+
+async fn wait_for_exit_confirmation(
+    confirm_rx: &mut broadcast::Receiver<ExitResult>,
+    mint: &str,
+) -> ExitConfirmation {
+    let wait_timeout = tokio::time::sleep(std::time::Duration::from_secs(120));
+    tokio::pin!(wait_timeout);
+
+    loop {
+        tokio::select! {
+            result = confirm_rx.recv() => {
+                match result {
+                    Ok(r) if r.mint == mint => {
+                        return ExitConfirmation { success: r.success, permanent: r.permanent };
+                    }
+                    Ok(_) => continue,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => {
+                        return ExitConfirmation { success: false, permanent: false };
+                    }
+                }
+            }
+            _ = &mut wait_timeout => {
+                return ExitConfirmation { success: false, permanent: false };
+            }
+        }
+    }
+}
+
+fn log_final_moonbag_exit(
+    supabase: Arc<SupabaseClient>,
+    position_id: i64,
+    mint: String,
+    reason: String,
+    narrative_state: String,
+    hold_secs: i64,
+    exit_price: f64,
+    exit_multiplier: f64,
+    final_trailing_pct: f64,
+) {
+    tokio::spawn(async move {
+        let payload = serde_json::json!({
+            "event_type": "moonbag_exit",
+            "message": format!(
+                "Mint: {} | reason: {} | state: {} | mult: {:.2}x",
+                mint, reason, narrative_state, exit_multiplier
+            ),
+        });
+        let url = format!("{}/system_events", supabase.base_url);
+        let _ = supabase.client.post(&url).json(&payload).send().await;
+
+        let url = format!(
+            "{}/moonbag_positions?position_id=eq.{}",
+            supabase.base_url, position_id
+        );
+        let payload = serde_json::json!({
+            "exit_reason": reason.clone(),
+            "exit_price_usd": exit_price,
+            "exit_multiplier": exit_multiplier,
+            "final_trailing_pct": final_trailing_pct,
+            "hold_duration_secs": hold_secs,
+            "exited_at": chrono::Utc::now().to_rfc3339(),
+            "narrative_state": narrative_state.clone(),
+        });
+        let _ = supabase.client.patch(&url).json(&payload).send().await;
+
+        let pos_url = format!("{}/positions?id=eq.{}", supabase.base_url, position_id);
+        let pos_payload = serde_json::json!({
+            "moonbag_exit_reason": reason,
+            "moonbag_exit_multiplier": exit_multiplier,
+            "moonbag_hold_duration_secs": hold_secs,
+        });
+        if let Err(e) = supabase
+            .client
+            .patch(&pos_url)
+            .json(&pos_payload)
+            .send()
+            .await
+        {
+            tracing::warn!(position_id, "positions moonbag_exit_* sync error: {}", e);
+        }
+    });
+}
+
+fn log_moonbag_exit_event(
+    supabase: Arc<SupabaseClient>,
+    position_id: i64,
+    mint: String,
+    event_type: String,
+    stage: String,
+    pct_requested: u8,
+    token_amount_before: f64,
+    token_amount_requested: f64,
+    token_amount_after_est: f64,
+    price_usd: f64,
+    multiplier: f64,
+    peak_multiplier: f64,
+    estimated_sol_value: f64,
+    success: bool,
+    is_paper_trade: bool,
+    strategy_version: String,
+) {
+    tokio::spawn(async move {
+        let payload = serde_json::json!({
+            "position_id": position_id,
+            "mint": mint,
+            "event_type": event_type,
+            "stage": stage,
+            "pct_requested": pct_requested as i64,
+            "token_amount_before": token_amount_before,
+            "token_amount_requested": token_amount_requested,
+            "token_amount_after_est": token_amount_after_est,
+            "price_usd": price_usd,
+            "multiplier": multiplier,
+            "peak_multiplier": peak_multiplier,
+            "estimated_sol_value": estimated_sol_value,
+            "success": success,
+            "is_paper_trade": is_paper_trade,
+            "strategy_version": strategy_version,
+            "created_at": chrono::Utc::now().to_rfc3339(),
+        });
+        let url = format!("{}/moonbag_exit_events", supabase.base_url);
+        if let Err(e) = supabase.client.post(&url).json(&payload).send().await {
+            tracing::debug!(position_id, "moonbag_exit_events insert error: {}", e);
+        }
+    });
+}
+
+fn mark_parent_position_moonbag_after_partial(
+    supabase: Arc<SupabaseClient>,
+    position_id: i64,
+    mint: String,
+) {
+    tokio::spawn(async move {
+        let url = format!("{}/positions?id=eq.{}", supabase.base_url, position_id);
+        let payload = serde_json::json!({
+            "status": "moonbag",
+            "moonbag_promoted": true,
+        });
+        match supabase.client.patch(&url).json(&payload).send().await {
+            Ok(resp) if resp.status().is_success() => {}
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                tracing::warn!(mint = %mint, status = %status, body = %body, "positions status restore after moonbag partial failed");
+            }
+            Err(e) => {
+                tracing::warn!(mint = %mint, "positions status restore after moonbag partial error: {}", e);
+            }
+        }
+    });
+}
+
 /// Build an ExitSignal from a moonbag position.
-fn build_exit_signal(pos: &MoonbagPosition, current_price: f64) -> ExitSignal {
+fn build_exit_signal(
+    pos: &MoonbagPosition,
+    current_price: f64,
+    pct_to_sell: u8,
+    reason: ExitReason,
+    sub_reason: Option<String>,
+) -> ExitSignal {
     ExitSignal {
         position_id: pos.position_id,
         mint: pos.mint.clone(),
-        pct_to_sell: 100,
-        reason: ExitReason::TrailingStop,
+        pct_to_sell,
+        reason,
         current_price,
         entry_price_usd: pos.entry_price_usd,
         sol_spent: pos.sol_value,
         token_amount: pos.token_amount,
         is_paper_trade: pos.is_paper_trade,
-        sub_reason: None,
+        sub_reason,
     }
 }

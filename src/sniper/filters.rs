@@ -105,7 +105,8 @@ pub fn apply_hard_filters(
                         bundlers_pct = bundlers_pct,
                         safety_score = format!("{:.0}", safety),
                         "HARD FILTER: bundlers {:.1}% in soft zone but safety score {:.0} < 50",
-                        bundlers_pct, safety
+                        bundlers_pct,
+                        safety
                     );
                     return HardFilterResult {
                         passed: false,
@@ -120,7 +121,8 @@ pub fn apply_hard_filters(
                     bundlers_pct = bundlers_pct,
                     safety_score = format!("{:.0}", safety),
                     "✅ Bundlers {:.1}% in soft zone — safety score {:.0} ≥ 50, passing",
-                    bundlers_pct, safety
+                    bundlers_pct,
+                    safety
                 );
             }
         }
@@ -152,7 +154,8 @@ pub fn apply_hard_filters(
                 liquidity_sol = initial_liquidity_sol,
                 safety_score = format!("{:.0}", safety),
                 "HARD FILTER: liquidity {:.1} SOL in soft zone but safety {:.0} < 50",
-                initial_liquidity_sol, safety
+                initial_liquidity_sol,
+                safety
             );
             return HardFilterResult {
                 passed: false,
@@ -167,7 +170,8 @@ pub fn apply_hard_filters(
             liquidity_sol = initial_liquidity_sol,
             safety_score = format!("{:.0}", safety),
             "✅ Liquidity {:.1} SOL in soft zone — safety {:.0} ≥ 50, passing",
-            initial_liquidity_sol, safety
+            initial_liquidity_sol,
+            safety
         );
     }
 
@@ -188,9 +192,13 @@ pub fn apply_hard_filters(
     // Data: "human" token hit 162.5x at 84.9% top10 with safety<60 — we missed it.
     // Pure rugs are almost always >95% (single wallet holds everything).
     {
-        let st_top10 = enrichment.solana_tracker.as_ref()
+        let st_top10 = enrichment
+            .solana_tracker
+            .as_ref()
             .and_then(|st| st.top10_pct);
-        let be_top10 = enrichment.birdeye_security.as_ref()
+        let be_top10 = enrichment
+            .birdeye_security
+            .as_ref()
             .and_then(|bs| bs.top10_holder_percent);
 
         let top10_pct = match (st_top10, be_top10) {
@@ -216,7 +224,8 @@ pub fn apply_hard_filters(
                         top10_pct = pct,
                         safety_score = format!("{:.0}", safety),
                         "HARD FILTER: top-10 {:.1}% in soft zone but safety score {:.0} < 50",
-                        pct, safety
+                        pct,
+                        safety
                     );
                     return HardFilterResult {
                         passed: false,
@@ -231,7 +240,8 @@ pub fn apply_hard_filters(
                     top10_pct = pct,
                     safety_score = format!("{:.0}", safety),
                     "✅ Top-10 {:.1}% in soft zone — safety score {:.0} ≥ 50, passing",
-                    pct, safety
+                    pct,
+                    safety
                 );
             }
         }
@@ -282,8 +292,7 @@ pub fn apply_hard_filters(
     // Winners median dev_pct = 2.36%, losers median = 4.74%.
     // Hard reject at 50% — clear rug indicator.
     {
-        let dev_pct = enrichment.solana_tracker.as_ref()
-            .and_then(|st| st.dev_pct);
+        let dev_pct = enrichment.solana_tracker.as_ref().and_then(|st| st.dev_pct);
         if let Some(pct) = dev_pct {
             if pct > 50.0 {
                 warn!(dev_pct = pct, "HARD FILTER: dev holding > 50%");
@@ -300,10 +309,8 @@ pub fn apply_hard_filters(
     // Data: 0-10 holders = serial losers. Winners median 143 holders.
     // Hard reject below 25 — tokens with <25 holders have no real community.
     {
-        let st_holders = enrichment.solana_tracker.as_ref()
-            .and_then(|st| st.holders);
-        let be_holders = enrichment.goplus.as_ref()
-            .and_then(|gp| gp.holder_count);
+        let st_holders = enrichment.solana_tracker.as_ref().and_then(|st| st.holders);
+        let be_holders = enrichment.goplus.as_ref().and_then(|gp| gp.holder_count);
         let holders = match (st_holders, be_holders) {
             (Some(a), Some(b)) => Some(a.max(b)),
             (Some(a), None) => Some(a),
@@ -442,10 +449,16 @@ pub fn apply_deferred_filters(
     if let Some(st) = &enrichment.solana_tracker {
         if let Some(bundlers_pct) = st.bundlers_pct {
             if bundlers_pct <= 100.0 && bundlers_pct > 90.0 {
-                warn!(bundlers_pct = bundlers_pct, "DEFERRED FILTER: bundlers > 90%");
+                warn!(
+                    bundlers_pct = bundlers_pct,
+                    "DEFERRED FILTER: bundlers > 90%"
+                );
                 return HardFilterResult {
                     passed: false,
-                    rejection_reason: Some(format!("deferred_bundlers_pct={:.1}% > 90%", bundlers_pct)),
+                    rejection_reason: Some(format!(
+                        "deferred_bundlers_pct={:.1}% > 90%",
+                        bundlers_pct
+                    )),
                     filter_name: Some("deferred_bundlers".to_string()),
                 };
             }
@@ -454,8 +467,14 @@ pub fn apply_deferred_filters(
 
     // ── Filter 6: top10 > 95% ──
     {
-        let st_top10 = enrichment.solana_tracker.as_ref().and_then(|st| st.top10_pct);
-        let be_top10 = enrichment.birdeye_security.as_ref().and_then(|bs| bs.top10_holder_percent);
+        let st_top10 = enrichment
+            .solana_tracker
+            .as_ref()
+            .and_then(|st| st.top10_pct);
+        let be_top10 = enrichment
+            .birdeye_security
+            .as_ref()
+            .and_then(|bs| bs.top10_holder_percent);
         let top10_pct = match (st_top10, be_top10) {
             (Some(a), Some(b)) => Some(a.max(b)),
             (Some(a), None) => Some(a),
@@ -552,7 +571,11 @@ fn check_mint_authority_active(enrichment: &EnrichmentResult) -> Option<bool> {
         }
     }
 
-    if any_source { Some(false) } else { None }
+    if any_source {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 /// Cross-source freeze authority check.
@@ -579,7 +602,11 @@ fn check_freeze_authority_active(enrichment: &EnrichmentResult) -> Option<bool> 
         }
     }
 
-    if any_source { Some(false) } else { None }
+    if any_source {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 /// Compute a safety score (0-100) for tokens in the concentration soft zone.
@@ -594,10 +621,7 @@ fn check_freeze_authority_active(enrichment: &EnrichmentResult) -> Option<bool> 
 ///   "human" (162.5x, top10=84.9%): liq=85, dev=0%, bundlers=2.3%, LP burned,
 ///   54 buyers, mint+freeze revoked → would score ~95 → PASS
 ///   Scam tokens: dev>5%, LP not burned, <10 buyers → score ~20 → REJECT
-fn compute_concentration_safety(
-    enrichment: &EnrichmentResult,
-    initial_liquidity_sol: f64,
-) -> f64 {
+fn compute_concentration_safety(enrichment: &EnrichmentResult, initial_liquidity_sol: f64) -> f64 {
     let mut score: f64 = 50.0;
 
     // ── Liquidity depth (0 to +15): high liq = hard to rug ──

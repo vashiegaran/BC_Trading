@@ -2,10 +2,7 @@ use anyhow::{anyhow, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use solana_sdk::{
-    instruction::Instruction,
-    pubkey::Pubkey,
-    system_instruction,
-    transaction::VersionedTransaction,
+    instruction::Instruction, pubkey::Pubkey, system_instruction, transaction::VersionedTransaction,
 };
 use std::str::FromStr;
 use tracing::{debug, info, warn};
@@ -116,8 +113,7 @@ impl JitoClient {
             .choose(&mut rng)
             .ok_or_else(|| anyhow!("Failed to select random tip account"))?;
 
-        Pubkey::from_str(tip_account_str)
-            .map_err(|e| anyhow!("Failed to parse tip account: {}", e))
+        Pubkey::from_str(tip_account_str).map_err(|e| anyhow!("Failed to parse tip account: {}", e))
     }
 
     /// Calculate tip amount in lamports
@@ -126,7 +122,10 @@ impl JitoClient {
     pub async fn calculate_tip(&self) -> u64 {
         // Try to get recommended tip from Jito
         let recommended_tip = self.get_recommended_tip().await.unwrap_or_else(|e| {
-            warn!("Failed to get Jito tip recommendation: {}, using default", e);
+            warn!(
+                "Failed to get Jito tip recommendation: {}, using default",
+                e
+            );
             DEFAULT_TIP_LAMPORTS
         });
 
@@ -155,10 +154,13 @@ impl JitoClient {
         // In production, you would call the Jito API endpoint
         // GET https://bundles.jito.wtf/api/v1/bundles/tip_floor
 
-        let url = format!("{}/api/v1/bundles/tip_floor",
-            self.block_engine_url.trim_end_matches("/api/v1"));
+        let url = format!(
+            "{}/api/v1/bundles/tip_floor",
+            self.block_engine_url.trim_end_matches("/api/v1")
+        );
 
-        match self.client
+        match self
+            .client
             .get(&url)
             .timeout(std::time::Duration::from_secs(3))
             .send()
@@ -177,10 +179,7 @@ impl JitoClient {
     }
 
     /// Create a tip transfer instruction
-    pub fn create_tip_instruction(
-        payer: &Pubkey,
-        tip_lamports: u64,
-    ) -> Result<Instruction> {
+    pub fn create_tip_instruction(payer: &Pubkey, tip_lamports: u64) -> Result<Instruction> {
         let tip_account = Self::get_random_tip_account()?;
 
         debug!(
@@ -191,16 +190,17 @@ impl JitoClient {
             "Creating Jito tip instruction"
         );
 
-        Ok(system_instruction::transfer(payer, &tip_account, tip_lamports))
+        Ok(system_instruction::transfer(
+            payer,
+            &tip_account,
+            tip_lamports,
+        ))
     }
 
     /// Submit a bundle of transactions to Jito
     ///
     /// Returns the bundle ID for status tracking
-    pub async fn send_bundle(
-        &self,
-        transactions: Vec<VersionedTransaction>,
-    ) -> Result<String> {
+    pub async fn send_bundle(&self, transactions: Vec<VersionedTransaction>) -> Result<String> {
         // Serialize transactions to base58
         let tx_strings: Vec<String> = transactions
             .iter()
@@ -218,7 +218,10 @@ impl JitoClient {
             params: vec![tx_strings],
         };
 
-        let bundle_url = format!("{}/api/v1/bundles", self.block_engine_url.trim_end_matches('/'));
+        let bundle_url = format!(
+            "{}/api/v1/bundles",
+            self.block_engine_url.trim_end_matches('/')
+        );
 
         debug!(
             bundle_size = transactions.len(),
@@ -242,7 +245,11 @@ impl JitoClient {
             .map_err(|e| anyhow!("Failed to read response: {}", e))?;
 
         if !status.is_success() {
-            return Err(anyhow!("Jito bundle submission failed: HTTP {} — {}", status, body));
+            return Err(anyhow!(
+                "Jito bundle submission failed: HTTP {} — {}",
+                status,
+                body
+            ));
         }
 
         let response_data: SendBundleResponse = serde_json::from_str(&body)
@@ -271,7 +278,10 @@ impl JitoClient {
             params: vec![vec![bundle_id.to_string()]],
         };
 
-        let bundle_url = format!("{}/api/v1/bundles", self.block_engine_url.trim_end_matches('/'));
+        let bundle_url = format!(
+            "{}/api/v1/bundles",
+            self.block_engine_url.trim_end_matches('/')
+        );
 
         let response = self
             .client

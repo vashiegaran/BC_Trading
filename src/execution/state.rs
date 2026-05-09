@@ -69,7 +69,11 @@ impl TradingState {
 
     /// Hydrate state from Supabase on startup.
     /// Called once before the engines start.
-    pub async fn hydrate_from_supabase(self: &Arc<Self>, supabase: &SupabaseClient, paper_trade: bool) {
+    pub async fn hydrate_from_supabase(
+        self: &Arc<Self>,
+        supabase: &SupabaseClient,
+        paper_trade: bool,
+    ) {
         let status_filter = if paper_trade {
             "or=(status.eq.paper,status.eq.partial)"
         } else {
@@ -105,7 +109,9 @@ impl TradingState {
                 == Some(CREATOR_REBUY_LIVE_TEST_ENTRY_TIER);
             if is_creator_rebuy_live_test {
                 if let Some(mint) = row.get("mint").and_then(|v| v.as_str()) {
-                    inner.creator_rebuy_live_test_open_mints.insert(mint.to_string());
+                    inner
+                        .creator_rebuy_live_test_open_mints
+                        .insert(mint.to_string());
                 }
             }
         }
@@ -126,7 +132,10 @@ impl TradingState {
             .iter()
             .filter_map(|r| {
                 let pnl = r.get("pnl_sol").and_then(|v| v.as_f64())?;
-                let sol_received = r.get("sol_received").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let sol_received = r
+                    .get("sol_received")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
                 let exit_reason = r.get("exit_reason").and_then(|v| v.as_str()).unwrap_or("");
                 // Skip ghost positions
                 if exit_reason.contains("recovery_closed") && sol_received <= 0.0 {
@@ -163,7 +172,11 @@ impl TradingState {
     }
 
     pub async fn creator_rebuy_live_test_open_count(&self) -> i64 {
-        self.inner.read().await.creator_rebuy_live_test_open_mints.len() as i64
+        self.inner
+            .read()
+            .await
+            .creator_rebuy_live_test_open_mints
+            .len() as i64
     }
 
     pub async fn today_pnl(&self) -> f64 {
@@ -235,7 +248,11 @@ impl TradingState {
             }
         }
         inner.pending_mints.insert(mint.to_string());
-        debug!(mint = mint, pending = inner.pending_mints.len(), "🔒 Reserved mint for in-flight buy");
+        debug!(
+            mint = mint,
+            pending = inner.pending_mints.len(),
+            "🔒 Reserved mint for in-flight buy"
+        );
         true
     }
 
@@ -245,13 +262,21 @@ impl TradingState {
     pub async fn release_reservation(&self, mint: &str) {
         let mut inner = self.inner.write().await;
         if inner.pending_mints.remove(mint) {
-            debug!(mint = mint, pending = inner.pending_mints.len(), "🔓 Released mint reservation");
+            debug!(
+                mint = mint,
+                pending = inner.pending_mints.len(),
+                "🔓 Released mint reservation"
+            );
         }
     }
 
     /// Check if a dev wallet is blacklisted (known scammer/dumper).
     pub async fn is_dev_blacklisted(&self, dev_wallet: &str) -> bool {
-        self.inner.read().await.blacklisted_devs.contains(dev_wallet)
+        self.inner
+            .read()
+            .await
+            .blacklisted_devs
+            .contains(dev_wallet)
     }
 
     /// Add a dev wallet to the blacklist (called when DevWalletDumping exit fires).
@@ -271,7 +296,8 @@ impl TradingState {
     /// Return mints that have been open longer than `max_age_secs`.
     pub async fn stale_mints(&self, max_age_secs: u64) -> Vec<String> {
         let inner = self.inner.read().await;
-        inner.open_since
+        inner
+            .open_since
             .iter()
             .filter(|(_, opened_at)| opened_at.elapsed().as_secs() > max_age_secs)
             .map(|(mint, _)| mint.clone())
@@ -289,7 +315,9 @@ impl TradingState {
             if inner.total_exposure_sol < 0.0 {
                 inner.total_exposure_sol = 0.0;
             }
-            inner.recently_exited.insert(mint.to_string(), Instant::now());
+            inner
+                .recently_exited
+                .insert(mint.to_string(), Instant::now());
             warn!(
                 mint = mint,
                 open = inner.open_mints.len(),
@@ -306,7 +334,9 @@ impl TradingState {
         inner.open_since.insert(mint.to_string(), Instant::now());
         inner.total_exposure_sol += sol_spent;
         if is_creator_rebuy_live_test {
-            inner.creator_rebuy_live_test_open_mints.insert(mint.to_string());
+            inner
+                .creator_rebuy_live_test_open_mints
+                .insert(mint.to_string());
         }
         debug!(
             mint = mint,
@@ -329,9 +359,13 @@ impl TradingState {
                 inner.total_exposure_sol = 0.0;
             }
             // Track exit time for re-buy cooldown
-            inner.recently_exited.insert(mint.to_string(), Instant::now());
+            inner
+                .recently_exited
+                .insert(mint.to_string(), Instant::now());
             // Prune stale entries (older than 2× cooldown) to prevent unbounded growth
-            inner.recently_exited.retain(|_, t| t.elapsed().as_secs() < Self::REBUY_COOLDOWN_SECS * 2);
+            inner
+                .recently_exited
+                .retain(|_, t| t.elapsed().as_secs() < Self::REBUY_COOLDOWN_SECS * 2);
         }
         // Reset PnL if date rolled
         if inner.pnl_date != today_str() {

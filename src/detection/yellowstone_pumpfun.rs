@@ -483,7 +483,10 @@ async fn connect_and_listen(
             )
             .await
             {
-                warn!("yellowstone_pumpfun: failed to process synthesized event: {:#}", e);
+                warn!(
+                    "yellowstone_pumpfun: failed to process synthesized event: {:#}",
+                    e
+                );
             }
         }
 

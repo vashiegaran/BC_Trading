@@ -39,10 +39,7 @@ pub fn spawn_post_trade(
         .await;
 
         // Write post_trade_features to sniper_positions
-        let url = format!(
-            "{}/positions?id=eq.{}",
-            supabase.base_url, position_id
-        );
+        let url = format!("{}/positions?id=eq.{}", supabase.base_url, position_id);
         let payload = serde_json::json!({
             "post_trade_features": features,
         });
@@ -52,7 +49,10 @@ pub fn spawn_post_trade(
             }
             Ok(r) => {
                 let body = r.text().await.unwrap_or_default();
-                warn!(position_id = position_id, "Post-trade save failed: {}", body);
+                warn!(
+                    position_id = position_id,
+                    "Post-trade save failed: {}", body
+                );
             }
             Err(e) => {
                 warn!(position_id = position_id, "Post-trade save error: {}", e);
@@ -78,23 +78,36 @@ async fn run_post_trade_enrichment(
     // ── 1. Fresh Solana Tracker re-screen ──
     let st_client = SolanaTrackerClient::new(cfg.env.solana_tracker_api_key.clone());
     if let Some(st_data) = st_client.fetch_token(mint).await {
-        map.insert("post_st_risk_score".into(), serde_json::json!(st_data.risk_score));
+        map.insert(
+            "post_st_risk_score".into(),
+            serde_json::json!(st_data.risk_score),
+        );
         map.insert("post_st_holders".into(), serde_json::json!(st_data.holders));
-        map.insert("post_st_top10_pct".into(), serde_json::json!(st_data.top10_pct));
-        map.insert("post_st_bundlers_pct".into(), serde_json::json!(st_data.bundlers_pct));
+        map.insert(
+            "post_st_top10_pct".into(),
+            serde_json::json!(st_data.top10_pct),
+        );
+        map.insert(
+            "post_st_bundlers_pct".into(),
+            serde_json::json!(st_data.bundlers_pct),
+        );
 
         // Compute deltas from entry
         if let Some(ef) = entry_features {
             if let Some(entry_holders) = ef.get("st_holders").and_then(|v| v.as_u64()) {
                 if let Some(post_holders) = st_data.holders {
-                    map.insert("delta_holders".into(),
-                        serde_json::json!(post_holders as i64 - entry_holders as i64));
+                    map.insert(
+                        "delta_holders".into(),
+                        serde_json::json!(post_holders as i64 - entry_holders as i64),
+                    );
                 }
             }
             if let Some(entry_risk) = ef.get("st_risk_score").and_then(|v| v.as_f64()) {
                 if let Some(post_risk) = st_data.risk_score {
-                    map.insert("delta_risk_score".into(),
-                        serde_json::json!(post_risk - entry_risk));
+                    map.insert(
+                        "delta_risk_score".into(),
+                        serde_json::json!(post_risk - entry_risk),
+                    );
                 }
             }
         }
@@ -127,8 +140,10 @@ async fn run_post_trade_enrichment(
         }
     }
 
-    map.insert("post_trade_enrichment_at".into(),
-        serde_json::json!(chrono::Utc::now().to_rfc3339()));
+    map.insert(
+        "post_trade_enrichment_at".into(),
+        serde_json::json!(chrono::Utc::now().to_rfc3339()),
+    );
 
     features
 }

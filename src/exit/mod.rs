@@ -1,6 +1,6 @@
-pub mod types;
-pub mod error;
 pub mod dedup;
+pub mod error;
+pub mod types;
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -133,7 +133,9 @@ pub fn start(
                 let mut resolved = false;
                 for retry in 1..=4 {
                     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                    if let Some(balance) = fetch_exit_token_balance(&rpc, &wallet.pubkey(), &signal.mint).await {
+                    if let Some(balance) =
+                        fetch_exit_token_balance(&rpc, &wallet.pubkey(), &signal.mint).await
+                    {
                         if balance > 0.0 {
                             info!(
                                 mint = %signal.mint,
@@ -155,7 +157,10 @@ pub fn start(
                     log_exit_system_event(
                         &supabase,
                         "exit_skipped_zero_tokens",
-                        &format!("Mint: {} — token_amount was 0 after 1s polling", signal.mint),
+                        &format!(
+                            "Mint: {} — token_amount was 0 after 1s polling",
+                            signal.mint
+                        ),
                     )
                     .await;
                     let _ = confirm_tx.send(ExitResult {
@@ -194,7 +199,20 @@ pub fn start(
                         }
                     }
                 } else {
-                    match execute_real_exit(&cfg, &jupiter, &supabase, &rpc, &backup_rpc, &wallet, &signal, &trading_state, jito_client.as_deref(), helius_sender.as_deref()).await {
+                    match execute_real_exit(
+                        &cfg,
+                        &jupiter,
+                        &supabase,
+                        &rpc,
+                        &backup_rpc,
+                        &wallet,
+                        &signal,
+                        &trading_state,
+                        jito_client.as_deref(),
+                        helius_sender.as_deref(),
+                    )
+                    .await
+                    {
                         Ok(()) => (true, false),
                         Err(e) => {
                             let err_str = e.to_string();
@@ -230,7 +248,6 @@ pub fn start(
                         }
                     }
                 };
-
 
                 let _ = confirm_tx.send(ExitResult {
                     mint: signal.mint.clone(),
@@ -278,7 +295,10 @@ async fn execute_paper_exit(
             tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
         }
 
-        match jupiter.get_quote(&signal.mint, sol_mint, tokens_to_sell, 2000).await {
+        match jupiter
+            .get_quote(&signal.mint, sol_mint, tokens_to_sell, 2000)
+            .await
+        {
             Ok(quote) => {
                 let out_lamports: f64 = quote.out_amount.parse().unwrap_or(0.0);
                 let sol_value = out_lamports / 1_000_000_000.0;
@@ -295,7 +315,11 @@ async fn execute_paper_exit(
 
                 // Apply same sanity checks as real exits
                 let cost_for_chunk = signal.sol_spent * sell_fraction;
-                let effective_return_ratio = if cost_for_chunk > 0.0 { sol_value / cost_for_chunk } else { 1.0 };
+                let effective_return_ratio = if cost_for_chunk > 0.0 {
+                    sol_value / cost_for_chunk
+                } else {
+                    1.0
+                };
 
                 let is_take_profit = matches!(
                     signal.reason,
@@ -338,7 +362,8 @@ async fn execute_paper_exit(
                     error = %e,
                     "Paper exit: Jupiter quote failed — falling back to DexScreener price"
                 );
-                paper_exit_fallback_pricing(_cfg, jupiter, signal, sell_fraction, sim_total_fees).await
+                paper_exit_fallback_pricing(_cfg, jupiter, signal, sell_fraction, sim_total_fees)
+                    .await
             }
         }
     } else {
@@ -367,7 +392,11 @@ async fn execute_paper_exit(
     }
 
     // Use original sol_spent from DB (not signal.sol_spent which gets halved after TP1 partial exit)
-    let original_sol_spent = if pos_state.sol_spent > 0.0 { pos_state.sol_spent } else { signal.sol_spent };
+    let original_sol_spent = if pos_state.sol_spent > 0.0 {
+        pos_state.sol_spent
+    } else {
+        signal.sol_spent
+    };
 
     let prev_sol_received = pos_state.sol_received;
     let prev_pnl_sol = pos_state.pnl_sol;
@@ -408,10 +437,16 @@ async fn execute_paper_exit(
     // Write TP flags to DB only after confirmed sell
     match &signal.reason {
         crate::monitoring::types::ExitReason::TakeProfit1 => {
-            payload.as_object_mut().unwrap().insert("tp1_triggered".to_string(), serde_json::Value::Bool(true));
+            payload
+                .as_object_mut()
+                .unwrap()
+                .insert("tp1_triggered".to_string(), serde_json::Value::Bool(true));
         }
         crate::monitoring::types::ExitReason::TakeProfit2 => {
-            payload.as_object_mut().unwrap().insert("tp2_triggered".to_string(), serde_json::Value::Bool(true));
+            payload
+                .as_object_mut()
+                .unwrap()
+                .insert("tp2_triggered".to_string(), serde_json::Value::Bool(true));
         }
         _ => {}
     }
@@ -422,10 +457,10 @@ async fn execute_paper_exit(
             "exit_time".to_string(),
             serde_json::Value::String(now.clone()),
         );
-        payload.as_object_mut().unwrap().insert(
-            "closed_at".to_string(),
-            serde_json::Value::String(now),
-        );
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert("closed_at".to_string(), serde_json::Value::String(now));
         if let Some(hold_secs) = compute_hold_duration(&pos_state.created_at) {
             payload.as_object_mut().unwrap().insert(
                 "hold_duration_secs".to_string(),
@@ -463,7 +498,11 @@ async fn execute_paper_exit(
     update_daily_stats(supabase, daily_pnl_increment).await;
 
     // Log cost breakdown for paper exit (realistic: Jupiter quote + simulated fees)
-    let effective_slippage_bps = if used_jupiter_quote { quote_price_impact_bps } else { _cfg.strategy.execution.paper_slippage_bps as f64 };
+    let effective_slippage_bps = if used_jupiter_quote {
+        quote_price_impact_bps
+    } else {
+        _cfg.strategy.execution.paper_slippage_bps as f64
+    };
     let sol_at_no_slippage = if signal.entry_price_usd > 0.0 {
         signal.sol_spent * (signal.current_price / signal.entry_price_usd) * sell_fraction
     } else {
@@ -651,7 +690,10 @@ async fn execute_real_exit(
             token_amount = effective_token_amount,
             "Token amount overflow — aborting exit"
         );
-        return Err(anyhow::anyhow!("Token amount overflow: {}", effective_token_amount));
+        return Err(anyhow::anyhow!(
+            "Token amount overflow: {}",
+            effective_token_amount
+        ));
     }
 
     // token_amount is already in raw smallest units (e.g. pump.fun 6 decimals)
@@ -727,8 +769,20 @@ async fn execute_real_exit(
         let slippage_bps: u64 = match attempt {
             1 => cfg.strategy.execution.slippage_bps.max(2000),
             2 => 3500,
-            3 => if is_rug_confirmed_exit { 3500 } else { 6000 },
-            4 => if is_rug_confirmed_exit { 3500 } else { 9000 },
+            3 => {
+                if is_rug_confirmed_exit {
+                    3500
+                } else {
+                    6000
+                }
+            }
+            4 => {
+                if is_rug_confirmed_exit {
+                    3500
+                } else {
+                    9000
+                }
+            }
             _ => 9000, // emergency cap — never exceed 90%
         };
 
@@ -746,12 +800,7 @@ async fn execute_real_exit(
         let mut quote = None;
         for route_attempt in 1..=ROUTE_RETRIES {
             match jupiter
-                .get_quote(
-                    &signal.mint,
-                    sol_mint,
-                    tokens_to_sell,
-                    slippage_bps,
-                )
+                .get_quote(&signal.mint, sol_mint, tokens_to_sell, slippage_bps)
                 .await
             {
                 Ok(q) => {
@@ -776,13 +825,14 @@ async fn execute_real_exit(
                     );
                     last_exit_err = Some(e);
                     if route_attempt < ROUTE_RETRIES {
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                            ROUTE_RETRY_DELAY_MS,
-                        ))
-                        .await;
+                        tokio::time::sleep(std::time::Duration::from_millis(ROUTE_RETRY_DELAY_MS))
+                            .await;
                     }
                 }
-                Err(e) if e.to_string().contains("429") || e.to_string().contains("Too Many Requests") => {
+                Err(e)
+                    if e.to_string().contains("429")
+                        || e.to_string().contains("Too Many Requests") =>
+                {
                     warn!(
                         mint = %signal.mint,
                         attempt,
@@ -792,10 +842,8 @@ async fn execute_real_exit(
                     );
                     last_exit_err = Some(e);
                     if route_attempt < ROUTE_RETRIES {
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                            ROUTE_RETRY_DELAY_MS,
-                        ))
-                        .await;
+                        tokio::time::sleep(std::time::Duration::from_millis(ROUTE_RETRY_DELAY_MS))
+                            .await;
                     }
                 }
                 Err(e) => {
@@ -817,7 +865,7 @@ async fn execute_real_exit(
                 );
                 if attempt < EXIT_RETRIES {
                     tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms.max(100)))
-                    .await;
+                        .await;
                 }
                 continue;
             }
@@ -923,9 +971,8 @@ async fn execute_real_exit(
         } else {
             0.0
         };
-        let force_execute = max_realized_loss > 0.0
-            && realized_loss_pct > max_realized_loss
-            && is_protective_exit;
+        let force_execute =
+            max_realized_loss > 0.0 && realized_loss_pct > max_realized_loss && is_protective_exit;
 
         if force_execute {
             warn!(
@@ -964,18 +1011,16 @@ async fn execute_real_exit(
                 last_exit_err = Some(e);
                 if attempt < EXIT_RETRIES {
                     tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms.max(100)))
-                    .await;
+                        .await;
                 }
                 continue;
             }
         };
 
         // Step 3: Decode (no tip injection — Chainstack Warp handles routing)
-        let tx_bytes = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            &swap_tx_b64,
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to decode exit tx: {}", e))?;
+        let tx_bytes =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &swap_tx_b64)
+                .map_err(|e| anyhow::anyhow!("Failed to decode exit tx: {}", e))?;
 
         let mut versioned_tx: solana_sdk::transaction::VersionedTransaction =
             bincode::deserialize(&tx_bytes)
@@ -999,7 +1044,9 @@ async fn execute_real_exit(
 
         // Step 5: Submit (Helius Sender, Jito bundle, or regular RPC)
         let tx_sig = if cfg.env.use_helius_sender {
-            let hs = helius_sender.ok_or_else(|| anyhow::anyhow!("Warp TX sender enabled but client not initialized"))?;
+            let hs = helius_sender.ok_or_else(|| {
+                anyhow::anyhow!("Warp TX sender enabled but client not initialized")
+            })?;
 
             // Dual-submit: fire-and-forget same signed tx to backup RPC for redundancy.
             let backup_tx = signed_tx.clone();
@@ -1012,8 +1059,12 @@ async fn execute_real_exit(
                     ..Default::default()
                 };
                 match backup.send_transaction_with_config(&backup_tx, cfg).await {
-                    Ok(sig) => tracing::debug!(mint = %mint_log, sig = %sig, "📤 Exit dual-submit: backup RPC accepted"),
-                    Err(e) => tracing::debug!(mint = %mint_log, "Exit dual-submit backup failed (non-critical): {}", e),
+                    Ok(sig) => {
+                        tracing::debug!(mint = %mint_log, sig = %sig, "📤 Exit dual-submit: backup RPC accepted")
+                    }
+                    Err(e) => {
+                        tracing::debug!(mint = %mint_log, "Exit dual-submit backup failed (non-critical): {}", e)
+                    }
                 }
             });
 
@@ -1026,20 +1077,26 @@ async fn execute_real_exit(
                     warn!(mint = %signal.mint, attempt, "Exit Warp TX submission failed: {} — retrying", e);
                     last_exit_err = Some(e);
                     if attempt < EXIT_RETRIES {
-                        tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms.max(100)))
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            retry_delay_ms.max(100),
+                        ))
                         .await;
                     }
                     continue;
                 }
             }
         } else if cfg.env.use_jito {
-            match submit_exit_via_jito(cfg, wallet, signed_tx, &signal.mint, supabase, jito_client).await {
+            match submit_exit_via_jito(cfg, wallet, signed_tx, &signal.mint, supabase, jito_client)
+                .await
+            {
                 Ok(sig) => sig,
                 Err(e) => {
                     warn!(mint = %signal.mint, attempt, "Exit Jito submission failed: {} — retrying", e);
                     last_exit_err = Some(e);
                     if attempt < EXIT_RETRIES {
-                        tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms.max(100)))
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            retry_delay_ms.max(100),
+                        ))
                         .await;
                     }
                     continue;
@@ -1053,13 +1110,16 @@ async fn execute_real_exit(
                     // If primary RPC is rate-limited (429), try backup RPC
                     if err_str.contains("429") || err_str.contains("Too Many Requests") {
                         warn!(mint = %signal.mint, attempt, "Primary RPC 429 — trying backup RPC");
-                        match submit_exit_via_rpc(backup_rpc, &signed_tx, &signal.mint, true).await {
+                        match submit_exit_via_rpc(backup_rpc, &signed_tx, &signal.mint, true).await
+                        {
                             Ok(sig) => sig,
                             Err(e2) => {
                                 warn!(mint = %signal.mint, attempt, "Backup RPC also failed: {} — retrying", e2);
                                 last_exit_err = Some(e2);
                                 if attempt < EXIT_RETRIES {
-                                    tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms.max(100)))
+                                    tokio::time::sleep(std::time::Duration::from_millis(
+                                        retry_delay_ms.max(100),
+                                    ))
                                     .await;
                                 }
                                 continue;
@@ -1069,7 +1129,9 @@ async fn execute_real_exit(
                         warn!(mint = %signal.mint, attempt, "Exit RPC submission failed: {} — retrying", e);
                         last_exit_err = Some(e);
                         if attempt < EXIT_RETRIES {
-                            tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms.max(100)))
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                retry_delay_ms.max(100),
+                            ))
                             .await;
                         }
                         continue;
@@ -1080,7 +1142,8 @@ async fn execute_real_exit(
 
         // Step 6: Confirm
         let confirm_start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(cfg.strategy.execution.tx_confirm_timeout_secs);
+        let timeout =
+            std::time::Duration::from_secs(cfg.strategy.execution.tx_confirm_timeout_secs);
         let poll = std::time::Duration::from_millis(cfg.strategy.execution.tx_confirm_poll_ms);
         let mut confirmed = false;
 
@@ -1101,9 +1164,12 @@ async fn execute_real_exit(
                                     error = %err_str,
                                     "⏳ Exit tx confirmed with slippage error on-chain — re-quoting",
                                 );
-                                last_exit_err = Some(anyhow::anyhow!("Exit tx on-chain slippage: {}", err_str));
+                                last_exit_err =
+                                    Some(anyhow::anyhow!("Exit tx on-chain slippage: {}", err_str));
                                 if attempt < EXIT_RETRIES {
-                                    tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms.max(100)))
+                                    tokio::time::sleep(std::time::Duration::from_millis(
+                                        retry_delay_ms.max(100),
+                                    ))
                                     .await;
                                 }
                                 continue 'retry;
@@ -1121,10 +1187,11 @@ async fn execute_real_exit(
 
         if !confirmed {
             warn!(mint = %signal.mint, sig = %tx_sig, attempt, "⏰ Exit tx timed out — retrying with fresh quote");
-            last_exit_err = Some(anyhow::anyhow!("Exit tx timed out after confirmation period"));
+            last_exit_err = Some(anyhow::anyhow!(
+                "Exit tx timed out after confirmation period"
+            ));
             if attempt < EXIT_RETRIES {
-                tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms.max(100)))
-                .await;
+                tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms.max(100))).await;
             }
             continue;
         }
@@ -1142,9 +1209,8 @@ async fn execute_real_exit(
     let tx_sig = match final_tx_sig {
         Some(sig) => sig,
         None => {
-            return Err(last_exit_err.unwrap_or_else(|| {
-                anyhow::anyhow!("Exit failed after {} retries", EXIT_RETRIES)
-            }));
+            return Err(last_exit_err
+                .unwrap_or_else(|| anyhow::anyhow!("Exit failed after {} retries", EXIT_RETRIES)));
         }
     };
     let quote = final_quote.expect("quote must exist if tx_sig exists");
@@ -1185,7 +1251,9 @@ async fn execute_real_exit(
     // v5.2 fix: prefer confirmed tx metadata over a follow-up token-account
     // RPC read. Signature confirmation can arrive before account-index updates,
     // which still produces false `exit_failed` rows on successful sells.
-    let mut remaining_tokens = if let (Some(pre_tokens), Some(post_tokens)) = (tx_pre_tokens, tx_post_tokens) {
+    let mut remaining_tokens = if let (Some(pre_tokens), Some(post_tokens)) =
+        (tx_pre_tokens, tx_post_tokens)
+    {
         let wallet_tokens_sold = (pre_tokens - post_tokens).max(0.0);
         let scoped_tokens_sold = wallet_tokens_sold.min(effective_token_amount);
         if pre_tokens - effective_token_amount > 1.0 {
@@ -1205,7 +1273,11 @@ async fn execute_real_exit(
             Some(balance) => balance,
             None => {
                 let calc = effective_token_amount - final_tokens_sold as f64;
-                if calc < 0.0 { 0.0 } else { calc }
+                if calc < 0.0 {
+                    0.0
+                } else {
+                    calc
+                }
             }
         }
     };
@@ -1267,11 +1339,14 @@ async fn execute_real_exit(
     // "closed" positions with thousands of tokens still in wallet (F1pp
     // ASTEROID: bot filled 72%, recorded 100%; user then sold remainder
     // for 57x manually). Fix: always reconcile against the confirmed tx.
-    let actual_tokens_sold = if let (Some(pre_tokens), Some(post_tokens)) = (tx_pre_tokens, tx_post_tokens) {
-        (pre_tokens - post_tokens).max(0.0).min(effective_token_amount)
-    } else {
-        (effective_token_amount - remaining_tokens).max(0.0)
-    };
+    let actual_tokens_sold =
+        if let (Some(pre_tokens), Some(post_tokens)) = (tx_pre_tokens, tx_post_tokens) {
+            (pre_tokens - post_tokens)
+                .max(0.0)
+                .min(effective_token_amount)
+        } else {
+            (effective_token_amount - remaining_tokens).max(0.0)
+        };
     let quote_out_sol = quote.out_amount.parse::<f64>().unwrap_or(0.0) / 1_000_000_000.0;
     // If fill ratio is good (>=99% of requested), trust quote out_amount as
     // it's usually more accurate than wallet-delta-minus-fees. If partial,
@@ -1369,7 +1444,11 @@ async fn execute_real_exit(
     }
 
     // Use original sol_spent from DB (not signal.sol_spent which gets halved after TP1 partial exit)
-    let original_sol_spent = if pos_state.sol_spent > 0.0 { pos_state.sol_spent } else { signal.sol_spent };
+    let original_sol_spent = if pos_state.sol_spent > 0.0 {
+        pos_state.sol_spent
+    } else {
+        signal.sol_spent
+    };
 
     let prev_sol_received = pos_state.sol_received;
     let prev_pnl_sol = pos_state.pnl_sol;
@@ -1400,7 +1479,10 @@ async fn execute_real_exit(
         None => signal.reason.to_string(),
     };
     let exit_reason_str = if final_attempt > 1 {
-        format!("{} (attempt={}, slippage_bps={})", base_reason, final_attempt, final_slippage_bps)
+        format!(
+            "{} (attempt={}, slippage_bps={})",
+            base_reason, final_attempt, final_slippage_bps
+        )
     } else {
         base_reason
     };
@@ -1421,10 +1503,16 @@ async fn execute_real_exit(
     // Write TP flags to DB only after confirmed on-chain sell
     match &signal.reason {
         crate::monitoring::types::ExitReason::TakeProfit1 => {
-            payload.as_object_mut().unwrap().insert("tp1_triggered".to_string(), serde_json::Value::Bool(true));
+            payload
+                .as_object_mut()
+                .unwrap()
+                .insert("tp1_triggered".to_string(), serde_json::Value::Bool(true));
         }
         crate::monitoring::types::ExitReason::TakeProfit2 => {
-            payload.as_object_mut().unwrap().insert("tp2_triggered".to_string(), serde_json::Value::Bool(true));
+            payload
+                .as_object_mut()
+                .unwrap()
+                .insert("tp2_triggered".to_string(), serde_json::Value::Bool(true));
         }
         _ => {}
     }
@@ -1435,10 +1523,10 @@ async fn execute_real_exit(
             "exit_time".to_string(),
             serde_json::Value::String(now.clone()),
         );
-        payload.as_object_mut().unwrap().insert(
-            "closed_at".to_string(),
-            serde_json::Value::String(now),
-        );
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert("closed_at".to_string(), serde_json::Value::String(now));
         if let Some(hold_secs) = compute_hold_duration(&pos_state.created_at) {
             payload.as_object_mut().unwrap().insert(
                 "hold_duration_secs".to_string(),
@@ -1510,7 +1598,14 @@ async fn execute_real_exit(
     let daily_pnl_increment = total_pnl_sol - prev_pnl_sol;
 
     // Update in-memory trading state (instant — no network)
-    trading_state.record_exit(&signal.mint, signal.sol_spent, daily_pnl_increment, is_full_exit).await;
+    trading_state
+        .record_exit(
+            &signal.mint,
+            signal.sol_spent,
+            daily_pnl_increment,
+            is_full_exit,
+        )
+        .await;
 
     // Background: daily stats + latency log (don't block monitoring confirmation)
     let total_exit_ms = exit_start.elapsed().as_millis() as i64;
@@ -1525,7 +1620,8 @@ async fn execute_real_exit(
     let pre_exit_bal_bg = pre_exit_balance;
     let entry_sol_bg = original_sol_spent;
     let exit_price_bg = signal.current_price;
-    let exit_priority_fee_sol = solana_sdk::native_token::lamports_to_sol(final_priority_fee_lamports);
+    let exit_priority_fee_sol =
+        solana_sdk::native_token::lamports_to_sol(final_priority_fee_lamports);
     let exit_tip_sol = 0.0; // No tip injection with Chainstack Warp
     let is_helius_bg = cfg.env.use_helius_sender;
     tokio::spawn(async move {
@@ -1533,10 +1629,18 @@ async fn execute_real_exit(
 
         // Log balance event to Supabase
         if let Some(bal) = balance_bg {
-            log_exit_system_event(&supabase_bg, "balance_after_exit",
-                &format!("Mint: {} | SOL balance: {:.4} | PnL: {}{:.4} SOL",
-                    mint_bg, bal,
-                    if daily_pnl_increment >= 0.0 { "+" } else { "" }, daily_pnl_increment)).await;
+            log_exit_system_event(
+                &supabase_bg,
+                "balance_after_exit",
+                &format!(
+                    "Mint: {} | SOL balance: {:.4} | PnL: {}{:.4} SOL",
+                    mint_bg,
+                    bal,
+                    if daily_pnl_increment >= 0.0 { "+" } else { "" },
+                    daily_pnl_increment
+                ),
+            )
+            .await;
         }
 
         let latency_payload = serde_json::json!({
@@ -1556,7 +1660,8 @@ async fn execute_real_exit(
         // Log cost breakdown for real exit
         let network_fee = 0.000005_f64; // base tx fee
         let total_fees = network_fee + exit_priority_fee_sol + exit_tip_sol;
-        let wallet_change = balance_bg.and_then(|after| pre_exit_bal_bg.map(|before| after - before));
+        let wallet_change =
+            balance_bg.and_then(|after| pre_exit_bal_bg.map(|before| after - before));
         // Gross PnL = SOL received this exit - SOL fraction sold
         let gross_pnl = sol_received_this_exit - (entry_sol_bg * actual_sell_fraction);
         // Net PnL = gross - all exit fees (buy fees tracked separately)
@@ -1645,7 +1750,10 @@ struct PositionExitState {
     created_at: Option<String>,
 }
 
-async fn fetch_position_exit_state(supabase: &SupabaseClient, position_id: i64) -> PositionExitState {
+async fn fetch_position_exit_state(
+    supabase: &SupabaseClient,
+    position_id: i64,
+) -> PositionExitState {
     let url = format!(
         "{}/positions?id=eq.{}&select=sol_received,pnl_sol,sol_spent,status,created_at",
         supabase.base_url, position_id
@@ -1656,15 +1764,27 @@ async fn fetch_position_exit_state(supabase: &SupabaseClient, position_id: i64) 
             if let Some(row) = rows.first() {
                 let sol_received = row
                     .get("sol_received")
-                    .and_then(|v| v.as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| v.as_f64()))
+                    .and_then(|v| {
+                        v.as_str()
+                            .and_then(|s| s.parse::<f64>().ok())
+                            .or_else(|| v.as_f64())
+                    })
                     .unwrap_or(0.0);
                 let pnl_sol = row
                     .get("pnl_sol")
-                    .and_then(|v| v.as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| v.as_f64()))
+                    .and_then(|v| {
+                        v.as_str()
+                            .and_then(|s| s.parse::<f64>().ok())
+                            .or_else(|| v.as_f64())
+                    })
                     .unwrap_or(0.0);
                 let sol_spent = row
                     .get("sol_spent")
-                    .and_then(|v| v.as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| v.as_f64()))
+                    .and_then(|v| {
+                        v.as_str()
+                            .and_then(|s| s.parse::<f64>().ok())
+                            .or_else(|| v.as_f64())
+                    })
                     .unwrap_or(0.0);
                 let status = row
                     .get("status")
@@ -1675,14 +1795,35 @@ async fn fetch_position_exit_state(supabase: &SupabaseClient, position_id: i64) 
                     .get("created_at")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
-                PositionExitState { sol_received, pnl_sol, sol_spent, status, created_at }
+                PositionExitState {
+                    sol_received,
+                    pnl_sol,
+                    sol_spent,
+                    status,
+                    created_at,
+                }
             } else {
-                PositionExitState { sol_received: 0.0, pnl_sol: 0.0, sol_spent: 0.0, status: "unknown".to_string(), created_at: None }
+                PositionExitState {
+                    sol_received: 0.0,
+                    pnl_sol: 0.0,
+                    sol_spent: 0.0,
+                    status: "unknown".to_string(),
+                    created_at: None,
+                }
             }
         }
         _ => {
-            warn!(position_id, "Failed to fetch position exit state — defaulting");
-            PositionExitState { sol_received: 0.0, pnl_sol: 0.0, sol_spent: 0.0, status: "unknown".to_string(), created_at: None }
+            warn!(
+                position_id,
+                "Failed to fetch position exit state — defaulting"
+            );
+            PositionExitState {
+                sol_received: 0.0,
+                pnl_sol: 0.0,
+                sol_spent: 0.0,
+                status: "unknown".to_string(),
+                created_at: None,
+            }
         }
     }
 }
@@ -1692,7 +1833,9 @@ fn compute_hold_duration(created_at: &Option<String>) -> Option<i64> {
     created_at.as_ref().and_then(|ts| {
         chrono::DateTime::parse_from_rfc3339(ts)
             .ok()
-            .map(|entry_time| (chrono::Utc::now() - entry_time.with_timezone(&chrono::Utc)).num_seconds())
+            .map(|entry_time| {
+                (chrono::Utc::now() - entry_time.with_timezone(&chrono::Utc)).num_seconds()
+            })
     })
 }
 
@@ -1768,8 +1911,7 @@ async fn submit_exit_via_jito(
     let tip_sol = tip_lamports as f64 / 1_000_000_000.0;
     info!(mint = %mint, tip_sol = format!("{:.6}", tip_sol), "💰 Jito exit tip");
 
-    let tip_instruction =
-        JitoClient::create_tip_instruction(&wallet.pubkey(), tip_lamports)?;
+    let tip_instruction = JitoClient::create_tip_instruction(&wallet.pubkey(), tip_lamports)?;
 
     let recent_blockhash = signed_swap_tx.message.recent_blockhash();
     let tip_tx = Transaction::new_signed_with_payer(
@@ -1852,11 +1994,7 @@ async fn log_exit_system_event(supabase: &SupabaseClient, event_type: &str, mess
 
 /// Fetch the actual SPL token balance (raw smallest units) for a wallet+mint from chain.
 /// Used as a fallback when signal.token_amount is 0.
-async fn fetch_exit_token_balance(
-    rpc: &RpcClient,
-    wallet: &Pubkey,
-    mint_str: &str,
-) -> Option<f64> {
+async fn fetch_exit_token_balance(rpc: &RpcClient, wallet: &Pubkey, mint_str: &str) -> Option<f64> {
     let mint = Pubkey::from_str(mint_str).ok()?;
 
     let accounts = rpc
@@ -1870,8 +2008,7 @@ async fn fetch_exit_token_balance(
     let balance: f64 = accounts
         .iter()
         .filter_map(|account| {
-            let data: serde_json::Value =
-                serde_json::to_value(&account.account.data).ok()?;
+            let data: serde_json::Value = serde_json::to_value(&account.account.data).ok()?;
             data.get("parsed")
                 .and_then(|p| p.get("info"))
                 .and_then(|i| i.get("tokenAmount"))
@@ -1881,7 +2018,11 @@ async fn fetch_exit_token_balance(
         })
         .sum();
 
-    if balance > 0.0 { Some(balance) } else { None }
+    if balance > 0.0 {
+        Some(balance)
+    } else {
+        None
+    }
 }
 
 async fn fetch_confirmed_exit_outcome(
@@ -1903,7 +2044,10 @@ async fn fetch_confirmed_exit_outcome(
             tokio::time::sleep(std::time::Duration::from_millis(800)).await;
         }
 
-        match rpc.get_transaction_with_config(tx_sig, tx_config.clone()).await {
+        match rpc
+            .get_transaction_with_config(tx_sig, tx_config.clone())
+            .await
+        {
             Ok(resp) => {
                 tx_response = Some(resp);
                 break;
@@ -1931,13 +2075,11 @@ async fn fetch_confirmed_exit_outcome(
         .map(|keys| {
             keys.iter()
                 .filter_map(|key| {
-                    key.as_str()
-                        .map(|s| s.to_string())
-                        .or_else(|| {
-                            key.get("pubkey")
-                                .and_then(|p| p.as_str())
-                                .map(|s| s.to_string())
-                        })
+                    key.as_str().map(|s| s.to_string()).or_else(|| {
+                        key.get("pubkey")
+                            .and_then(|p| p.as_str())
+                            .map(|s| s.to_string())
+                    })
                 })
                 .collect()
         })
@@ -1999,24 +2141,25 @@ async fn fetch_confirmed_exit_outcome(
         .get("logMessages")
         .and_then(|v| v.as_array())
         .and_then(|logs| {
-            logs.iter().rev().filter_map(|log| log.as_str()).find_map(|log| {
-                log.strip_prefix(
-                    "Program return: JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4 ",
-                )
-                .and_then(|encoded| {
-                    base64::Engine::decode(
-                        &base64::engine::general_purpose::STANDARD,
-                        encoded,
-                    )
-                    .ok()
+            logs.iter()
+                .rev()
+                .filter_map(|log| log.as_str())
+                .find_map(|log| {
+                    log.strip_prefix("Program return: JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4 ")
+                        .and_then(|encoded| {
+                            base64::Engine::decode(
+                                &base64::engine::general_purpose::STANDARD,
+                                encoded,
+                            )
+                            .ok()
+                        })
+                        .and_then(|raw| {
+                            let bytes: [u8; 8] = raw.get(..8)?.try_into().ok()?;
+                            Some(solana_sdk::native_token::lamports_to_sol(
+                                u64::from_le_bytes(bytes),
+                            ))
+                        })
                 })
-                .and_then(|raw| {
-                    let bytes: [u8; 8] = raw.get(..8)?.try_into().ok()?;
-                    Some(solana_sdk::native_token::lamports_to_sol(
-                        u64::from_le_bytes(bytes),
-                    ))
-                })
-            })
         });
 
     let fee_sol = meta
@@ -2053,10 +2196,13 @@ async fn update_daily_stats(supabase: &SupabaseClient, pnl_sol: f64) {
     };
 
     let (new_total, new_won, new_lost, new_pnl) = if let Some(row) = existing.first() {
-        let prev_total = row.get("trades_total").and_then(|v| v.as_i64()).unwrap_or(0);
-        let prev_won   = row.get("trades_won").and_then(|v| v.as_i64()).unwrap_or(0);
-        let prev_lost  = row.get("trades_lost").and_then(|v| v.as_i64()).unwrap_or(0);
-        let prev_pnl   = row.get("pnl_sol").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let prev_total = row
+            .get("trades_total")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let prev_won = row.get("trades_won").and_then(|v| v.as_i64()).unwrap_or(0);
+        let prev_lost = row.get("trades_lost").and_then(|v| v.as_i64()).unwrap_or(0);
+        let prev_pnl = row.get("pnl_sol").and_then(|v| v.as_f64()).unwrap_or(0.0);
         (
             prev_total + 1,
             prev_won + if pnl_sol > 0.0 { 1 } else { 0 },
@@ -2083,11 +2229,21 @@ async fn update_daily_stats(supabase: &SupabaseClient, pnl_sol: f64) {
     let result = if existing.is_empty() {
         // INSERT new row
         let insert_url = format!("{}/daily_stats", supabase.base_url);
-        supabase.client.post(&insert_url).json(&payload).send().await
+        supabase
+            .client
+            .post(&insert_url)
+            .json(&payload)
+            .send()
+            .await
     } else {
         // PATCH existing row
         let patch_url = format!("{}/daily_stats?date=eq.{}", supabase.base_url, today);
-        supabase.client.patch(&patch_url).json(&payload).send().await
+        supabase
+            .client
+            .patch(&patch_url)
+            .json(&payload)
+            .send()
+            .await
     };
     match result {
         Ok(resp) if resp.status().is_success() => {

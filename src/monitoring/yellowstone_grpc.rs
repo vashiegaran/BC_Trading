@@ -48,8 +48,7 @@ use tracing::{debug, info, warn};
 use yellowstone_grpc_client::GeyserGrpcClient;
 use yellowstone_grpc_proto::geyser::{
     subscribe_update::UpdateOneof, CommitmentLevel, SubscribeRequest,
-    SubscribeRequestFilterAccounts, SubscribeRequestFilterTransactions,
-    SubscribeUpdate,
+    SubscribeRequestFilterAccounts, SubscribeRequestFilterTransactions, SubscribeUpdate,
 };
 
 use crate::detection::types::{DetectionSource, GraduatedToken, PipelineTiming};
@@ -71,8 +70,12 @@ const INITIAL_BACKOFF_SECS: u64 = 1;
 
 #[derive(Debug)]
 enum MuxCommand {
-    Subscribe { mint: String },
-    Unsubscribe { mint: String },
+    Subscribe {
+        mint: String,
+    },
+    Unsubscribe {
+        mint: String,
+    },
     /// Watch a dev wallet's token account for balance drops (rug detection).
     WatchDevWallet {
         mint: String,
@@ -102,7 +105,10 @@ impl YellowstonePriceHandle {
 
     /// Subscribe to dev wallet token account changes for rug detection.
     pub fn watch_dev_wallet(&self, mint: String, dev_token_account: String) {
-        let _ = self.tx.send(MuxCommand::WatchDevWallet { mint, dev_token_account });
+        let _ = self.tx.send(MuxCommand::WatchDevWallet {
+            mint,
+            dev_token_account,
+        });
     }
 }
 
@@ -119,8 +125,7 @@ struct MintState {
 fn derive_bonding_curve_pda(mint: &str) -> Option<(Pubkey, String)> {
     let mint_pk = Pubkey::from_str(mint).ok()?;
     let program = Pubkey::from_str(PUMPFUN_PROGRAM).ok()?;
-    let (pda, _) =
-        Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &program);
+    let (pda, _) = Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &program);
     let pda_str = pda.to_string();
     Some((pda, pda_str))
 }
@@ -173,7 +178,18 @@ async fn run_mux(
     let mut backoff = INITIAL_BACKOFF_SECS;
 
     loop {
-        match run_session(&config, &cache, &supabase, &mut active, &mut rx, &mut backoff, &graduation_tx, &bot_wallet).await {
+        match run_session(
+            &config,
+            &cache,
+            &supabase,
+            &mut active,
+            &mut rx,
+            &mut backoff,
+            &graduation_tx,
+            &bot_wallet,
+        )
+        .await
+        {
             Ok(()) => {
                 info!("yellowstone_grpc mux: control channel closed, exiting");
                 return;
@@ -352,8 +368,13 @@ where
     }
 
     // Filter #2: Dev wallet token accounts — detect rug-dumps in real time
-    let dev_ata_list: Vec<String> = active.values()
-        .filter_map(|s| s.dev_ata_bytes.as_ref().map(|b| bs58::encode(b).into_string()))
+    let dev_ata_list: Vec<String> = active
+        .values()
+        .filter_map(|s| {
+            s.dev_ata_bytes
+                .as_ref()
+                .map(|b| bs58::encode(b).into_string())
+        })
         .collect();
     if !dev_ata_list.is_empty() {
         accounts.insert(
@@ -401,7 +422,10 @@ where
     sink.send(req)
         .await
         .map_err(|e| anyhow::anyhow!("send subscribe: {}", e))?;
-    debug!(active = active.len(), "yellowstone_grpc mux: subscribe request sent");
+    debug!(
+        active = active.len(),
+        "yellowstone_grpc mux: subscribe request sent"
+    );
     Ok(())
 }
 
@@ -413,12 +437,22 @@ async fn handle_update(
     graduation_tx: &Option<mpsc::Sender<GraduatedToken>>,
     seen_graduation_mints: &mut HashSet<String>,
 ) {
-    let Some(oneof) = update.update_oneof else { return };
+    let Some(oneof) = update.update_oneof else {
+        return;
+    };
 
     let account_update = match oneof {
         UpdateOneof::Account(a) => a,
         UpdateOneof::Transaction(tx_update) => {
-            handle_transaction_update(tx_update, cache, supabase, active, graduation_tx, seen_graduation_mints).await;
+            handle_transaction_update(
+                tx_update,
+                cache,
+                supabase,
+                active,
+                graduation_tx,
+                seen_graduation_mints,
+            )
+            .await;
             return;
         }
         UpdateOneof::Ping(_) => {
@@ -431,18 +465,21 @@ async fn handle_update(
         }
     };
 
-    let Some(acc) = account_update.account else { return };
+    let Some(acc) = account_update.account else {
+        return;
+    };
 
     // Map pubkey (bytes) back to mint by scanning active state.
     // With 6 max positions this is trivially fast.
     let pubkey_bytes = acc.pubkey.as_slice();
 
     // Check if this is a dev wallet token account update (rug detection).
-    let dev_match = active.iter()
+    let dev_match = active
+        .iter()
         .find(|(_, st)| {
-            st.dev_ata_bytes.as_ref().map_or(false, |bytes| {
-                bytes.as_slice() == pubkey_bytes
-            })
+            st.dev_ata_bytes
+                .as_ref()
+                .map_or(false, |bytes| bytes.as_slice() == pubkey_bytes)
         })
         .map(|(m, _)| m.clone());
     if let Some(dev_mint) = dev_match {
@@ -588,8 +625,12 @@ async fn handle_transaction_update(
     graduation_tx: &Option<mpsc::Sender<GraduatedToken>>,
     seen_graduation_mints: &mut HashSet<String>,
 ) {
-    let Some(tx_info) = tx_update.transaction else { return };
-    let Some(tx) = &tx_info.transaction else { return };
+    let Some(tx_info) = tx_update.transaction else {
+        return;
+    };
+    let Some(tx) = &tx_info.transaction else {
+        return;
+    };
     let Some(msg) = &tx.message else { return };
     let Some(meta) = &tx_info.meta else { return };
 
@@ -617,11 +658,9 @@ async fn handle_transaction_update(
         if account_keys[prog_idx] != raydium_bytes {
             continue;
         }
-        let Some((mint_str, pool_str)) = extract_raydium_initialize2_pool_and_mint(
-            &account_keys,
-            &ix.accounts,
-            &ix.data,
-        ) else {
+        let Some((mint_str, pool_str)) =
+            extract_raydium_initialize2_pool_and_mint(&account_keys, &ix.accounts, &ix.data)
+        else {
             continue;
         };
 
@@ -754,8 +793,6 @@ async fn send_graduation_event(
 fn bs58_to_bytes(s: &str) -> Vec<u8> {
     bs58::decode(s).into_vec().unwrap_or_default()
 }
-
-
 
 /// Inject basic-auth credentials into an https URL (`https://host` ->
 /// `https://user:pass@host`). URL-encodes both components.

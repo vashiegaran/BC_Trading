@@ -103,14 +103,27 @@ pub async fn watch_trades(
             }
             // Write empty snapshot
             write_snapshot(
-                &supabase, position_id, &mint, poll_count,
-                0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0,
+                &supabase,
+                position_id,
+                &mint,
+                poll_count,
+                0,
+                0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0,
+                0,
                 &if consecutive_low_buyer_polls >= DEAD_INTEREST_CONSECUTIVE {
                     vec!["DeadInterest".to_string()]
                 } else {
                     vec![]
                 },
-            ).await;
+            )
+            .await;
             continue;
         }
 
@@ -121,14 +134,21 @@ pub async fn watch_trades(
         let total_vol = total_buy_vol + total_sell_vol;
 
         // Update peak tracking
-        let avg_buy = if buys.is_empty() { 0.0 } else { total_buy_vol / buys.len() as f64 };
-        if avg_buy > peak_avg_buy_sol { peak_avg_buy_sol = avg_buy; }
-        if total_vol > peak_volume_sol { peak_volume_sol = total_vol; }
+        let avg_buy = if buys.is_empty() {
+            0.0
+        } else {
+            total_buy_vol / buys.len() as f64
+        };
+        if avg_buy > peak_avg_buy_sol {
+            peak_avg_buy_sol = avg_buy;
+        }
+        if total_vol > peak_volume_sol {
+            peak_volume_sol = total_vol;
+        }
 
         // Count unique buyers this poll
-        let unique_buyers: std::collections::HashSet<&str> = buys.iter()
-            .map(|t| t.wallet.as_str())
-            .collect();
+        let unique_buyers: std::collections::HashSet<&str> =
+            buys.iter().map(|t| t.wallet.as_str()).collect();
 
         debug!(
             mint = %mint,
@@ -155,7 +175,11 @@ pub async fn watch_trades(
                 volume_sol = format!("{:.2}", whale.volume_sol),
                 "🐋 [OBSERVE] WHALE DUMP — single sell > {} SOL", WHALE_DUMP_SOL
             );
-            patterns_detected.push(format!("WhaleDump({:.2}sol,{})", whale.volume_sol, &whale.wallet[..8.min(whale.wallet.len())]));
+            patterns_detected.push(format!(
+                "WhaleDump({:.2}sol,{})",
+                whale.volume_sol,
+                &whale.wallet[..8.min(whale.wallet.len())]
+            ));
         }
 
         // ── Pattern 2: Sell Pressure (>70% sell volume) ──
@@ -192,19 +216,20 @@ pub async fn watch_trades(
             // ── Pattern 4: Stealth Dump (same wallet, 3+ sells in 2 min) ──
             {
                 let two_min_ago = chrono::Utc::now().timestamp_millis() - STEALTH_DUMP_WINDOW_MS;
-                let recent_sells: Vec<_> = sells.iter()
-                    .filter(|t| t.time_ms >= two_min_ago)
-                    .collect();
+                let recent_sells: Vec<_> =
+                    sells.iter().filter(|t| t.time_ms >= two_min_ago).collect();
 
                 let mut wallet_sell_counts: HashMap<&str, usize> = HashMap::new();
                 for s in &recent_sells {
                     *wallet_sell_counts.entry(s.wallet.as_str()).or_default() += 1;
                 }
 
-                if let Some((wallet, count)) = wallet_sell_counts.iter()
+                if let Some((wallet, count)) = wallet_sell_counts
+                    .iter()
                     .find(|(_, &c)| c >= STEALTH_DUMP_COUNT)
                 {
-                    let stealth_vol: f64 = recent_sells.iter()
+                    let stealth_vol: f64 = recent_sells
+                        .iter()
                         .filter(|t| t.wallet.as_str() == *wallet)
                         .map(|t| t.volume_sol)
                         .sum();
@@ -215,7 +240,8 @@ pub async fn watch_trades(
                         total_vol = format!("{:.2}", stealth_vol),
                         "🥷 [OBSERVE] STEALTH DUMP — {} sells in 2min from same wallet", count
                     );
-                    patterns_detected.push(format!("StealthDump({}sells,{:.2}sol)", count, stealth_vol));
+                    patterns_detected
+                        .push(format!("StealthDump({}sells,{:.2}sol)", count, stealth_vol));
                 }
             }
 
@@ -230,7 +256,10 @@ pub async fn watch_trades(
                         "💀 [OBSERVE] DEAD INTEREST — <{} unique buyers for {} polls",
                         DEAD_INTEREST_MIN_BUYERS, DEAD_INTEREST_CONSECUTIVE,
                     );
-                    patterns_detected.push(format!("DeadInterest({}polls)", consecutive_low_buyer_polls));
+                    patterns_detected.push(format!(
+                        "DeadInterest({}polls)",
+                        consecutive_low_buyer_polls
+                    ));
                 }
             } else {
                 consecutive_low_buyer_polls = 0;
@@ -255,21 +284,33 @@ pub async fn watch_trades(
         // ── Compute max single values for snapshot ──
         let max_buy_sol = buys.iter().map(|t| t.volume_sol).fold(0.0_f64, f64::max);
         let max_sell_sol = sells.iter().map(|t| t.volume_sol).fold(0.0_f64, f64::max);
-        let avg_sell = if sells.is_empty() { 0.0 } else { total_sell_vol / sells.len() as f64 };
-        let unique_sellers: std::collections::HashSet<&str> = sells.iter()
-            .map(|t| t.wallet.as_str())
-            .collect();
+        let avg_sell = if sells.is_empty() {
+            0.0
+        } else {
+            total_sell_vol / sells.len() as f64
+        };
+        let unique_sellers: std::collections::HashSet<&str> =
+            sells.iter().map(|t| t.wallet.as_str()).collect();
 
         // ── Write snapshot to Supabase ──
         write_snapshot(
-            &supabase, position_id, &mint, poll_count,
-            buys.len(), sells.len(),
-            total_buy_vol, total_sell_vol,
-            avg_buy, max_buy_sol,
-            avg_sell, max_sell_sol,
-            unique_buyers.len(), unique_sellers.len(),
+            &supabase,
+            position_id,
+            &mint,
+            poll_count,
+            buys.len(),
+            sells.len(),
+            total_buy_vol,
+            total_sell_vol,
+            avg_buy,
+            max_buy_sol,
+            avg_sell,
+            max_sell_sol,
+            unique_buyers.len(),
+            unique_sellers.len(),
             &patterns_detected,
-        ).await;
+        )
+        .await;
     }
 }
 

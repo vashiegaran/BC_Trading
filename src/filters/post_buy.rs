@@ -84,12 +84,14 @@ pub async fn verify(
         } else {
             res
         };
-        res.ok().map(|s| {
-            s.ui_amount.unwrap_or_else(|| {
-                let raw: f64 = s.amount.parse().unwrap_or(0.0);
-                raw / 10_f64.powi(s.decimals as i32)
+        res.ok()
+            .map(|s| {
+                s.ui_amount.unwrap_or_else(|| {
+                    let raw: f64 = s.amount.parse().unwrap_or(0.0);
+                    raw / 10_f64.powi(s.decimals as i32)
+                })
             })
-        }).filter(|&v| v > 0.0)
+            .filter(|&v| v > 0.0)
     };
 
     let mint_pubkey = match solana_sdk::pubkey::Pubkey::from_str(&mint) {
@@ -122,7 +124,9 @@ pub async fn verify(
         },
         async {
             let t = std::time::Instant::now();
-            let r = market_cap.check(&mint_pubkey, &cfg, prefetched_supply).await;
+            let r = market_cap
+                .check(&mint_pubkey, &cfg, prefetched_supply)
+                .await;
             (r.0, r.1, r.2, t.elapsed().as_millis() as u64)
         },
     );
@@ -163,7 +167,12 @@ pub async fn verify(
                 "post_buy_total_ms": post_buy_ms,
                 "post_buy_per_check": post_buy_per_check,
             });
-            let _ = supabase_bg.client.patch(&patch_url).json(&patch_payload).send().await;
+            let _ = supabase_bg
+                .client
+                .patch(&patch_url)
+                .json(&patch_payload)
+                .send()
+                .await;
         });
     }
 
@@ -195,7 +204,12 @@ pub async fn verify(
                 ),
             });
             let url = format!("{}/system_events", supabase_bg.base_url);
-            let _ = supabase_bg.client.post(&url).json(&summary_payload).send().await;
+            let _ = supabase_bg
+                .client
+                .post(&url)
+                .json(&summary_payload)
+                .send()
+                .await;
         });
     }
 
@@ -215,7 +229,12 @@ pub async fn verify(
                 "top_10_holder_pct": top_10_holder_pct,
                 "market_cap_usd": market_cap_usd,
             });
-            let _ = supabase_bg.client.patch(&patch_url).json(&patch_payload).send().await;
+            let _ = supabase_bg
+                .client
+                .patch(&patch_url)
+                .json(&patch_payload)
+                .send()
+                .await;
         });
     }
 
@@ -241,15 +260,17 @@ pub async fn verify(
                     reason = %reason,
                     "🚨 POST-BUY CRITICAL: GoPlus detected danger — triggering emergency exit"
                 );
-                let _ = alert_tx.send(PostBuyAlert {
-                    mint: mint.clone(),
-                    position_id,
-                    reason: format!("goplus_critical: {}", reason),
-                    entry_price_usd,
-                    sol_spent,
-                    token_amount,
-                    is_paper_trade,
-                }).await;
+                let _ = alert_tx
+                    .send(PostBuyAlert {
+                        mint: mint.clone(),
+                        position_id,
+                        reason: format!("goplus_critical: {}", reason),
+                        entry_price_usd,
+                        sol_spent,
+                        token_amount,
+                        is_paper_trade,
+                    })
+                    .await;
                 return;
             }
         }
@@ -267,15 +288,17 @@ pub async fn verify(
                     reason = %reason,
                     "🚨 POST-BUY CRITICAL: RugCheck detected authority not revoked — triggering emergency exit"
                 );
-                let _ = alert_tx.send(PostBuyAlert {
-                    mint: mint.clone(),
-                    position_id,
-                    reason: format!("rugcheck_critical: {}", reason),
-                    entry_price_usd,
-                    sol_spent,
-                    token_amount,
-                    is_paper_trade,
-                }).await;
+                let _ = alert_tx
+                    .send(PostBuyAlert {
+                        mint: mint.clone(),
+                        position_id,
+                        reason: format!("rugcheck_critical: {}", reason),
+                        entry_price_usd,
+                        sol_spent,
+                        token_amount,
+                        is_paper_trade,
+                    })
+                    .await;
                 return;
             }
         }
@@ -291,15 +314,17 @@ pub async fn verify(
                 rugcheck_score = score,
                 "🚨 POST-BUY CRITICAL: RugCheck score > 15,000 — triggering emergency exit"
             );
-            let _ = alert_tx.send(PostBuyAlert {
-                mint: mint.clone(),
-                position_id,
-                reason: format!("rugcheck_critical: score={:.0} > 15000", score),
-                entry_price_usd,
-                sol_spent,
-                token_amount,
-                is_paper_trade,
-            }).await;
+            let _ = alert_tx
+                .send(PostBuyAlert {
+                    mint: mint.clone(),
+                    position_id,
+                    reason: format!("rugcheck_critical: score={:.0} > 15000", score),
+                    entry_price_usd,
+                    sol_spent,
+                    token_amount,
+                    is_paper_trade,
+                })
+                .await;
             return;
         }
     }
@@ -329,15 +354,17 @@ pub async fn verify(
                 top_10 = top_10_holder_pct,
                 "🚨 POST-BUY CRITICAL: Top-10 holder concentration too high — triggering emergency exit"
             );
-            let _ = alert_tx.send(PostBuyAlert {
-                mint: mint.clone(),
-                position_id,
-                reason: format!("holders_critical: {}", fail_reason),
-                entry_price_usd,
-                sol_spent,
-                token_amount,
-                is_paper_trade,
-            }).await;
+            let _ = alert_tx
+                .send(PostBuyAlert {
+                    mint: mint.clone(),
+                    position_id,
+                    reason: format!("holders_critical: {}", fail_reason),
+                    entry_price_usd,
+                    sol_spent,
+                    token_amount,
+                    is_paper_trade,
+                })
+                .await;
             return;
         } else {
             // single_holder or min_holder_count — log as warning, do NOT exit

@@ -69,8 +69,5 @@ pub enum LogEvent {
     },
 
     /// Generic system event (startup, shutdown, error, alert, rpc_failover).
-    SystemEvent {
-        event_type: String,
-        message: String,
-    },
+    SystemEvent { event_type: String, message: String },
 }

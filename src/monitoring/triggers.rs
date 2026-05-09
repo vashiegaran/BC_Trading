@@ -38,7 +38,11 @@ pub struct PositionState {
 ///   4. TakeProfit1
 ///   5. TimeStop
 ///   6. VolumeDrop   (not implemented — requires volume data)
-pub fn check_triggers(pos: &PositionState, exit_cfg: &ExitConfig, suppress_trailing_stop: bool) -> Option<ExitSignal> {
+pub fn check_triggers(
+    pos: &PositionState,
+    exit_cfg: &ExitConfig,
+    suppress_trailing_stop: bool,
+) -> Option<ExitSignal> {
     // Low-liq overrides: use tighter params for positions in shallow pools
     let low_liq = pos.initial_liquidity_sol > 0.0
         && exit_cfg.low_liq_max_hold_seconds > 0
@@ -129,13 +133,12 @@ pub fn check_triggers(pos: &PositionState, exit_cfg: &ExitConfig, suppress_trail
         drawdown_pct >= 50.0
     } else {
         // Pre-TP1: original two-tier entry-based stop.
-        let effective_stop = if never_profitable && grace_elapsed
-            && exit_cfg.never_profitable_stop_loss_pct > 0.0
-        {
-            exit_cfg.never_profitable_stop_loss_pct
-        } else {
-            effective_stop_loss
-        };
+        let effective_stop =
+            if never_profitable && grace_elapsed && exit_cfg.never_profitable_stop_loss_pct > 0.0 {
+                exit_cfg.never_profitable_stop_loss_pct
+            } else {
+                effective_stop_loss
+            };
         pnl_pct <= -(effective_stop)
     };
 
@@ -239,7 +242,8 @@ pub fn check_triggers(pos: &PositionState, exit_cfg: &ExitConfig, suppress_trail
             let drawdown_pct = (pos.peak_price - pos.current_price) / pos.peak_price * 100.0;
             if drawdown_pct >= trail_pct {
                 // Post-TP1 floor: never sell remaining tokens below entry price
-                if pos.tp1_triggered && exit_cfg.trailing_stop_post_tp1_floor
+                if pos.tp1_triggered
+                    && exit_cfg.trailing_stop_post_tp1_floor
                     && pos.current_price < pos.entry_price_usd
                 {
                     // Price below entry — fire stop_loss instead of trailing,
@@ -264,10 +268,7 @@ pub fn check_triggers(pos: &PositionState, exit_cfg: &ExitConfig, suppress_trail
     }
 
     // 3. TakeProfit3: TP1 + TP2 triggered AND price >= entry * TP3 → sell 100%
-    if pos.tp1_triggered
-        && pos.tp2_triggered
-        && price_multiplier >= exit_cfg.tp3_multiplier
-    {
+    if pos.tp1_triggered && pos.tp2_triggered && price_multiplier >= exit_cfg.tp3_multiplier {
         return Some(ExitSignal {
             position_id: pos.position_id,
             mint: pos.mint.clone(),

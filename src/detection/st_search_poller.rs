@@ -20,14 +20,14 @@ use crate::sniper::solana_tracker::SolanaTrackerClient;
 const POLL_INTERVAL_SECS: u64 = 20;
 
 /// Run the search poller loop. Sends discovered tokens to the detection channel.
-pub async fn run(
-    tx: mpsc::Sender<GraduatedToken>,
-    api_key: Option<String>,
-) {
+pub async fn run(tx: mpsc::Sender<GraduatedToken>, api_key: Option<String>) {
     let client = SolanaTrackerClient::new(api_key);
     let mut seen: HashSet<String> = HashSet::new();
 
-    info!("ST search poller started (interval: {}s)", POLL_INTERVAL_SECS);
+    info!(
+        "ST search poller started (interval: {}s)",
+        POLL_INTERVAL_SECS
+    );
 
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(POLL_INTERVAL_SECS)).await;
@@ -83,7 +83,11 @@ pub async fn run(
                 symbol: result.symbol,
                 initial_liquidity_sol: result.liquidity_usd / 150.0, // rough estimate
                 creator_rebuy: false,
-                buy_sell_ratio: if result.sells > 0 { result.buys as f64 / result.sells as f64 } else { result.buys as f64 },
+                buy_sell_ratio: if result.sells > 0 {
+                    result.buys as f64 / result.sells as f64
+                } else {
+                    result.buys as f64
+                },
                 candidate_id: None,
                 sniper_features: None,
                 sniper_score: None,
@@ -98,7 +102,11 @@ pub async fn run(
         }
 
         if new_count > 0 {
-            info!(new = new_count, seen = seen.len(), "ST search discovered new tokens");
+            info!(
+                new = new_count,
+                seen = seen.len(),
+                "ST search discovered new tokens"
+            );
         }
 
         // Cap seen set to prevent unbounded growth (keep last 5000)

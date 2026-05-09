@@ -98,7 +98,11 @@ pub struct RugCheckReport {
     #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub markets: Vec<RugCheckMarket>,
     pub token: Option<RugCheckTokenInfo>,
-    #[serde(rename = "topHolders", default, deserialize_with = "deserialize_null_as_default")]
+    #[serde(
+        rename = "topHolders",
+        default,
+        deserialize_with = "deserialize_null_as_default"
+    )]
     pub top_holders: Vec<RugCheckHolder>,
     #[serde(default)]
     pub bundled: Option<bool>,

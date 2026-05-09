@@ -44,10 +44,7 @@ pub async fn run(tx: mpsc::Sender<GraduatedToken>, rpc_ws_url: String) {
     }
 }
 
-async fn connect_and_listen(
-    tx: &mpsc::Sender<GraduatedToken>,
-    rpc_ws_url: &str,
-) -> Result<()> {
+async fn connect_and_listen(tx: &mpsc::Sender<GraduatedToken>, rpc_ws_url: &str) -> Result<()> {
     let (ws_stream, _) = connect_async(rpc_ws_url)
         .await
         .context("Failed to connect to Solana RPC WebSocket")?;
@@ -72,7 +69,10 @@ async fn connect_and_listen(
         .await
         .context("Failed to send logsSubscribe message")?;
 
-    info!(program = RAYDIUM_AMM_V4, "Subscribed to Raydium AMM v4 logs");
+    info!(
+        program = RAYDIUM_AMM_V4,
+        "Subscribed to Raydium AMM v4 logs"
+    );
 
     while let Some(msg_result) = read.next().await {
         let msg = match msg_result {
@@ -97,15 +97,14 @@ async fn connect_and_listen(
         }
     }
 
-    Err(anyhow::anyhow!("Raydium WebSocket stream ended unexpectedly"))
+    Err(anyhow::anyhow!(
+        "Raydium WebSocket stream ended unexpectedly"
+    ))
 }
 
-async fn handle_log_message(
-    text: &str,
-    tx: &mpsc::Sender<GraduatedToken>,
-) -> Result<()> {
-    let v: serde_json::Value = serde_json::from_str(text)
-        .context("Invalid JSON from Raydium log")?;
+async fn handle_log_message(text: &str, tx: &mpsc::Sender<GraduatedToken>) -> Result<()> {
+    let v: serde_json::Value =
+        serde_json::from_str(text).context("Invalid JSON from Raydium log")?;
 
     // Skip subscription confirmation messages
     if v.get("result").is_some() && v.get("method").is_none() {
@@ -162,18 +161,20 @@ async fn handle_log_message(
 
     // Extract pool address from logs if available
     // Raydium logs the pool address in the format "Program log: amm_pool: <ADDRESS>"
-    let pool_address: Option<Pubkey> = logs
-        .iter()
-        .find_map(|log| {
-            let s = log.as_str()?;
-            if s.contains("amm_pool:") {
-                let parts: Vec<&str> = s.split("amm_pool:").collect();
-                parts.get(1)?.trim().split_whitespace().next()
-                    .and_then(|addr| Pubkey::from_str(addr).ok())
-            } else {
-                None
-            }
-        });
+    let pool_address: Option<Pubkey> = logs.iter().find_map(|log| {
+        let s = log.as_str()?;
+        if s.contains("amm_pool:") {
+            let parts: Vec<&str> = s.split("amm_pool:").collect();
+            parts
+                .get(1)?
+                .trim()
+                .split_whitespace()
+                .next()
+                .and_then(|addr| Pubkey::from_str(addr).ok())
+        } else {
+            None
+        }
+    });
 
     let now_ms = chrono::Utc::now().timestamp_millis();
 
@@ -192,8 +193,8 @@ async fn handle_log_message(
         buy_count: 0,
         sell_count: 0,
         trade_timestamps: vec![],
-        name: String::new(), // Unknown for direct Raydium detection
-        symbol: String::new(), // Unknown for direct Raydium detection
+        name: String::new(),        // Unknown for direct Raydium detection
+        symbol: String::new(),      // Unknown for direct Raydium detection
         initial_liquidity_sol: 0.0, // Unknown for direct Raydium detection
         creator_rebuy: false,
         buy_sell_ratio: 0.0,

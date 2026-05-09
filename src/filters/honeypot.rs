@@ -8,9 +8,9 @@ use solana_sdk::pubkey::Pubkey;
 use solana_sdk::transaction::Transaction;
 use tracing::{debug, warn};
 
-use crate::config::AppConfig;
 use super::rpc_fallback::is_rate_limited;
 use super::types::FilterResult;
+use crate::config::AppConfig;
 
 const CHECK_NAME: &str = "honeypot";
 const RPC_TIMEOUT: Duration = Duration::from_secs(5);
@@ -35,16 +35,8 @@ impl HoneypotFilter {
     ///
     /// Check 1 — Simulate a sell transaction (can the token actually be sold?)
     /// Check 2 — Verify the mint is owned by the standard SPL Token programme
-    pub async fn check(
-        &self,
-        mint: &Pubkey,
-        bot_wallet: &Pubkey,
-        cfg: &AppConfig,
-    ) -> FilterResult {
-        let rpc = RpcClient::new_with_timeout(
-            cfg.env.solana_rpc_url.clone(),
-            RPC_TIMEOUT,
-        );
+    pub async fn check(&self, mint: &Pubkey, bot_wallet: &Pubkey, cfg: &AppConfig) -> FilterResult {
+        let rpc = RpcClient::new_with_timeout(cfg.env.solana_rpc_url.clone(), RPC_TIMEOUT);
 
         let fallback_rpc_url = &cfg.env.solana_rpc_backup_url;
 
@@ -102,8 +94,8 @@ impl HoneypotFilter {
         let instruction = Instruction {
             program_id: spl_token_program,
             accounts: vec![
-                AccountMeta::new(ata, false),      // source ATA
-                AccountMeta::new(ata, false),       // destination (self — doesn't matter for simulation)
+                AccountMeta::new(ata, false),                 // source ATA
+                AccountMeta::new(ata, false), // destination (self — doesn't matter for simulation)
                 AccountMeta::new_readonly(*bot_wallet, true), // owner / signer
             ],
             data,
@@ -135,7 +127,10 @@ impl HoneypotFilter {
                     // "Blockhash not found" is a transient RPC issue, NOT
                     // a real honeypot signal — skip the simulation gracefully.
                     if err_str.contains("Blockhash not found") {
-                        tracing::warn!("honeypot: blockhash unavailable, skipping simulation mint={}", mint);
+                        tracing::warn!(
+                            "honeypot: blockhash unavailable, skipping simulation mint={}",
+                            mint
+                        );
                         return Ok(());
                     }
 
@@ -147,12 +142,10 @@ impl HoneypotFilter {
                         "insufficient funds",
                         "account not found",
                         "InvalidAccountData",
-                        "custom program error: 0x1",  // SPL: insufficient funds
+                        "custom program error: 0x1", // SPL: insufficient funds
                     ];
 
-                    let is_benign = benign_errors
-                        .iter()
-                        .any(|be| err_str.contains(be));
+                    let is_benign = benign_errors.iter().any(|be| err_str.contains(be));
 
                     if is_benign {
                         debug!(
@@ -166,15 +159,11 @@ impl HoneypotFilter {
                     // - "custom program error" (programme-level rejection)
                     // - "insufficient funds for rent" (account constraints)
                     // - Any "0x" programme error code
-                    let real_honeypot_errors = [
-                        "custom program error",
-                        "insufficient funds for rent",
-                        "0x",
-                    ];
+                    let real_honeypot_errors =
+                        ["custom program error", "insufficient funds for rent", "0x"];
 
-                    let is_real_honeypot = real_honeypot_errors
-                        .iter()
-                        .any(|re| err_str.contains(re));
+                    let is_real_honeypot =
+                        real_honeypot_errors.iter().any(|re| err_str.contains(re));
 
                     if is_real_honeypot {
                         return Err(format!("honeypot_sell_simulation_failed: {}", err_str));
@@ -198,20 +187,18 @@ impl HoneypotFilter {
 
                 // "Blockhash not found" is a transient RPC issue — skip gracefully.
                 if rpc_err.contains("Blockhash not found") {
-                    tracing::warn!("honeypot: blockhash unavailable, skipping simulation mint={}", mint);
+                    tracing::warn!(
+                        "honeypot: blockhash unavailable, skipping simulation mint={}",
+                        mint
+                    );
                     return Ok(());
                 }
 
                 // Only fail on errors that look like real honeypot signals.
-                let real_honeypot_errors = [
-                    "custom program error",
-                    "insufficient funds for rent",
-                    "0x",
-                ];
+                let real_honeypot_errors =
+                    ["custom program error", "insufficient funds for rent", "0x"];
 
-                let is_real_honeypot = real_honeypot_errors
-                    .iter()
-                    .any(|re| rpc_err.contains(re));
+                let is_real_honeypot = real_honeypot_errors.iter().any(|re| rpc_err.contains(re));
 
                 if is_real_honeypot {
                     warn!(
@@ -266,7 +253,8 @@ impl HoneypotFilter {
                 let err_str = format!("{}", e);
                 // Brand-new pump.fun tokens may not be indexed yet —
                 // AccountNotFound is NOT a honeypot signal.
-                if err_str.contains("AccountNotFound") || err_str.contains("could not find account") {
+                if err_str.contains("AccountNotFound") || err_str.contains("could not find account")
+                {
                     warn!(
                         mint = %mint,
                         "honeypot: mint account not found (likely brand-new token) — PASS"
@@ -274,7 +262,11 @@ impl HoneypotFilter {
                     return Ok(());
                 }
                 // Rate-limit / transient RPC errors are not the token's fault.
-                if is_rate_limited(&e) || err_str.contains("timeout") || err_str.contains("502") || err_str.contains("503") {
+                if is_rate_limited(&e)
+                    || err_str.contains("timeout")
+                    || err_str.contains("502")
+                    || err_str.contains("503")
+                {
                     warn!(
                         mint = %mint,
                         "honeypot: transient RPC error fetching mint account — PASS: {}",
@@ -311,20 +303,12 @@ impl HoneypotFilter {
 /// Derive the Associated Token Account (ATA) address for a wallet + mint.
 ///
 /// This is a pure derivation (no RPC call) using the standard PDA seeds.
-fn spl_associated_token_account(
-    wallet: &Pubkey,
-    mint: &Pubkey,
-    token_program: &Pubkey,
-) -> Pubkey {
+fn spl_associated_token_account(wallet: &Pubkey, mint: &Pubkey, token_program: &Pubkey) -> Pubkey {
     // The Associated Token Account Program ID
     let ata_program = Pubkey::from_str("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
         .expect("hardcoded ATA program ID is valid");
 
-    let seeds = &[
-        wallet.as_ref(),
-        token_program.as_ref(),
-        mint.as_ref(),
-    ];
+    let seeds = &[wallet.as_ref(), token_program.as_ref(), mint.as_ref()];
 
     let (ata, _bump) = Pubkey::find_program_address(seeds, &ata_program);
     ata

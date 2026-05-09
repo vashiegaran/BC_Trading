@@ -65,7 +65,7 @@ impl PriceFetcher {
             birdeye_client,
             birdeye_api_key,
             jupiter: JupiterClient::new(api_request_timeout_secs, max_retries),
-            last_known: Mutex::new(std::collections::HashMap::new()),  // (price, timestamp)
+            last_known: Mutex::new(std::collections::HashMap::new()), // (price, timestamp)
             failure_count: Mutex::new(std::collections::HashMap::new()),
             max_sane_price,
             max_price_change_ratio,
@@ -163,7 +163,8 @@ impl PriceFetcher {
             }
             Err(e) => {
                 // Try Birdeye if configured
-                if let (Some(client), Some(api_key)) = (&self.birdeye_client, &self.birdeye_api_key) {
+                if let (Some(client), Some(api_key)) = (&self.birdeye_client, &self.birdeye_api_key)
+                {
                     if let Ok(price) = self.fetch_birdeye(client, api_key, mint).await {
                         let validated = self.validate_price(price, last_known, mint);
                         // API succeeded — reset failure count
@@ -186,7 +187,10 @@ impl PriceFetcher {
                     );
                     0.0
                 } else {
-                    warn!(mint = mint, "Price fetch failed: {} — using last known price", e);
+                    warn!(
+                        mint = mint,
+                        "Price fetch failed: {} — using last known price", e
+                    );
                     last_known
                 }
             }
@@ -207,17 +211,27 @@ impl PriceFetcher {
     /// - If a last known price exists, the change must be < 1000%
     fn validate_price(&self, price: f64, last_known_price: f64, mint: &str) -> f64 {
         if price.is_nan() {
-            warn!(mint = mint, "price_sanity_check_failed: price is NaN, using last known price");
+            warn!(
+                mint = mint,
+                "price_sanity_check_failed: price is NaN, using last known price"
+            );
             return last_known_price;
         }
 
         if price.is_infinite() {
-            warn!(mint = mint, "price_sanity_check_failed: price is infinite, using last known price");
+            warn!(
+                mint = mint,
+                "price_sanity_check_failed: price is infinite, using last known price"
+            );
             return last_known_price;
         }
 
         if price <= 0.0 {
-            warn!(mint = mint, price, "price_sanity_check_failed: price is zero or negative, using last known price");
+            warn!(
+                mint = mint,
+                price,
+                "price_sanity_check_failed: price is zero or negative, using last known price"
+            );
             return last_known_price;
         }
 
@@ -243,12 +257,7 @@ impl PriceFetcher {
         price
     }
 
-    async fn fetch_birdeye(
-        &self,
-        client: &Client,
-        api_key: &str,
-        mint: &str,
-    ) -> Result<f64> {
+    async fn fetch_birdeye(&self, client: &Client, api_key: &str, mint: &str) -> Result<f64> {
         let resp = client
             .get(BIRDEYE_PRICE_URL)
             .header("X-API-KEY", api_key)
@@ -347,7 +356,11 @@ impl PriceFetcher {
         let probe_lamports: u64 = 1_000_000;
         let probe_sol: f64 = probe_lamports as f64 / 1_000_000_000.0;
 
-        let quote = self.jupiter.get_quote(SOL_MINT, mint, probe_lamports, 5000).await.ok()?;
+        let quote = self
+            .jupiter
+            .get_quote(SOL_MINT, mint, probe_lamports, 5000)
+            .await
+            .ok()?;
         let out_amount: f64 = quote.out_amount.parse().ok()?;
         if out_amount <= 0.0 {
             return None;

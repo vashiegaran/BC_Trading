@@ -160,10 +160,7 @@ impl BirdeyeClient {
 
     /// GET /defi/v3/token/top-traders — who profited most
     pub async fn top_traders(&self, mint: &str) -> Option<serde_json::Value> {
-        let url = format!(
-            "{}/defi/v3/token/top-traders?address={}",
-            BASE_URL, mint
-        );
+        let url = format!("{}/defi/v3/token/top-traders?address={}", BASE_URL, mint);
         self.get_json(&url).await
     }
 
@@ -175,10 +172,7 @@ impl BirdeyeClient {
 
     /// GET /v1/wallet/token_pnl — wallet PnL for smart wallets
     pub async fn wallet_pnl(&self, wallet: &str) -> Option<serde_json::Value> {
-        let url = format!(
-            "{}/v1/wallet/token_pnl?wallet={}",
-            BASE_URL, wallet
-        );
+        let url = format!("{}/v1/wallet/token_pnl?wallet={}", BASE_URL, wallet);
         self.get_json(&url).await
     }
 }

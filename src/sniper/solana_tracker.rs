@@ -75,19 +75,32 @@ impl SolanaTrackerClient {
         let risk = json.get("risk").or_else(|| json.get("risks"));
         if let Some(r) = risk {
             data.risk_score = r.get("score").and_then(|v| v.as_f64());
-            data.bundlers_pct = r.get("bundlers")
-                .and_then(|b| b.get("totalPercentage").or_else(|| b.get("percentage")).and_then(|v| v.as_f64()));
-            data.bundler_count = r.get("bundlers")
+            data.bundlers_pct = r.get("bundlers").and_then(|b| {
+                b.get("totalPercentage")
+                    .or_else(|| b.get("percentage"))
+                    .and_then(|v| v.as_f64())
+            });
+            data.bundler_count = r
+                .get("bundlers")
                 .and_then(|b| b.get("count").and_then(|v| v.as_u64()));
-            data.snipers_pct = r.get("snipers")
-                .and_then(|s| s.get("totalPercentage").or_else(|| s.get("percentage")).and_then(|v| v.as_f64()));
-            data.sniper_count = r.get("snipers")
+            data.snipers_pct = r.get("snipers").and_then(|s| {
+                s.get("totalPercentage")
+                    .or_else(|| s.get("percentage"))
+                    .and_then(|v| v.as_f64())
+            });
+            data.sniper_count = r
+                .get("snipers")
                 .and_then(|s| s.get("count").and_then(|v| v.as_u64()));
-            data.insiders_pct = r.get("insiders")
-                .and_then(|i| i.get("totalPercentage").or_else(|| i.get("percentage")).and_then(|v| v.as_f64()));
-            data.insider_count = r.get("insiders")
+            data.insiders_pct = r.get("insiders").and_then(|i| {
+                i.get("totalPercentage")
+                    .or_else(|| i.get("percentage"))
+                    .and_then(|v| v.as_f64())
+            });
+            data.insider_count = r
+                .get("insiders")
                 .and_then(|i| i.get("count").and_then(|v| v.as_u64()));
-            data.dev_pct = r.get("dev")
+            data.dev_pct = r
+                .get("dev")
                 .and_then(|d| d.get("percentage").and_then(|v| v.as_f64()));
             data.top10_pct = r.get("top10").and_then(|v| v.as_f64());
             data.rugged = r.get("rugged").and_then(|v| v.as_bool());
@@ -103,9 +116,18 @@ impl SolanaTrackerClient {
 
         // ── Top-level fields ──
         data.holders = json.get("holders").and_then(|v| v.as_u64());
-        data.total_buys = json.get("buys").or_else(|| json.get("totalBuys")).and_then(|v| v.as_u64());
-        data.total_sells = json.get("sells").or_else(|| json.get("totalSells")).and_then(|v| v.as_u64());
-        data.total_txns = json.get("txns").or_else(|| json.get("totalTxns")).and_then(|v| v.as_u64());
+        data.total_buys = json
+            .get("buys")
+            .or_else(|| json.get("totalBuys"))
+            .and_then(|v| v.as_u64());
+        data.total_sells = json
+            .get("sells")
+            .or_else(|| json.get("totalSells"))
+            .and_then(|v| v.as_u64());
+        data.total_txns = json
+            .get("txns")
+            .or_else(|| json.get("totalTxns"))
+            .and_then(|v| v.as_u64());
 
         // ── Pool data (first pool) ──
         if let Some(pools) = json.get("pools").and_then(|v| v.as_array()) {
@@ -127,9 +149,15 @@ impl SolanaTrackerClient {
                     }
                 }
                 // Deployer
-                data.deployer = pool.get("deployer").and_then(|v| v.as_str()).map(String::from);
+                data.deployer = pool
+                    .get("deployer")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
                 // Market (pumpfun, raydium, etc.)
-                data.market = pool.get("market").and_then(|v| v.as_str()).map(String::from);
+                data.market = pool
+                    .get("market")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
             }
         }
 
@@ -141,9 +169,11 @@ impl SolanaTrackerClient {
 
         // ── Price change events ──
         if let Some(events) = json.get("events") {
-            data.price_change_5m = events.get("5m")
+            data.price_change_5m = events
+                .get("5m")
                 .and_then(|e| e.get("priceChangePercentage").and_then(|v| v.as_f64()));
-            data.price_change_1h = events.get("1h")
+            data.price_change_1h = events
+                .get("1h")
                 .and_then(|e| e.get("priceChangePercentage").and_then(|v| v.as_f64()));
         }
 
@@ -185,18 +215,27 @@ impl SolanaTrackerClient {
         };
 
         let tokens = json.as_array()?;
-        let result: Vec<DeployerToken> = tokens.iter().filter_map(|t| {
-            let token = t.get("token")?;
-            Some(DeployerToken {
-                mint: token.get("mint")?.as_str()?.to_string(),
-                name: token.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                created_time: token.get("creation")
-                    .and_then(|c| c.get("created_time").and_then(|v| v.as_i64())),
-                rugged: t.get("risk")
-                    .and_then(|r| r.get("rugged").and_then(|v| v.as_bool()))
-                    .unwrap_or(false),
+        let result: Vec<DeployerToken> = tokens
+            .iter()
+            .filter_map(|t| {
+                let token = t.get("token")?;
+                Some(DeployerToken {
+                    mint: token.get("mint")?.as_str()?.to_string(),
+                    name: token
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    created_time: token
+                        .get("creation")
+                        .and_then(|c| c.get("created_time").and_then(|v| v.as_i64())),
+                    rugged: t
+                        .get("risk")
+                        .and_then(|r| r.get("rugged").and_then(|v| v.as_bool()))
+                        .unwrap_or(false),
+                })
             })
-        }).collect();
+            .collect();
 
         debug!(deployer = %deployer, token_count = result.len(), "Deployer tokens fetched");
         Some(result)
@@ -236,27 +275,62 @@ impl SolanaTrackerClient {
         };
 
         let data = json.get("data").and_then(|v| v.as_array())?;
-        let results: Vec<SearchResult> = data.iter().filter_map(|item| {
-            Some(SearchResult {
-                mint: item.get("mint")?.as_str()?.to_string(),
-                name: item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                symbol: item.get("symbol").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                pool_address: item.get("poolAddress").and_then(|v| v.as_str()).map(String::from),
-                liquidity_usd: item.get("liquidityUsd").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                market_cap_usd: item.get("marketCapUsd").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                holders: item.get("holders").and_then(|v| v.as_u64()).unwrap_or(0),
-                top10_pct: item.get("top10").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                volume_5m: item.get("volume_5m").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                buys: item.get("buys").and_then(|v| v.as_u64()).unwrap_or(0),
-                sells: item.get("sells").and_then(|v| v.as_u64()).unwrap_or(0),
-                deployer: item.get("deployer").and_then(|v| v.as_str()).map(String::from),
-                created_at_ms: item.get("createdAt").and_then(|v| v.as_i64()).unwrap_or(0),
-                risk_score: item.get("riskScore").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                has_socials: item.get("hasSocials").and_then(|v| v.as_bool()).unwrap_or(false),
+        let results: Vec<SearchResult> = data
+            .iter()
+            .filter_map(|item| {
+                Some(SearchResult {
+                    mint: item.get("mint")?.as_str()?.to_string(),
+                    name: item
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    symbol: item
+                        .get("symbol")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    pool_address: item
+                        .get("poolAddress")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    liquidity_usd: item
+                        .get("liquidityUsd")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0),
+                    market_cap_usd: item
+                        .get("marketCapUsd")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0),
+                    holders: item.get("holders").and_then(|v| v.as_u64()).unwrap_or(0),
+                    top10_pct: item.get("top10").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    volume_5m: item
+                        .get("volume_5m")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0),
+                    buys: item.get("buys").and_then(|v| v.as_u64()).unwrap_or(0),
+                    sells: item.get("sells").and_then(|v| v.as_u64()).unwrap_or(0),
+                    deployer: item
+                        .get("deployer")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    created_at_ms: item.get("createdAt").and_then(|v| v.as_i64()).unwrap_or(0),
+                    risk_score: item
+                        .get("riskScore")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0),
+                    has_socials: item
+                        .get("hasSocials")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                })
             })
-        }).collect();
+            .collect();
 
-        debug!(count = results.len(), "SolanaTracker search returned tokens");
+        debug!(
+            count = results.len(),
+            "SolanaTracker search returned tokens"
+        );
         Some(results)
     }
 
@@ -285,16 +359,31 @@ impl SolanaTrackerClient {
         };
 
         let trades_arr = json.get("trades").and_then(|v| v.as_array())?;
-        let trades: Vec<SolanaTrackerTrade> = trades_arr.iter().filter_map(|t| {
-            Some(SolanaTrackerTrade {
-                tx: t.get("tx").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                trade_type: t.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                volume_usd: t.get("volume").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                volume_sol: t.get("volumeSol").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                wallet: t.get("wallet").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                time_ms: t.get("time").and_then(|v| v.as_i64()).unwrap_or(0),
+        let trades: Vec<SolanaTrackerTrade> = trades_arr
+            .iter()
+            .filter_map(|t| {
+                Some(SolanaTrackerTrade {
+                    tx: t
+                        .get("tx")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    trade_type: t
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    volume_usd: t.get("volume").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    volume_sol: t.get("volumeSol").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    wallet: t
+                        .get("wallet")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    time_ms: t.get("time").and_then(|v| v.as_i64()).unwrap_or(0),
+                })
             })
-        }).collect();
+            .collect();
 
         debug!(mint = %mint, count = trades.len(), "SolanaTracker trades fetched");
         Some(trades)

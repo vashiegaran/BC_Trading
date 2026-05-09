@@ -25,7 +25,8 @@ impl SupabaseClient {
 
         headers.insert(
             "apikey",
-            HeaderValue::from_str(service_key).expect("INVALID SUPABASE_SERVICE_KEY: not valid as an HTTP header value"),
+            HeaderValue::from_str(service_key)
+                .expect("INVALID SUPABASE_SERVICE_KEY: not valid as an HTTP header value"),
         );
         headers.insert(
             AUTHORIZATION,
@@ -33,10 +34,7 @@ impl SupabaseClient {
                 .expect("INVALID SUPABASE_SERVICE_KEY: cannot build Authorization header"),
         );
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert(
-            "Prefer",
-            HeaderValue::from_static("return=minimal"),
-        );
+        headers.insert("Prefer", HeaderValue::from_static("return=minimal"));
 
         let client = Client::builder()
             .default_headers(headers)
@@ -57,21 +55,16 @@ impl SupabaseClient {
     /// Lightweight health-check: SELECT from `system_events` with limit 1.
     /// Panics with diagnostic info on failure.
     async fn test_connection(&self) {
-        let url = format!("{}{}",self.base_url, "/system_events?select=id&limit=1");
+        let url = format!("{}{}", self.base_url, "/system_events?select=id&limit=1");
 
-        let resp = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .unwrap_or_else(|e| {
-                panic!(
-                    "SUPABASE CONNECTION FAILED: could not reach `{}`.\n\
+        let resp = self.client.get(&url).send().await.unwrap_or_else(|e| {
+            panic!(
+                "SUPABASE CONNECTION FAILED: could not reach `{}`.\n\
                      Error: {}\n\
                      Check that SUPABASE_URL is correct and your network is available.",
-                    url, e
-                );
-            });
+                url, e
+            );
+        });
 
         let status = resp.status();
         if !status.is_success() {

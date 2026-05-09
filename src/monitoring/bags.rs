@@ -259,7 +259,10 @@ async fn poll_once(
                     launch.mint,
                     launch.creator_wallet,
                     launch.launch_signature,
-                    launch.symbol.clone().unwrap_or_else(|| "unknown".to_string()),
+                    launch
+                        .symbol
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string()),
                     launch.creator_funding_lamports as f64 / 1_000_000_000.0,
                 ),
             )
@@ -344,7 +347,9 @@ async fn detect_launch(
     }
 
     let logs = transaction_logs(&tx);
-    let is_launch = logs.iter().any(|line| line.contains("Instruction: InitializeVirtualPoolWithSplToken"))
+    let is_launch = logs
+        .iter()
+        .any(|line| line.contains("Instruction: InitializeVirtualPoolWithSplToken"))
         && logs.iter().any(|line| line.contains("Instruction: MintTo"))
         && logs.iter().any(|line| line.contains(BAGS_PROGRAM));
     if !is_launch {
@@ -368,7 +373,11 @@ async fn detect_launch(
     let minted_balance = post_balances
         .iter()
         .filter(|bal| bal.mint != WSOL_MINT)
-        .max_by(|lhs, rhs| lhs.ui_amount.partial_cmp(&rhs.ui_amount).unwrap_or(std::cmp::Ordering::Equal))
+        .max_by(|lhs, rhs| {
+            lhs.ui_amount
+                .partial_cmp(&rhs.ui_amount)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
         .cloned();
     let Some(minted_balance) = minted_balance else {
         return Ok(None);
@@ -418,19 +427,15 @@ async fn fetch_asset_metadata(
     rpc_url: &str,
     mint: &str,
 ) -> Result<(Option<String>, Option<String>)> {
-    let asset = rpc_call(
-        rpc_client,
-        rpc_url,
-        "getAsset",
-        json!({ "id": mint }),
-    )
-    .await;
+    let asset = rpc_call(rpc_client, rpc_url, "getAsset", json!({ "id": mint })).await;
 
     let Ok(asset) = asset else {
         return Ok((None, None));
     };
 
-    let metadata = asset.get("content").and_then(|content| content.get("metadata"));
+    let metadata = asset
+        .get("content")
+        .and_then(|content| content.get("metadata"));
     let name = metadata
         .and_then(|meta| meta.get("name"))
         .and_then(Value::as_str)
@@ -479,7 +484,11 @@ async fn upsert_launch(supabase: &SupabaseClient, launch: &DetectedLaunch) -> Re
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("bags_monitor: upsert bags_launches failed: HTTP {} — {}", status, body));
+        return Err(anyhow!(
+            "bags_monitor: upsert bags_launches failed: HTTP {} — {}",
+            status,
+            body
+        ));
     }
 
     Ok(())
@@ -496,14 +505,18 @@ async fn maybe_fire_watchworthy_shadow(
     }
 
     let age_secs = Utc::now().timestamp().saturating_sub(launch.launch_at_ts);
-    if age_secs > cfg.strategy.monitoring.bags_watchworthy_shadow_max_age_seconds as i64 {
+    if age_secs
+        > cfg
+            .strategy
+            .monitoring
+            .bags_watchworthy_shadow_max_age_seconds as i64
+    {
         return Ok(());
     }
 
     let existing_url = format!(
         "{}/bags_shadow_entries?select=id&mint=eq.{}&limit=1",
-        supabase.base_url,
-        launch.mint,
+        supabase.base_url, launch.mint,
     );
     let existing_resp = supabase
         .client
@@ -514,7 +527,11 @@ async fn maybe_fire_watchworthy_shadow(
     if !existing_resp.status().is_success() {
         let status = existing_resp.status();
         let body = existing_resp.text().await.unwrap_or_default();
-        return Err(anyhow!("bags_monitor: existing shadow query failed: HTTP {} — {}", status, body));
+        return Err(anyhow!(
+            "bags_monitor: existing shadow query failed: HTTP {} — {}",
+            status,
+            body
+        ));
     }
     let existing_rows: Vec<Value> = existing_resp
         .json()
@@ -559,14 +576,19 @@ async fn maybe_fire_watchworthy_shadow(
     .await;
 
     let tracker_cfg = ShadowTrackerConfig {
-        max_wait_secs: cfg.strategy.monitoring.bags_shadow_entry_price_max_wait_secs,
+        max_wait_secs: cfg
+            .strategy
+            .monitoring
+            .bags_shadow_entry_price_max_wait_secs,
         poll_interval_secs: cfg.strategy.monitoring.bags_shadow_poll_interval_secs,
         duration_secs: cfg.strategy.monitoring.bags_shadow_duration_secs,
     };
     let supabase_clone = supabase.clone();
     let price_fetcher = Arc::clone(price_fetcher);
     tokio::spawn(async move {
-        if let Err(e) = track_shadow_entry(tracker_cfg, supabase_clone, price_fetcher, trigger).await {
+        if let Err(e) =
+            track_shadow_entry(tracker_cfg, supabase_clone, price_fetcher, trigger).await
+        {
             warn!(error = %e, "bags_monitor: shadow tracker failed");
         }
     });
@@ -592,7 +614,11 @@ async fn fetch_creator_stats_snapshot(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("bags_monitor: creator stats snapshot failed: HTTP {} — {}", status, body));
+        return Err(anyhow!(
+            "bags_monitor: creator stats snapshot failed: HTTP {} — {}",
+            status,
+            body
+        ));
     }
     let rows: Vec<CreatorStatsLookupRow> = resp
         .json()
@@ -634,7 +660,11 @@ async fn insert_shadow_entry(supabase: &SupabaseClient, trigger: &ShadowTrigger)
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("bags_monitor: insert bags_shadow_entries failed: HTTP {} — {}", status, body));
+        return Err(anyhow!(
+            "bags_monitor: insert bags_shadow_entries failed: HTTP {} — {}",
+            status,
+            body
+        ));
     }
 
     Ok(())
@@ -646,11 +676,17 @@ async fn track_shadow_entry(
     price_fetcher: Arc<PriceFetcher>,
     trigger: ShadowTrigger,
 ) -> Result<()> {
-    let launch_age_secs = Utc::now().timestamp().saturating_sub(trigger.launch_at_ts).max(0) as u64;
+    let launch_age_secs = Utc::now()
+        .timestamp()
+        .saturating_sub(trigger.launch_at_ts)
+        .max(0) as u64;
     let mut waited = Duration::from_secs(launch_age_secs.min(tracker_cfg.max_wait_secs));
     let max_wait = Duration::from_secs(tracker_cfg.max_wait_secs);
     let retry_sleep = Duration::from_secs(10);
-    let patch_url = format!("{}/bags_shadow_entries?mint=eq.{}", supabase.base_url, trigger.mint);
+    let patch_url = format!(
+        "{}/bags_shadow_entries?mint=eq.{}",
+        supabase.base_url, trigger.mint
+    );
 
     let mut entry_price_usd = 0.0;
     while waited <= max_wait {
@@ -670,7 +706,12 @@ async fn track_shadow_entry(
             "completed_at": Utc::now().to_rfc3339(),
             "updated_at": Utc::now().to_rfc3339(),
         });
-        let _ = supabase.client.patch(&patch_url).json(&payload).send().await;
+        let _ = supabase
+            .client
+            .patch(&patch_url)
+            .json(&payload)
+            .send()
+            .await;
         return Ok(());
     }
 
@@ -680,7 +721,12 @@ async fn track_shadow_entry(
         "status_message": "Tracking 15m/1h/peak outcomes",
         "updated_at": Utc::now().to_rfc3339(),
     });
-    let _ = supabase.client.patch(&patch_url).json(&payload).send().await;
+    let _ = supabase
+        .client
+        .patch(&patch_url)
+        .json(&payload)
+        .send()
+        .await;
 
     let started = Instant::now();
     let mut price_15m_usd: Option<f64> = None;
@@ -722,7 +768,12 @@ async fn track_shadow_entry(
         "completed_at": Utc::now().to_rfc3339(),
         "updated_at": Utc::now().to_rfc3339(),
     });
-    let _ = supabase.client.patch(&patch_url).json(&final_payload).send().await;
+    let _ = supabase
+        .client
+        .patch(&patch_url)
+        .json(&final_payload)
+        .send()
+        .await;
 
     Ok(())
 }
@@ -751,7 +802,11 @@ async fn score_pending_launches(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("bags_monitor: pending launches query failed: HTTP {} — {}", status, body));
+        return Err(anyhow!(
+            "bags_monitor: pending launches query failed: HTTP {} — {}",
+            status,
+            body
+        ));
     }
 
     let pending: Vec<PendingLaunchRow> = resp
@@ -782,7 +837,7 @@ async fn score_pending_launches(
             && demand.buy_volume_sol >= cfg.strategy.monitoring.bags_real_demand_min_buy_volume_sol;
 
         patch_launch_demand(supabase, &launch.mint, &demand, has_real_demand, cfg).await?;
-    patch_shadow_demand(supabase, &launch.mint, &demand, has_real_demand).await?;
+        patch_shadow_demand(supabase, &launch.mint, &demand, has_real_demand).await?;
         creators_to_refresh.insert(launch.creator_wallet.clone());
 
         log_event(
@@ -838,7 +893,11 @@ async fn patch_launch_demand(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("bags_monitor: patch bags_launches failed: HTTP {} — {}", status, body));
+        return Err(anyhow!(
+            "bags_monitor: patch bags_launches failed: HTTP {} — {}",
+            status,
+            body
+        ));
     }
 
     Ok(())
@@ -851,10 +910,12 @@ async fn score_launch_demand(
     launch_ts: i64,
     demand_window_secs: i64,
 ) -> Result<DemandStats> {
-    let pool_owner = launch
-        .pool_owner_wallet
-        .clone()
-        .ok_or_else(|| anyhow!("bags_monitor: missing pool_owner_wallet for mint {}", launch.mint))?;
+    let pool_owner = launch.pool_owner_wallet.clone().ok_or_else(|| {
+        anyhow!(
+            "bags_monitor: missing pool_owner_wallet for mint {}",
+            launch.mint
+        )
+    })?;
     let window_end = launch_ts + demand_window_secs;
     let signatures = fetch_signatures_for_address_window(
         rpc_client,
@@ -890,12 +951,9 @@ async fn score_launch_demand(
             continue;
         }
 
-        if let Some((buyers, pool_wsol_delta)) = demand_buyers_from_transaction(
-            &tx,
-            &launch.mint,
-            &launch.creator_wallet,
-            &pool_owner,
-        ) {
+        if let Some((buyers, pool_wsol_delta)) =
+            demand_buyers_from_transaction(&tx, &launch.mint, &launch.creator_wallet, &pool_owner)
+        {
             stats.buy_tx_count += 1;
             stats.buy_volume_sol += pool_wsol_delta;
             stats.peak_single_buy_sol = stats.peak_single_buy_sol.max(pool_wsol_delta);
@@ -931,8 +989,8 @@ async fn fetch_signatures_for_address_window(
             json!([address, cfg]),
         )
         .await?;
-        let page: Vec<SignatureInfo> = serde_json::from_value(page_value)
-            .context("bags_monitor: decode mint signatures")?;
+        let page: Vec<SignatureInfo> =
+            serde_json::from_value(page_value).context("bags_monitor: decode mint signatures")?;
         if page.is_empty() {
             break;
         }
@@ -986,8 +1044,12 @@ fn demand_buyers_from_transaction(
             continue;
         }
 
-        let pre = *pre_map.get(&(owner.clone(), token_mint.clone())).unwrap_or(&0.0);
-        let post = *post_map.get(&(owner.clone(), token_mint.clone())).unwrap_or(&0.0);
+        let pre = *pre_map
+            .get(&(owner.clone(), token_mint.clone()))
+            .unwrap_or(&0.0);
+        let post = *post_map
+            .get(&(owner.clone(), token_mint.clone()))
+            .unwrap_or(&0.0);
         if post > pre {
             buyers.insert(owner);
         }
@@ -1037,7 +1099,11 @@ async fn refresh_creator_stats(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("bags_monitor: creator launches query failed: HTTP {} — {}", status, body));
+        return Err(anyhow!(
+            "bags_monitor: creator launches query failed: HTTP {} — {}",
+            status,
+            body
+        ));
     }
     let launches: Vec<CreatorLaunchRow> = resp
         .json()
@@ -1080,7 +1146,8 @@ async fn refresh_creator_stats(
         .rev()
         .find(|row| row.has_real_demand.unwrap_or(false))
         .map(|row| row.launch_at.clone());
-    let watchworthy = launch_count as usize >= cfg.strategy.monitoring.bags_creator_watch_min_launches
+    let watchworthy = launch_count as usize
+        >= cfg.strategy.monitoring.bags_creator_watch_min_launches
         && demand_rate >= cfg.strategy.monitoring.bags_creator_watch_min_demand_rate;
 
     let row = CreatorStatsRow {
@@ -1098,7 +1165,10 @@ async fn refresh_creator_stats(
         updated_at: Utc::now().to_rfc3339(),
     };
 
-    let url = format!("{}/bags_creator_stats?on_conflict=creator_wallet", supabase.base_url);
+    let url = format!(
+        "{}/bags_creator_stats?on_conflict=creator_wallet",
+        supabase.base_url
+    );
     let resp = supabase
         .client
         .post(&url)
@@ -1110,7 +1180,11 @@ async fn refresh_creator_stats(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("bags_monitor: upsert bags_creator_stats failed: HTTP {} — {}", status, body));
+        return Err(anyhow!(
+            "bags_monitor: upsert bags_creator_stats failed: HTTP {} — {}",
+            status,
+            body
+        ));
     }
 
     debug!(
@@ -1142,13 +1216,22 @@ async fn rpc_call(client: &Client, rpc_url: &str, method: &str, params: Value) -
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(anyhow!("bags_monitor: RPC {} returned HTTP {} — {}", method, status, body));
+        return Err(anyhow!(
+            "bags_monitor: RPC {} returned HTTP {} — {}",
+            method,
+            status,
+            body
+        ));
     }
 
     let value: Value = serde_json::from_str(&body)
         .with_context(|| format!("bags_monitor: RPC {} invalid JSON", method))?;
     if let Some(error) = value.get("error") {
-        return Err(anyhow!("bags_monitor: RPC {} returned error {}", method, error));
+        return Err(anyhow!(
+            "bags_monitor: RPC {} returned error {}",
+            method,
+            error
+        ));
     }
 
     value
@@ -1244,8 +1327,12 @@ fn sum_system_transfers(tx: &Value, source: &str, destination: &str) -> u64 {
 fn find_transfer_source_to_bags(tx: &Value, destination: &str) -> Option<String> {
     let mut source: Option<String> = None;
     collect_transfer_instructions(tx, |info| {
-        if source.is_none() && info.get("destination").and_then(Value::as_str) == Some(destination) {
-            source = info.get("source").and_then(Value::as_str).map(ToOwned::to_owned);
+        if source.is_none() && info.get("destination").and_then(Value::as_str) == Some(destination)
+        {
+            source = info
+                .get("source")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
         }
     });
     source
@@ -1338,7 +1425,11 @@ async fn patch_shadow_demand(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("bags_monitor: patch bags_shadow_entries failed: HTTP {} — {}", status, body));
+        return Err(anyhow!(
+            "bags_monitor: patch bags_shadow_entries failed: HTTP {} — {}",
+            status,
+            body
+        ));
     }
 
     Ok(())

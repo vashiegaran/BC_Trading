@@ -5,9 +5,9 @@ use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use tracing::{debug, warn};
 
-use crate::config::AppConfig;
 use super::rpc_fallback::is_rate_limited;
 use super::types::FilterResult;
+use crate::config::AppConfig;
 
 const CHECK_NAME: &str = "token_safety";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
@@ -35,10 +35,7 @@ impl TokenSafetyFilter {
             }
         };
 
-        let rpc = RpcClient::new_with_timeout(
-            cfg.env.solana_rpc_url.clone(),
-            REQUEST_TIMEOUT,
-        );
+        let rpc = RpcClient::new_with_timeout(cfg.env.solana_rpc_url.clone(), REQUEST_TIMEOUT);
 
         let account_data = match rpc.get_account_data(&mint_pubkey).await {
             Ok(data) => data,
@@ -71,13 +68,20 @@ impl TokenSafetyFilter {
         // COption tag: 0 = None, 1 = Some
 
         if account_data.len() < 82 {
-            warn!(mint, len = account_data.len(), "token_safety: mint account too short — passing through");
+            warn!(
+                mint,
+                len = account_data.len(),
+                "token_safety: mint account too short — passing through"
+            );
             return FilterResult::pass(CHECK_NAME);
         }
 
         // Check mint authority (bytes 0..4 = COption tag)
         let mint_auth_tag = u32::from_le_bytes([
-            account_data[0], account_data[1], account_data[2], account_data[3],
+            account_data[0],
+            account_data[1],
+            account_data[2],
+            account_data[3],
         ]);
         if mint_auth_tag == 1 {
             let mint_auth = Pubkey::try_from(&account_data[4..36]).unwrap_or_default();
@@ -91,7 +95,10 @@ impl TokenSafetyFilter {
 
         // Check freeze authority (bytes 46..50 = COption tag)
         let freeze_auth_tag = u32::from_le_bytes([
-            account_data[46], account_data[47], account_data[48], account_data[49],
+            account_data[46],
+            account_data[47],
+            account_data[48],
+            account_data[49],
         ]);
         if freeze_auth_tag == 1 {
             let freeze_auth = Pubkey::try_from(&account_data[50..82]).unwrap_or_default();

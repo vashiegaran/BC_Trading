@@ -22,7 +22,7 @@ use tracing::{debug, info, warn};
 use crate::config::AppConfig;
 use crate::detection::types::{DetectionSource, GraduatedToken, PipelineTiming};
 use crate::execution::jupiter::JupiterClient;
-use crate::filters::types::{FilteredToken, FilterSummary};
+use crate::filters::types::{FilterSummary, FilteredToken};
 use crate::logger::SupabaseClient;
 use crate::narrative::{self, NarrativeContext, NarrativeResult};
 use solana_sdk::pubkey::Pubkey;
@@ -206,13 +206,7 @@ async fn run_evaluator(
 
     loop {
         // 1. Enqueue newly-closed positions
-        if let Err(e) = enqueue_new_closed(
-            &supabase,
-            &cfg,
-            &mut tracked,
-            &mut seen_positions,
-        )
-        .await
+        if let Err(e) = enqueue_new_closed(&supabase, &cfg, &mut tracked, &mut seen_positions).await
         {
             warn!("Re-entry enqueue poll failed: {}", e);
         }
@@ -325,7 +319,9 @@ async fn enqueue_new_closed(
                 exit_was_profitable: profitable,
                 attempts: 0,
                 previous_score: None,
-                entry_bc_score: row.sniper_features.as_ref()
+                entry_bc_score: row
+                    .sniper_features
+                    .as_ref()
                     .and_then(|f| f.get("bc_score").and_then(|v| v.as_f64())),
             },
         );
@@ -493,7 +489,10 @@ async fn evaluate_candidate(
         Ok(resp) => {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            warn!("reentry_candidates insert failed: HTTP {} — {}", status, body);
+            warn!(
+                "reentry_candidates insert failed: HTTP {} — {}",
+                status, body
+            );
         }
         Err(e) => warn!("reentry_candidates insert failed: {}", e),
     }
@@ -675,7 +674,10 @@ async fn backfill_outcomes_once(
             } else {
                 0.0
             };
-            patch.insert("hypothetical_pnl_6h_pct".to_string(), serde_json::json!(pnl));
+            patch.insert(
+                "hypothetical_pnl_6h_pct".to_string(),
+                serde_json::json!(pnl),
+            );
             patch.insert("peak_price_6h".to_string(), serde_json::json!(current));
             patch.insert(
                 "outcome_checked_at".to_string(),

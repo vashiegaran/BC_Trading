@@ -6,8 +6,8 @@ use reqwest::Client;
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
-use crate::config::AppConfig;
 use super::types::FilterResult;
+use crate::config::AppConfig;
 
 const CHECK_NAME: &str = "goplus";
 const GOPLUS_BASE_URL: &str = "https://api.gopluslabs.io/api/v1/solana/token_security";

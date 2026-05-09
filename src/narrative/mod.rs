@@ -96,7 +96,9 @@ pub struct NarrativeResult {
     pub diamond_ratio: f64,
 }
 
-fn default_diamond_ratio() -> f64 { -1.0 }
+fn default_diamond_ratio() -> f64 {
+    -1.0
+}
 
 /// Input context passed to the narrative checker.
 #[derive(Debug, Clone)]
@@ -216,9 +218,21 @@ async fn fetch_dexscreener(client: &reqwest::Client, mint: &str) -> DexScreenerD
             .map(|arr| {
                 arr.iter()
                     .filter_map(|s| {
-                        let stype = s.get("type").and_then(|t| t.as_str()).unwrap_or("unknown").to_string();
-                        let url = s.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string();
-                        if url.is_empty() { None } else { Some((stype, url)) }
+                        let stype = s
+                            .get("type")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let url = s
+                            .get("url")
+                            .and_then(|u| u.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if url.is_empty() {
+                            None
+                        } else {
+                            Some((stype, url))
+                        }
                     })
                     .collect()
             })
@@ -230,9 +244,21 @@ async fn fetch_dexscreener(client: &reqwest::Client, mint: &str) -> DexScreenerD
             .map(|arr| {
                 arr.iter()
                     .filter_map(|w| {
-                        let label = w.get("label").and_then(|l| l.as_str()).unwrap_or("Website").to_string();
-                        let url = w.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string();
-                        if url.is_empty() { None } else { Some((label, url)) }
+                        let label = w
+                            .get("label")
+                            .and_then(|l| l.as_str())
+                            .unwrap_or("Website")
+                            .to_string();
+                        let url = w
+                            .get("url")
+                            .and_then(|u| u.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if url.is_empty() {
+                            None
+                        } else {
+                            Some((label, url))
+                        }
                     })
                     .collect()
             })
@@ -257,12 +283,19 @@ struct BirdeyePreFilter {
     fetched: bool,
 }
 
-async fn fetch_birdeye_overview(client: &reqwest::Client, api_key: &str, mint: &str) -> BirdeyePreFilter {
+async fn fetch_birdeye_overview(
+    client: &reqwest::Client,
+    api_key: &str,
+    mint: &str,
+) -> BirdeyePreFilter {
     if api_key.is_empty() {
         return BirdeyePreFilter::default();
     }
 
-    let url = format!("https://public-api.birdeye.so/defi/token_overview?address={}", mint);
+    let url = format!(
+        "https://public-api.birdeye.so/defi/token_overview?address={}",
+        mint
+    );
     let resp = match client
         .get(&url)
         .header("X-API-KEY", api_key)
@@ -290,9 +323,21 @@ async fn fetch_birdeye_overview(client: &reqwest::Client, api_key: &str, mint: &
     let data = json.get("data").unwrap_or(&json);
 
     let ext = data.get("extensions");
-    let twitter = ext.and_then(|e| e.get("twitter")).and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let telegram = ext.and_then(|e| e.get("telegram")).and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let website = ext.and_then(|e| e.get("website")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let twitter = ext
+        .and_then(|e| e.get("twitter"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let telegram = ext
+        .and_then(|e| e.get("telegram"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let website = ext
+        .and_then(|e| e.get("website"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
 
     BirdeyePreFilter {
         has_twitter: !twitter.is_empty(),
@@ -301,7 +346,10 @@ async fn fetch_birdeye_overview(client: &reqwest::Client, api_key: &str, mint: &
         twitter_url: twitter,
         telegram_url: telegram,
         website_url: website,
-        unique_wallets_24h: data.get("uniqueWallet24h").and_then(|v| v.as_u64()).unwrap_or(0),
+        unique_wallets_24h: data
+            .get("uniqueWallet24h")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
         holders: data.get("holder").and_then(|v| v.as_u64()).unwrap_or(0),
         buy_24h: data.get("buy24h").and_then(|v| v.as_u64()).unwrap_or(0),
         sell_24h: data.get("sell24h").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -406,7 +454,10 @@ fn extract_tweet_id(url: &str) -> Option<String> {
         return None;
     }
     let after_status = url.split("/status/").nth(1)?;
-    let id = after_status.split(&['/', '?', '#'][..]).next().unwrap_or("");
+    let id = after_status
+        .split(&['/', '?', '#'][..])
+        .next()
+        .unwrap_or("");
     if id.is_empty() || !id.chars().all(|c| c.is_ascii_digit()) {
         return None;
     }
@@ -415,7 +466,10 @@ fn extract_tweet_id(url: &str) -> Option<String> {
 
 /// Find the first tweet URL in social links. Returns (tweet_url, tweet_id).
 fn find_tweet_url(dex: &DexScreenerData, birdeye: &BirdeyePreFilter) -> Option<(String, String)> {
-    let all_urls = dex.website_urls.iter().map(|(_, u)| u.as_str())
+    let all_urls = dex
+        .website_urls
+        .iter()
+        .map(|(_, u)| u.as_str())
         .chain(dex.social_urls.iter().map(|(_, u)| u.as_str()))
         .chain(std::iter::once(birdeye.twitter_url.as_str()));
 
@@ -464,23 +518,51 @@ async fn fetch_tweet_metrics(
 
     let tweet_data = json.get("data")?;
     let tweet_metrics = tweet_data.get("public_metrics")?;
-    let tweet_text = tweet_data.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string();
+    let tweet_text = tweet_data
+        .get("text")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
 
     // Author is in includes.users[0]
-    let author = json.get("includes")
+    let author = json
+        .get("includes")
         .and_then(|i| i.get("users"))
         .and_then(|u| u.as_array())
         .and_then(|arr| arr.first())?;
     let user_metrics = author.get("public_metrics")?;
 
     Some(TweetMetrics {
-        author_username: author.get("username").and_then(|u| u.as_str()).unwrap_or("").to_string(),
-        author_name: author.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
-        followers: user_metrics.get("followers_count").and_then(|v| v.as_u64()).unwrap_or(0),
-        likes: tweet_metrics.get("like_count").and_then(|v| v.as_u64()).unwrap_or(0),
-        retweets: tweet_metrics.get("retweet_count").and_then(|v| v.as_u64()).unwrap_or(0),
-        replies: tweet_metrics.get("reply_count").and_then(|v| v.as_u64()).unwrap_or(0),
-        views: tweet_metrics.get("impression_count").and_then(|v| v.as_u64()).unwrap_or(0),
+        author_username: author
+            .get("username")
+            .and_then(|u| u.as_str())
+            .unwrap_or("")
+            .to_string(),
+        author_name: author
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("")
+            .to_string(),
+        followers: user_metrics
+            .get("followers_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        likes: tweet_metrics
+            .get("like_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        retweets: tweet_metrics
+            .get("retweet_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        replies: tweet_metrics
+            .get("reply_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        views: tweet_metrics
+            .get("impression_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
         tweet_text,
     })
 }
@@ -522,9 +604,20 @@ async fn fetch_user_metrics(
     let metrics = data.get("public_metrics")?;
 
     Some(UserMetrics {
-        username: data.get("username").and_then(|u| u.as_str()).unwrap_or("").to_string(),
-        name: data.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
-        followers: metrics.get("followers_count").and_then(|v| v.as_u64()).unwrap_or(0),
+        username: data
+            .get("username")
+            .and_then(|u| u.as_str())
+            .unwrap_or("")
+            .to_string(),
+        name: data
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("")
+            .to_string(),
+        followers: metrics
+            .get("followers_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
     })
 }
 
@@ -620,7 +713,10 @@ async fn fetch_twitter_search(
         Ok(r) => {
             let status = r.status();
             debug!(mint = mint, status = %status, "X API search returned non-200");
-            return TwitterSearchResult { searched: true, ..Default::default() };
+            return TwitterSearchResult {
+                searched: true,
+                ..Default::default()
+            };
         }
         Err(e) => {
             debug!(mint = mint, "X API search request failed: {}", e);
@@ -630,19 +726,30 @@ async fn fetch_twitter_search(
 
     let json: serde_json::Value = match resp.json().await {
         Ok(j) => j,
-        Err(_) => return TwitterSearchResult { searched: true, ..Default::default() },
+        Err(_) => {
+            return TwitterSearchResult {
+                searched: true,
+                ..Default::default()
+            }
+        }
     };
 
-    let result_count = json.get("meta")
+    let result_count = json
+        .get("meta")
         .and_then(|m| m.get("result_count"))
         .and_then(|c| c.as_u64())
         .unwrap_or(0);
 
     if result_count == 0 {
-        return TwitterSearchResult { searched: true, tweet_count: 0, ..Default::default() };
+        return TwitterSearchResult {
+            searched: true,
+            tweet_count: 0,
+            ..Default::default()
+        };
     }
 
-    let tweets = json.get("data")
+    let tweets = json
+        .get("data")
         .and_then(|d| d.as_array())
         .cloned()
         .unwrap_or_default();
@@ -654,10 +761,22 @@ async fn fetch_twitter_search(
 
     for tweet in &tweets {
         if let Some(metrics) = tweet.get("public_metrics") {
-            total_likes += metrics.get("like_count").and_then(|v| v.as_u64()).unwrap_or(0);
-            total_retweets += metrics.get("retweet_count").and_then(|v| v.as_u64()).unwrap_or(0);
-            total_views += metrics.get("impression_count").and_then(|v| v.as_u64()).unwrap_or(0);
-            total_replies += metrics.get("reply_count").and_then(|v| v.as_u64()).unwrap_or(0);
+            total_likes += metrics
+                .get("like_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            total_retweets += metrics
+                .get("retweet_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            total_views += metrics
+                .get("impression_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            total_replies += metrics
+                .get("reply_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
         }
     }
 
@@ -743,9 +862,16 @@ pub async fn check_narrative(
     );
 
     // 2. Dead token check — if DexScreener shows zero life, skip everything
-    let dex_dead = dex.volume_24h == 0.0 && dex.maker_count_24h == 0 && dex.boosts == 0
-        && dex.social_urls.is_empty() && dex.website_urls.is_empty();
-    let birdeye_dead = !birdeye.fetched || (birdeye.unique_wallets_24h < 5 && birdeye.holders < 10 && !birdeye.has_twitter && !birdeye.has_telegram);
+    let dex_dead = dex.volume_24h == 0.0
+        && dex.maker_count_24h == 0
+        && dex.boosts == 0
+        && dex.social_urls.is_empty()
+        && dex.website_urls.is_empty();
+    let birdeye_dead = !birdeye.fetched
+        || (birdeye.unique_wallets_24h < 5
+            && birdeye.holders < 10
+            && !birdeye.has_twitter
+            && !birdeye.has_telegram);
 
     let prefilter_ms = start.elapsed().as_millis() as u64;
 
@@ -783,7 +909,11 @@ pub async fn check_narrative(
     // 3. Token is alive — now fetch Twitter search (deferred past dead-token check to save cost)
     let search_timer = std::time::Instant::now();
     let twitter_search = fetch_twitter_search(client, x_bearer, &ctx.mint, &ctx.symbol).await;
-    let search_ms = if twitter_search.searched { search_timer.elapsed().as_millis() as u64 } else { 0 };
+    let search_ms = if twitter_search.searched {
+        search_timer.elapsed().as_millis() as u64
+    } else {
+        0
+    };
 
     // 3. Extract Twitter info and determine tier
     let usernames = collect_twitter_usernames(&dex, &birdeye);
@@ -798,43 +928,59 @@ pub async fn check_narrative(
         // Try tweet URL first (best signal: engagement + followers + tweet text)
         if let Some((_tweet_url, tweet_id)) = find_tweet_url(&dex, &birdeye) {
             if let Some(metrics) = fetch_tweet_metrics(client, x_bearer, &tweet_id).await {
-                NarrativeTier::XTweet { x_context: build_x_tweet_context(&metrics) }
+                NarrativeTier::XTweet {
+                    x_context: build_x_tweet_context(&metrics),
+                }
             } else if let Some(username) = usernames.first() {
                 // Tweet lookup failed, try user lookup as fallback
                 if let Some(user) = fetch_user_metrics(client, x_bearer, username).await {
-                    NarrativeTier::XProfile { x_context: build_x_user_context(&user) }
+                    NarrativeTier::XProfile {
+                        x_context: build_x_user_context(&user),
+                    }
                 } else if has_social_links {
                     let social_ctx = build_social_context(&dex, &birdeye, &usernames);
-                    NarrativeTier::SocialLinksNoTweet { social_context: social_ctx }
+                    NarrativeTier::SocialLinksNoTweet {
+                        social_context: social_ctx,
+                    }
                 } else {
                     NarrativeTier::NoSocialLinks
                 }
             } else if has_social_links {
                 let social_ctx = build_social_context(&dex, &birdeye, &usernames);
-                NarrativeTier::SocialLinksNoTweet { social_context: social_ctx }
+                NarrativeTier::SocialLinksNoTweet {
+                    social_context: social_ctx,
+                }
             } else {
                 NarrativeTier::NoSocialLinks
             }
         } else if let Some(username) = usernames.first() {
             // Profile URL only (no specific tweet)
             if let Some(user) = fetch_user_metrics(client, x_bearer, username).await {
-                NarrativeTier::XProfile { x_context: build_x_user_context(&user) }
+                NarrativeTier::XProfile {
+                    x_context: build_x_user_context(&user),
+                }
             } else if has_social_links {
                 let social_ctx = build_social_context(&dex, &birdeye, &usernames);
-                NarrativeTier::SocialLinksNoTweet { social_context: social_ctx }
+                NarrativeTier::SocialLinksNoTweet {
+                    social_context: social_ctx,
+                }
             } else {
                 NarrativeTier::NoSocialLinks
             }
         } else if has_social_links {
             let social_ctx = build_social_context(&dex, &birdeye, &usernames);
-            NarrativeTier::SocialLinksNoTweet { social_context: social_ctx }
+            NarrativeTier::SocialLinksNoTweet {
+                social_context: social_ctx,
+            }
         } else {
             NarrativeTier::NoSocialLinks
         }
     } else if has_social_links {
         // No X bearer token configured — fall through to OpenAI tiers
         let social_ctx = build_social_context(&dex, &birdeye, &usernames);
-        NarrativeTier::SocialLinksNoTweet { social_context: social_ctx }
+        NarrativeTier::SocialLinksNoTweet {
+            social_context: social_ctx,
+        }
     } else {
         NarrativeTier::NoSocialLinks
     };
@@ -882,7 +1028,14 @@ pub async fn check_narrative(
                 name = %ctx.name,
                 "🔮💰 TIER 2 — social links found, calling OpenAI without web search (~$0.001)"
             );
-            let prompt = build_prompt(ctx, &dex, &birdeye, Some(social_context), &search_ctx, false);
+            let prompt = build_prompt(
+                ctx,
+                &dex,
+                &birdeye,
+                Some(social_context),
+                &search_ctx,
+                false,
+            );
             let mut r = call_openai(client, api_key, &prompt, false).await?;
             r.tier = "tier_2_openai_no_search".to_string();
             r
@@ -938,7 +1091,11 @@ pub async fn check_narrative(
 
 // ── Social context builder ───────────────────────────────────
 
-fn build_social_context(dex: &DexScreenerData, birdeye: &BirdeyePreFilter, usernames: &[String]) -> String {
+fn build_social_context(
+    dex: &DexScreenerData,
+    birdeye: &BirdeyePreFilter,
+    usernames: &[String],
+) -> String {
     let mut lines = Vec::new();
 
     if !dex.website_urls.is_empty() || !dex.social_urls.is_empty() {
@@ -965,7 +1122,10 @@ fn build_social_context(dex: &DexScreenerData, birdeye: &BirdeyePreFilter, usern
     }
 
     if !usernames.is_empty() {
-        lines.push(format!("Twitter usernames found: @{}", usernames.join(", @")));
+        lines.push(format!(
+            "Twitter usernames found: @{}",
+            usernames.join(", @")
+        ));
     }
 
     lines.join("\n")
@@ -983,21 +1143,36 @@ fn build_prompt(
 ) -> String {
     let birdeye_section = if birdeye.fetched {
         let mut lines = vec!["\nBIRDEYE DATA (verified on-chain):".to_string()];
-        lines.push(format!("- Unique wallets (24h): {}", birdeye.unique_wallets_24h));
+        lines.push(format!(
+            "- Unique wallets (24h): {}",
+            birdeye.unique_wallets_24h
+        ));
         lines.push(format!("- Holders: {}", birdeye.holders));
-        lines.push(format!("- 24h buys: {}, 24h sells: {}", birdeye.buy_24h, birdeye.sell_24h));
+        lines.push(format!(
+            "- 24h buys: {}, 24h sells: {}",
+            birdeye.buy_24h, birdeye.sell_24h
+        ));
         if birdeye.buy_24h > 0 {
             let diamond = 1.0 - (birdeye.sell_24h as f64 / birdeye.buy_24h.max(1) as f64);
             lines.push(format!("- Diamond ratio (approx): {:.0}% (% of buyers still holding — higher = stronger conviction)", diamond * 100.0));
         }
         if birdeye.has_twitter {
-            lines.push(format!("- Twitter/X: {} (VERIFIED — token metadata)", birdeye.twitter_url));
+            lines.push(format!(
+                "- Twitter/X: {} (VERIFIED — token metadata)",
+                birdeye.twitter_url
+            ));
         }
         if birdeye.has_telegram {
-            lines.push(format!("- Telegram: {} (VERIFIED — token metadata)", birdeye.telegram_url));
+            lines.push(format!(
+                "- Telegram: {} (VERIFIED — token metadata)",
+                birdeye.telegram_url
+            ));
         }
         if birdeye.has_website {
-            lines.push(format!("- Website: {} (from token metadata)", birdeye.website_url));
+            lines.push(format!(
+                "- Website: {} (from token metadata)",
+                birdeye.website_url
+            ));
         }
         if !birdeye.has_twitter && !birdeye.has_telegram && !birdeye.has_website {
             lines.push("- No social links in token metadata".to_string());
@@ -1014,11 +1189,15 @@ fn build_prompt(
     };
 
     let task_section = if include_web_search_task {
-        format!(r#"TASK:
+        format!(
+            r#"TASK:
 1. Search the web for "{mint}" and "{name} {symbol} solana token" and "{name} crypto" to find social media mentions, news articles, Twitter/X posts, Telegram buzz, or trending status.
 2. Also search for "{name} CTO" or "{name} community takeover" — a CTO is when the dev sells all tokens and the community takes over. This is BULLISH in meme coins (no dev dump risk, community-driven).
 3. Score the token holistically — weighing on-chain strength, social/narrative presence, and market data together as a SINGLE decision."#,
-            mint = ctx.mint, name = ctx.name, symbol = ctx.symbol)
+            mint = ctx.mint,
+            name = ctx.name,
+            symbol = ctx.symbol
+        )
     } else {
         "TASK:\nBased on the on-chain metrics, market data, and social links provided above, score this token holistically. You do NOT need to search the web — all data is provided. Evaluate the strength of the social links (who posted, community size) alongside the on-chain data.".to_string()
     };
@@ -1169,7 +1348,9 @@ async fn call_openai(
                         .and_then(|content_arr| {
                             content_arr.iter().find_map(|c| {
                                 if c.get("type").and_then(|t| t.as_str()) == Some("output_text") {
-                                    c.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+                                    c.get("text")
+                                        .and_then(|t| t.as_str())
+                                        .map(|s| s.to_string())
                                 } else {
                                     None
                                 }
@@ -1262,7 +1443,10 @@ fn parse_narrative_response(text: &str) -> NarrativeResult {
             }
         }
         Err(e) => {
-            warn!("Failed to parse narrative response as JSON: {} — text: {}", e, text);
+            warn!(
+                "Failed to parse narrative response as JSON: {} — text: {}",
+                e, text
+            );
             NarrativeResult {
                 state: NarrativeState::NoSignal,
                 score: 0,

@@ -168,7 +168,11 @@ pub fn spawn_post_exit_moonbag_check(
             return;
         };
 
-        let mult = if entry_price_usd > 0.0 { price_now / entry_price_usd } else { 0.0 };
+        let mult = if entry_price_usd > 0.0 {
+            price_now / entry_price_usd
+        } else {
+            0.0
+        };
         if mult < MOONBAG_MULT_THRESHOLD {
             debug!(position_id, mint = %mint, mult, "post-exit moonbag below threshold — skipping");
             return;
@@ -308,7 +312,8 @@ async fn collect_snapshot(
 
     // ── DexScreener: socials, liquidity fallback, volume fallback ──
     if let Some((val, latency_ms)) = &dex_res {
-        snap.apis_called.insert("dexscreener".into(), json!(latency_ms));
+        snap.apis_called
+            .insert("dexscreener".into(), json!(latency_ms));
         snap.raw_dexscreener = Some(val.clone());
 
         if let Some(pair) = val
@@ -353,8 +358,12 @@ async fn collect_snapshot(
             }
             // Socials
             let info = pair.get("info");
-            let socials = info.and_then(|i| i.get("socials")).and_then(Value::as_array);
-            let websites = info.and_then(|i| i.get("websites")).and_then(Value::as_array);
+            let socials = info
+                .and_then(|i| i.get("socials"))
+                .and_then(Value::as_array);
+            let websites = info
+                .and_then(|i| i.get("websites"))
+                .and_then(Value::as_array);
             let sc = socials.map(|a| a.len() as i64).unwrap_or(0);
             let wc = websites.map(|a| a.len() as i64).unwrap_or(0);
             snap.social_count = Some(sc + wc);
@@ -384,7 +393,8 @@ async fn collect_snapshot(
 
     // ── Helius DAS: holder count (approximate via token accounts owner) ──
     if let Some((val, latency_ms)) = &das_res {
-        snap.apis_called.insert("helius_das".into(), json!(latency_ms));
+        snap.apis_called
+            .insert("helius_das".into(), json!(latency_ms));
         snap.raw_das = Some(val.clone());
         // DAS getAsset returns aggregate info; actual holder list needs
         // getTokenAccounts. We store raw and parse conservatively.
@@ -540,13 +550,7 @@ async fn fetch_birdeye(ctx: &SamplerCtx, mint: &str) -> Option<(Value, u64)> {
         "https://public-api.birdeye.so/defi/token_overview?address={}",
         mint
     );
-    guarded_get_json(
-        ctx,
-        &ctx.guards.birdeye,
-        &url,
-        Some(("X-API-KEY", api_key)),
-    )
-    .await
+    guarded_get_json(ctx, &ctx.guards.birdeye, &url, Some(("X-API-KEY", api_key))).await
 }
 
 async fn fetch_dexscreener(ctx: &SamplerCtx, mint: &str) -> Option<(Value, u64)> {
@@ -607,7 +611,11 @@ async fn fetch_das(ctx: &SamplerCtx, mint: &str) -> Option<(Value, u64)> {
 }
 
 async fn fetch_sol_balance(ctx: &SamplerCtx, wallet: &str) -> Option<(f64, u64)> {
-    let rpc_url = ctx.cfg.env.helius_rpc_url.as_deref()
+    let rpc_url = ctx
+        .cfg
+        .env
+        .helius_rpc_url
+        .as_deref()
         .or(Some(ctx.cfg.env.solana_rpc_url.as_str()))?;
     let _permit = ctx.guards.helius_rpc.acquire().await?;
     let started = Instant::now();
@@ -737,11 +745,7 @@ async fn write_snapshot(supabase: &SupabaseClient, snap: &Snapshot) -> anyhow::R
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!(
-            "HTTP {} — {}",
-            status,
-            &body[..body.len().min(300)]
-        );
+        anyhow::bail!("HTTP {} — {}", status, &body[..body.len().min(300)]);
     }
     Ok(())
 }

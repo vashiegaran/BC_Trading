@@ -287,13 +287,19 @@ impl HeliusWatcher {
                 { "encoding": "jsonParsed", "commitment": "confirmed" }
             ]
         });
-        write.send(Message::Text(sub_token.to_string())).await
+        write
+            .send(Message::Text(sub_token.to_string()))
+            .await
             .context("Failed to subscribe token vault")?;
 
         // Subscribe to SOL vault.
         // For PumpSwap: WSOL is a token account, use jsonParsed.
         // For Raydium: raw SOL, use base64 to read lamports.
-        let sol_encoding = if sol_vault_is_token_account { "jsonParsed" } else { "base64" };
+        let sol_encoding = if sol_vault_is_token_account {
+            "jsonParsed"
+        } else {
+            "base64"
+        };
         let sub_sol = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 11,
@@ -303,7 +309,9 @@ impl HeliusWatcher {
                 { "encoding": sol_encoding, "commitment": "confirmed" }
             ]
         });
-        write.send(Message::Text(sub_sol.to_string())).await
+        write
+            .send(Message::Text(sub_sol.to_string()))
+            .await
             .context("Failed to subscribe SOL vault")?;
 
         debug!(mint = %mint, "accountSubscribe sent for both pool vaults");
@@ -721,11 +729,7 @@ pub fn derive_ata(wallet: &Pubkey, mint: &Pubkey) -> Pubkey {
         .expect("hardcoded ATA program ID is valid");
 
     Pubkey::find_program_address(
-        &[
-            wallet.as_ref(),
-            spl_token_program.as_ref(),
-            mint.as_ref(),
-        ],
+        &[wallet.as_ref(), spl_token_program.as_ref(), mint.as_ref()],
         &ata_program,
     )
     .0
@@ -772,8 +776,8 @@ pub async fn resolve_pool_vaults(
         }
     };
 
-    let pump_amm = Pubkey::from_str(PUMP_AMM_PROGRAM_ID)
-        .expect("hardcoded PumpSwap program ID is valid");
+    let pump_amm =
+        Pubkey::from_str(PUMP_AMM_PROGRAM_ID).expect("hardcoded PumpSwap program ID is valid");
     if account.owner != pump_amm {
         debug!(
             pool = %pool_pubkey,

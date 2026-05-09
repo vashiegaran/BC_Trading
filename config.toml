@@ -9,7 +9,7 @@
 #   filterable in analytics vs the broken v16.1 binary that was running
 #   from never-committed source. Detection: pumpfun_ws. Fast-track:
 #   2-source (on_chain_mint + goplus) so GoPlus runs PRE-buy.
-strategy_version = "v18.7.6-runner-grace-exit-protection"
+strategy_version = "v18.7.7-moonbag-split-runner-protection"
 
 # ============================================================
 # DETECTION
@@ -478,6 +478,13 @@ min_hold_before_dip_death = 30
 # LP drain, whale/sell-acceleration dip death.
 creator_rebuy_runner_grace_secs = 180
 
+# v18.7.7: once a strict creator-rebuy canary proves it can reach 1.5x,
+# protect it as a real runner for 10m from the trigger. This suppresses only
+# soft dip-death/momentum-kill paths; hard safety exits remain live.
+creator_rebuy_runner_protection_peak_multiplier = 1.5
+creator_rebuy_runner_protection_secs = 600
+creator_rebuy_runner_floor_multiplier = 1.15
+
 # No trades for this many seconds during a dip = token dead — sniper: 30s
 dip_no_trades_timeout_secs = 30.0
 
@@ -532,14 +539,38 @@ moonbag_max_hold_confirmed_hours = 48
 # Floor: moonbag never exits below this × entry price.
 moonbag_floor_multiplier = 1.2
 
-# Initial trailing stops per narrative state (used in first 30 min):
-moonbag_trailing_early = 55.0
-moonbag_trailing_expanding = 55.0
-moonbag_trailing_confirmed = 55.0
+# Initial trailing stops per narrative state. v18.7.7 widens early tails so
+# true moonbags can survive first-hour chop while floor/partials protect PnL.
+moonbag_trailing_early = 70.0
+moonbag_trailing_expanding = 70.0
+moonbag_trailing_confirmed = 70.0
 
 # v18.7.6: after a TP1 moonbag promotion, keep early 2x-5x runners on a
 # wider leash for 15m. Floor protection still exits if the bag falls to 1.2x.
 moonbag_early_trailing_grace_secs = 900
+
+# v18.7.7 balanced moonbag split:
+#   - sell 30% of the promoted moonbag stack at 3x
+#   - sell 20% of the promoted moonbag stack at 5x
+#   - keep roughly 50% as the long moonshot tail
+moonbag_partial_3x_pct = 30
+moonbag_partial_5x_pct = 20
+
+# Do not close a moonbag tail on a soft trailing breach for the first 60m.
+# Partial exits and the 1.2x profit floor still work during this window.
+moonbag_min_hold_secs = 3600
+
+# Price-only weak-flow confirmation: require two consecutive trailing breaches
+# before closing the tail. This avoids paid social/API scoring in the live path.
+moonbag_trailing_confirm_checks = 2
+
+# Multiplier-based tail trailing. Wider early, tighter only after the token
+# reaches larger market-cap multiples.
+moonbag_trail_2x_5x = 70.0
+moonbag_trail_5x_10x = 50.0
+moonbag_trail_10x_15x = 40.0
+moonbag_trail_15x_20x = 30.0
+moonbag_trail_20x_plus = 20.0
 
 # Profit gate: age-based trail decay only kicks in once peak >= this × entry.
 # Below this multiplier, keep the initial wide trail.

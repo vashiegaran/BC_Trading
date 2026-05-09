@@ -43,22 +43,39 @@ pub async fn enrich_token(
 
     // Build clients
     let st_client = SolanaTrackerClient::new(cfg.env.solana_tracker_api_key.clone());
-    let be_client = cfg.env.birdeye_api_key.as_ref().map(|k| BirdeyeClient::new(k));
+    let be_client = cfg
+        .env
+        .birdeye_api_key
+        .as_ref()
+        .map(|k| BirdeyeClient::new(k));
 
     let mint_str = mint.to_string();
     let creator_str = creator_wallet.to_string();
 
     // Fire all enrichment calls concurrently (including smart wallet with its own timeout)
     let sw_timeout = Duration::from_millis(SMART_WALLET_TIMEOUT_MS);
-    let (st_timed, mint_timed, curve_timed, creator_timed,
-         be_overview_timed, be_security_timed, be_creation_timed, be_meme_timed,
-         sw_timed, gp_timed, whale_timed) = tokio::join!(
+    let (
+        st_timed,
+        mint_timed,
+        curve_timed,
+        creator_timed,
+        be_overview_timed,
+        be_security_timed,
+        be_creation_timed,
+        be_meme_timed,
+        sw_timed,
+        gp_timed,
+        whale_timed,
+    ) = tokio::join!(
         // Call 1: Solana Tracker risk screen
         async {
             let t = Instant::now();
             let r = match tokio::time::timeout(timeout, st_client.fetch_token(&mint_str)).await {
                 Ok(r) => r,
-                Err(_) => { warn!(mint = %mint_str, "SolanaTracker timed out"); None }
+                Err(_) => {
+                    warn!(mint = %mint_str, "SolanaTracker timed out");
+                    None
+                }
             };
             (r, t.elapsed().as_millis() as u64)
         },
@@ -67,25 +84,44 @@ pub async fn enrich_token(
             let t = Instant::now();
             let r = match tokio::time::timeout(timeout, fetch_mint_data(rpc, &mint_str)).await {
                 Ok(r) => r,
-                Err(_) => { warn!(mint = %mint_str, "Mint data timed out"); None }
+                Err(_) => {
+                    warn!(mint = %mint_str, "Mint data timed out");
+                    None
+                }
             };
             (r, t.elapsed().as_millis() as u64)
         },
         // Call 3: PumpFun bonding curve PDA
         async {
             let t = Instant::now();
-            let r = match tokio::time::timeout(timeout, fetch_bonding_curve(rpc, &mint_str, graduation_time_ms)).await {
+            let r = match tokio::time::timeout(
+                timeout,
+                fetch_bonding_curve(rpc, &mint_str, graduation_time_ms),
+            )
+            .await
+            {
                 Ok(r) => r,
-                Err(_) => { warn!(mint = %mint_str, "Bonding curve timed out"); None }
+                Err(_) => {
+                    warn!(mint = %mint_str, "Bonding curve timed out");
+                    None
+                }
             };
             (r, t.elapsed().as_millis() as u64)
         },
         // Call 4: Creator wallet history (via Solana Tracker deployer endpoint)
         async {
             let t = Instant::now();
-            let r = match tokio::time::timeout(timeout, fetch_creator_history(&st_client, rpc, &creator_str)).await {
+            let r = match tokio::time::timeout(
+                timeout,
+                fetch_creator_history(&st_client, rpc, &creator_str),
+            )
+            .await
+            {
                 Ok(r) => r,
-                Err(_) => { warn!(mint = %mint_str, "Creator history timed out"); None }
+                Err(_) => {
+                    warn!(mint = %mint_str, "Creator history timed out");
+                    None
+                }
             };
             (r, t.elapsed().as_millis() as u64)
         },
@@ -93,7 +129,10 @@ pub async fn enrich_token(
         async {
             let t = Instant::now();
             let r = match &be_client {
-                Some(c) => tokio::time::timeout(timeout, c.token_overview(&mint_str)).await.ok().flatten(),
+                Some(c) => tokio::time::timeout(timeout, c.token_overview(&mint_str))
+                    .await
+                    .ok()
+                    .flatten(),
                 None => None,
             };
             (r, t.elapsed().as_millis() as u64)
@@ -102,7 +141,10 @@ pub async fn enrich_token(
         async {
             let t = Instant::now();
             let r = match &be_client {
-                Some(c) => tokio::time::timeout(timeout, c.token_security(&mint_str)).await.ok().flatten(),
+                Some(c) => tokio::time::timeout(timeout, c.token_security(&mint_str))
+                    .await
+                    .ok()
+                    .flatten(),
                 None => None,
             };
             (r, t.elapsed().as_millis() as u64)
@@ -111,7 +153,10 @@ pub async fn enrich_token(
         async {
             let t = Instant::now();
             let r = match &be_client {
-                Some(c) => tokio::time::timeout(timeout, c.token_creation_info(&mint_str)).await.ok().flatten(),
+                Some(c) => tokio::time::timeout(timeout, c.token_creation_info(&mint_str))
+                    .await
+                    .ok()
+                    .flatten(),
                 None => None,
             };
             (r, t.elapsed().as_millis() as u64)
@@ -120,7 +165,10 @@ pub async fn enrich_token(
         async {
             let t = Instant::now();
             let r = match &be_client {
-                Some(c) => tokio::time::timeout(timeout, c.meme_detail(&mint_str)).await.ok().flatten(),
+                Some(c) => tokio::time::timeout(timeout, c.meme_detail(&mint_str))
+                    .await
+                    .ok()
+                    .flatten(),
                 None => None,
             };
             (r, t.elapsed().as_millis() as u64)
@@ -150,7 +198,10 @@ pub async fn enrich_token(
                     }
                 }
                 Ok((_filter_result, None)) => None,
-                Err(_) => { warn!(mint = %mint_str, "Smart wallet timed out (3s)"); None }
+                Err(_) => {
+                    warn!(mint = %mint_str, "Smart wallet timed out (3s)");
+                    None
+                }
             };
             (r, t.elapsed().as_millis() as u64)
         },
@@ -159,7 +210,10 @@ pub async fn enrich_token(
             let t = Instant::now();
             let r = match tokio::time::timeout(timeout, fetch_goplus(&mint_str)).await {
                 Ok(r) => r,
-                Err(_) => { warn!(mint = %mint_str, "GoPlus timed out"); None }
+                Err(_) => {
+                    warn!(mint = %mint_str, "GoPlus timed out");
+                    None
+                }
             };
             (r, t.elapsed().as_millis() as u64)
         },
@@ -175,12 +229,20 @@ pub async fn enrich_token(
                     let whale_buys: Vec<_> = buys.iter().filter(|t| t.volume_sol >= 1.0).collect();
                     let whale_count = whale_buys.len() as u32;
                     let whale_vol: f64 = whale_buys.iter().map(|t| t.volume_sol).sum();
-                    let avg_buy = if buys.is_empty() { 0.0 } else {
+                    let avg_buy = if buys.is_empty() {
+                        0.0
+                    } else {
                         buys.iter().map(|t| t.volume_sol).sum::<f64>() / buys.len() as f64
                     };
                     let total_buy_vol: f64 = buys.iter().map(|t| t.volume_sol).sum();
                     let total_sell_vol: f64 = sells.iter().map(|t| t.volume_sol).sum();
-                    let ratio = if total_sell_vol > 0.0 { total_buy_vol / total_sell_vol } else if total_buy_vol > 0.0 { 99.0 } else { 0.0 };
+                    let ratio = if total_sell_vol > 0.0 {
+                        total_buy_vol / total_sell_vol
+                    } else if total_buy_vol > 0.0 {
+                        99.0
+                    } else {
+                        0.0
+                    };
 
                     if max_single_buy >= 1.0 {
                         info!(
@@ -203,7 +265,10 @@ pub async fn enrich_token(
                     })
                 }
                 Ok(None) => None,
-                Err(_) => { warn!(mint = %mint_str, "ST trades timed out"); None }
+                Err(_) => {
+                    warn!(mint = %mint_str, "ST trades timed out");
+                    None
+                }
             };
             (r, t.elapsed().as_millis() as u64)
         },
@@ -248,7 +313,8 @@ pub async fn enrich_token(
                     if let Some(creation_block_time) = be_creation_data.block_unix_time {
                         let grad_secs = graduation_time_ms / 1000;
                         let duration = (grad_secs - creation_block_time) as f64 / 60.0;
-                        if duration > 0.0 && duration < 10080.0 { // sanity: < 7 days
+                        if duration > 0.0 && duration < 10080.0 {
+                            // sanity: < 7 days
                             info!(
                                 mint = %mint_str,
                                 sale_duration_mins = format!("{:.1}", duration),
@@ -273,8 +339,11 @@ pub async fn enrich_token(
 
     macro_rules! track_source {
         ($name:expr, $val:expr) => {
-            if $val.is_some() { completed.push($name.to_string()); }
-            else { timed_out.push($name.to_string()); }
+            if $val.is_some() {
+                completed.push($name.to_string());
+            } else {
+                timed_out.push($name.to_string());
+            }
         };
     }
 
@@ -320,10 +389,7 @@ pub async fn enrich_token(
 /// Minimal enrichment for BC fast-track pipeline: only on-chain mint + GoPlus.
 /// Runs 2 calls in parallel with a 1.5s timeout (~250-500ms typical).
 /// Returns an EnrichmentResult with only mint + goplus populated.
-pub async fn enrich_token_fast(
-    rpc: &RpcClient,
-    mint: &str,
-) -> EnrichmentResult {
+pub async fn enrich_token_fast(rpc: &RpcClient, mint: &str) -> EnrichmentResult {
     let start = Instant::now();
     let mint_timeout = Duration::from_millis(FAST_MINT_DATA_TIMEOUT_MS);
     let goplus_timeout = Duration::from_millis(FAST_GOPLUS_TIMEOUT_MS);
@@ -332,9 +398,13 @@ pub async fn enrich_token_fast(
     let (mint_timed, gp_timed) = tokio::join!(
         async {
             let t = Instant::now();
-            let r = match tokio::time::timeout(mint_timeout, fetch_mint_data(rpc, &mint_str)).await {
+            let r = match tokio::time::timeout(mint_timeout, fetch_mint_data(rpc, &mint_str)).await
+            {
                 Ok(r) => r,
-                Err(_) => { warn!(mint = %mint_str, "Fast-track: mint data timed out"); None }
+                Err(_) => {
+                    warn!(mint = %mint_str, "Fast-track: mint data timed out");
+                    None
+                }
             };
             (r, t.elapsed().as_millis() as u64)
         },
@@ -342,7 +412,10 @@ pub async fn enrich_token_fast(
             let t = Instant::now();
             let r = match tokio::time::timeout(goplus_timeout, fetch_goplus(&mint_str)).await {
                 Ok(r) => r,
-                Err(_) => { warn!(mint = %mint_str, "Fast-track: GoPlus timed out"); None }
+                Err(_) => {
+                    warn!(mint = %mint_str, "Fast-track: GoPlus timed out");
+                    None
+                }
             };
             (r, t.elapsed().as_millis() as u64)
         },
@@ -359,10 +432,16 @@ pub async fn enrich_token_fast(
 
     let mut completed = Vec::new();
     let mut timed_out_sources = Vec::new();
-    if mint_result.is_some() { completed.push("on_chain_mint".to_string()); }
-    else { timed_out_sources.push("on_chain_mint".to_string()); }
-    if gp_result.is_some() { completed.push("goplus".to_string()); }
-    else { timed_out_sources.push("goplus".to_string()); }
+    if mint_result.is_some() {
+        completed.push("on_chain_mint".to_string());
+    } else {
+        timed_out_sources.push("on_chain_mint".to_string());
+    }
+    if gp_result.is_some() {
+        completed.push("goplus".to_string());
+    } else {
+        timed_out_sources.push("goplus".to_string());
+    }
 
     info!(
         mint = %mint_str,
@@ -423,7 +502,7 @@ async fn fetch_mint_data(rpc: &RpcClient, mint: &str) -> Option<MintData> {
                 }
             }
         }
-    };
+    }
     let account = account?;
 
     let data = &account.data;
@@ -438,8 +517,7 @@ async fn fetch_mint_data(rpc: &RpcClient, mint: &str) -> Option<MintData> {
 
     // Parse supply (bytes 36-44)
     let supply_raw = u64::from_le_bytes([
-        data[36], data[37], data[38], data[39],
-        data[40], data[41], data[42], data[43],
+        data[36], data[37], data[38], data[39], data[40], data[41], data[42], data[43],
     ]);
 
     // Parse decimals (byte 44)
@@ -480,10 +558,8 @@ async fn fetch_bonding_curve(
     let pumpfun_program = Pubkey::from_str("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P").ok()?;
 
     // Derive bonding curve PDA: seeds = ["bonding-curve", mint_bytes]
-    let (pda, _bump) = Pubkey::find_program_address(
-        &[b"bonding-curve", mint_pubkey.as_ref()],
-        &pumpfun_program,
-    );
+    let (pda, _bump) =
+        Pubkey::find_program_address(&[b"bonding-curve", mint_pubkey.as_ref()], &pumpfun_program);
 
     let account = match rpc.get_account(&pda).await {
         Ok(a) => a,
@@ -504,13 +580,11 @@ async fn fetch_bonding_curve(
     // bytes 40-48: creation timestamp (i64) — varies by version
     // byte 48: complete (bool)
 
-    let virtual_token_reserves = u64::from_le_bytes(
-        data[8..16].try_into().unwrap_or([0u8; 8]),
-    ) as f64 / 1_000_000.0;
+    let virtual_token_reserves =
+        u64::from_le_bytes(data[8..16].try_into().unwrap_or([0u8; 8])) as f64 / 1_000_000.0;
 
-    let virtual_sol_reserves = u64::from_le_bytes(
-        data[16..24].try_into().unwrap_or([0u8; 8]),
-    ) as f64 / 1_000_000_000.0;
+    let virtual_sol_reserves =
+        u64::from_le_bytes(data[16..24].try_into().unwrap_or([0u8; 8])) as f64 / 1_000_000_000.0;
 
     let complete = data.len() > 48 && data[48] != 0;
 
@@ -630,7 +704,10 @@ async fn fetch_goplus(mint: &str) -> Option<GoPlusResult> {
         .build()
         .ok()?;
 
-    let url = format!("https://api.gopluslabs.io/api/v1/solana/token_security/{}", mint);
+    let url = format!(
+        "https://api.gopluslabs.io/api/v1/solana/token_security/{}",
+        mint
+    );
     let resp = client.get(&url).send().await.ok()?;
     if !resp.status().is_success() {
         return None;
@@ -644,18 +721,44 @@ async fn fetch_goplus(mint: &str) -> Option<GoPlusResult> {
     let results = body.get("result")?.as_object()?;
     // GoPlus keys by lowercase mint
     let key = mint.to_lowercase();
-    let token = results.iter()
+    let token = results
+        .iter()
         .find(|(k, _)| k.to_lowercase() == key || *k == mint)
         .map(|(_, v)| v)?;
 
     Some(GoPlusResult {
-        is_honeypot: token.get("is_honeypot").and_then(|v| v.as_str()).map(String::from),
-        is_mintable: token.get("is_mintable").and_then(|v| v.as_str()).map(String::from),
-        transfer_pausable: token.get("transfer_pausable").and_then(|v| v.as_str()).map(String::from),
-        is_blacklisted: token.get("is_blacklisted").and_then(|v| v.as_str()).map(String::from),
-        can_take_back_ownership: token.get("can_take_back_ownership").and_then(|v| v.as_str()).map(String::from),
-        is_proxy: token.get("is_proxy").and_then(|v| v.as_str()).map(String::from),
-        is_open_source: token.get("is_open_source").and_then(|v| v.as_str()).map(String::from),
-        holder_count: token.get("holder_count").and_then(|v| v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_u64())),
+        is_honeypot: token
+            .get("is_honeypot")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        is_mintable: token
+            .get("is_mintable")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        transfer_pausable: token
+            .get("transfer_pausable")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        is_blacklisted: token
+            .get("is_blacklisted")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        can_take_back_ownership: token
+            .get("can_take_back_ownership")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        is_proxy: token
+            .get("is_proxy")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        is_open_source: token
+            .get("is_open_source")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        holder_count: token.get("holder_count").and_then(|v| {
+            v.as_str()
+                .and_then(|s| s.parse().ok())
+                .or_else(|| v.as_u64())
+        }),
     })
 }

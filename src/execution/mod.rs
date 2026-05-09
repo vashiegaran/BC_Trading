@@ -18,14 +18,14 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::config::AppConfig;
-use crate::filters::types::FilteredToken;
 use crate::filters::post_buy::{self, PostBuyAlert};
+use crate::filters::types::FilteredToken;
 use crate::logger::SupabaseClient;
 use crate::sniper::log_pipeline_latency;
 
-use jupiter::{JupiterClient, SOL_MINT};
-use jito_client::JitoClient;
 use helius_sender::HeliusSenderClient;
+use jito_client::JitoClient;
+use jupiter::{JupiterClient, SOL_MINT};
 use state::TradingState;
 use types::PositionOpened;
 use wallet::BotWallet;
@@ -53,7 +53,9 @@ fn compute_dynamic_buy_amount(cfg: &AppConfig, initial_liquidity_sol: f64) -> f6
         return max_buy; // unknown liquidity — use default
     }
 
-    let ratio = ((initial_liquidity_sol - DYNAMIC_SIZE_LIQ_FLOOR) / (DYNAMIC_SIZE_LIQ_CAP - DYNAMIC_SIZE_LIQ_FLOOR)).clamp(0.0, 1.0);
+    let ratio = ((initial_liquidity_sol - DYNAMIC_SIZE_LIQ_FLOOR)
+        / (DYNAMIC_SIZE_LIQ_CAP - DYNAMIC_SIZE_LIQ_FLOOR))
+        .clamp(0.0, 1.0);
     min_buy + ratio * (max_buy - min_buy)
 }
 
@@ -71,7 +73,10 @@ fn compute_buy_amount(cfg: &AppConfig, token: &FilteredToken) -> f64 {
     let dynamic_amount = compute_dynamic_buy_amount(cfg, token.event.initial_liquidity_sol);
 
     if is_creator_rebuy_live_test(token) {
-        let canary_amount = cfg.strategy.execution.creator_rebuy_live_test_buy_amount_sol;
+        let canary_amount = cfg
+            .strategy
+            .execution
+            .creator_rebuy_live_test_buy_amount_sol;
         if canary_amount > 0.0 {
             return canary_amount.min(dynamic_amount);
         }
@@ -149,7 +154,9 @@ pub fn start(
 
             // ── Pre-execution safety checks (in-memory — no Supabase reads) ─────────
             let pre_check_start = Instant::now();
-            match pre_execution_checks_cached(&cfg, &trading_state, &rpc, &backup_rpc, &wallet).await {
+            match pre_execution_checks_cached(&cfg, &trading_state, &rpc, &backup_rpc, &wallet)
+                .await
+            {
                 Ok(()) => {
                     let precheck_ms = pre_check_start.elapsed().as_millis() as u64;
                     timing.precheck_total_ms = Some(precheck_ms);
@@ -171,19 +178,26 @@ pub fn start(
                     let reason_bg = reason.clone();
                     let mint_bg = mint_str.clone();
                     tokio::spawn(async move {
-                        log_system_event(&supabase_bg, "pre_execution_check_failed",
-                            &format!("Mint: {} — Reason: {}", mint_bg, reason_bg)).await;
+                        log_system_event(
+                            &supabase_bg,
+                            "pre_execution_check_failed",
+                            &format!("Mint: {} — Reason: {}", mint_bg, reason_bg),
+                        )
+                        .await;
                         log_pipeline_latency(&supabase_bg, &timing_payload).await;
                     });
                     continue;
                 }
             }
-        
+
             // ── Lane-specific canary cap ─────────────────────────────────────────────
             // Creator-rebuy is still broadly blocked upstream. If the tiny canary lane
             // is allowed through, keep at most one such position open by default.
             if is_creator_rebuy_live_test(&token) {
-                let cap = cfg.strategy.filters.creator_rebuy_live_test_max_open_positions;
+                let cap = cfg
+                    .strategy
+                    .filters
+                    .creator_rebuy_live_test_max_open_positions;
                 let open_count = trading_state.creator_rebuy_live_test_open_count().await;
                 if cap > 0 && open_count >= cap as i64 {
                     let reason = format!(
@@ -246,8 +260,12 @@ pub fn start(
                 let mint_bg = mint_str.clone();
                 let dev_bg = dev_wallet_str.clone();
                 tokio::spawn(async move {
-                    log_system_event(&supabase_bg, "dev_blacklist_skip",
-                        &format!("Mint: {} — Dev {} is blacklisted", mint_bg, dev_bg)).await;
+                    log_system_event(
+                        &supabase_bg,
+                        "dev_blacklist_skip",
+                        &format!("Mint: {} — Dev {} is blacklisted", mint_bg, dev_bg),
+                    )
+                    .await;
                     log_pipeline_latency(&supabase_bg, &timing_payload).await;
                 });
                 continue;
@@ -268,7 +286,9 @@ pub fn start(
             // ── Execute trade ─────────────────────────────────────────────────────────
             let trade_exec_start = Instant::now();
             if cfg.env.paper_trade {
-                match execute_paper_trade(&cfg, &jupiter, &supabase, &token, &tx, &trading_state).await {
+                match execute_paper_trade(&cfg, &jupiter, &supabase, &token, &tx, &trading_state)
+                    .await
+                {
                     Ok(Some(result)) => {
                         let exec_ms = trade_exec_start.elapsed().as_millis() as u64;
                         let pipeline_ms = {
@@ -296,10 +316,17 @@ pub fn start(
                         let mint_bg = mint_str.clone();
                         tokio::spawn(async move {
                             post_buy::verify(
-                                cfg_bg, supabase_bg, alert_tx_bg,
-                                mint_bg, result.position_id, result.entry_price_usd, result.sol_spent,
-                                result.token_amount, true,
-                            ).await;
+                                cfg_bg,
+                                supabase_bg,
+                                alert_tx_bg,
+                                mint_bg,
+                                result.position_id,
+                                result.entry_price_usd,
+                                result.sol_spent,
+                                result.token_amount,
+                                true,
+                            )
+                            .await;
                         });
                     }
                     Ok(None) => {
@@ -308,7 +335,8 @@ pub fn start(
                         timing.outcome = Some("execution_failed".to_string());
                         timing.rejection_stage = Some("execution".to_string());
                         timing.rejection_reason = Some("no_position_produced".to_string());
-                        timing.execution_total_ms = Some(trade_exec_start.elapsed().as_millis() as u64);
+                        timing.execution_total_ms =
+                            Some(trade_exec_start.elapsed().as_millis() as u64);
                         let timing_payload = timing.to_json(&mint_str);
                         let supabase_bg = Arc::clone(&supabase);
                         tokio::spawn(async move {
@@ -322,7 +350,8 @@ pub fn start(
                         timing.outcome = Some("execution_failed".to_string());
                         timing.rejection_stage = Some("execution".to_string());
                         timing.rejection_reason = Some(e.to_string());
-                        timing.execution_total_ms = Some(trade_exec_start.elapsed().as_millis() as u64);
+                        timing.execution_total_ms =
+                            Some(trade_exec_start.elapsed().as_millis() as u64);
                         let timing_payload = timing.to_json(&mint_str);
                         error!(mint = %mint_str, "Paper trade failed: {}", e);
                         let supabase_bg = Arc::clone(&supabase);
@@ -333,14 +362,27 @@ pub fn start(
                                 &supabase_bg,
                                 "paper_trade_failed",
                                 &format!("Mint: {} — Error: {}", mint_bg, err_msg),
-                            ).await;
+                            )
+                            .await;
                             log_pipeline_latency(&supabase_bg, &timing_payload).await;
                         });
                     }
                 }
             } else {
-                match execute_real_trade(&cfg, &jupiter, &supabase, &rpc, &backup_rpc, &wallet, &token, &tx, &trading_state, jito_client.as_ref().map(|j| j.as_ref()), helius_sender.as_ref().map(|h| h.as_ref()))
-                    .await
+                match execute_real_trade(
+                    &cfg,
+                    &jupiter,
+                    &supabase,
+                    &rpc,
+                    &backup_rpc,
+                    &wallet,
+                    &token,
+                    &tx,
+                    &trading_state,
+                    jito_client.as_ref().map(|j| j.as_ref()),
+                    helius_sender.as_ref().map(|h| h.as_ref()),
+                )
+                .await
                 {
                     Ok(Some(result)) => {
                         let exec_ms = trade_exec_start.elapsed().as_millis() as u64;
@@ -368,10 +410,17 @@ pub fn start(
                         let mint_bg = mint_str.clone();
                         tokio::spawn(async move {
                             post_buy::verify(
-                                cfg_bg, supabase_bg, alert_tx_bg,
-                                mint_bg, result.position_id, result.entry_price_usd, result.sol_spent,
-                                result.token_amount, false,
-                            ).await;
+                                cfg_bg,
+                                supabase_bg,
+                                alert_tx_bg,
+                                mint_bg,
+                                result.position_id,
+                                result.entry_price_usd,
+                                result.sol_spent,
+                                result.token_amount,
+                                false,
+                            )
+                            .await;
                         });
                     }
                     Ok(None) => {
@@ -380,7 +429,8 @@ pub fn start(
                         timing.outcome = Some("execution_failed".to_string());
                         timing.rejection_stage = Some("execution".to_string());
                         timing.rejection_reason = Some("no_position_produced".to_string());
-                        timing.execution_total_ms = Some(trade_exec_start.elapsed().as_millis() as u64);
+                        timing.execution_total_ms =
+                            Some(trade_exec_start.elapsed().as_millis() as u64);
                         let timing_payload = timing.to_json(&mint_str);
                         let supabase_bg = Arc::clone(&supabase);
                         tokio::spawn(async move {
@@ -394,7 +444,8 @@ pub fn start(
                         timing.outcome = Some("execution_failed".to_string());
                         timing.rejection_stage = Some("execution".to_string());
                         timing.rejection_reason = Some(e.to_string());
-                        timing.execution_total_ms = Some(trade_exec_start.elapsed().as_millis() as u64);
+                        timing.execution_total_ms =
+                            Some(trade_exec_start.elapsed().as_millis() as u64);
                         let timing_payload = timing.to_json(&mint_str);
                         error!(mint = %mint_str, "Real trade failed: {}", e);
                         let supabase_bg = Arc::clone(&supabase);
@@ -405,7 +456,8 @@ pub fn start(
                                 &supabase_bg,
                                 "real_trade_failed",
                                 &format!("Mint: {} — Error: {}", mint_bg, err_msg),
-                            ).await;
+                            )
+                            .await;
                             log_pipeline_latency(&supabase_bg, &timing_payload).await;
                         });
                     }
@@ -546,7 +598,10 @@ async fn execute_paper_trade(
         return Ok(None);
     }
     let liq_min = cfg.strategy.execution.moonbag_liq_min_sol;
-    if liq_min > 0.0 && token.event.initial_liquidity_sol < liq_min && token.event.initial_liquidity_sol > 0.0 {
+    if liq_min > 0.0
+        && token.event.initial_liquidity_sol < liq_min
+        && token.event.initial_liquidity_sol > 0.0
+    {
         warn!(
             mint = %mint_str,
             initial_liquidity_sol = token.event.initial_liquidity_sol,
@@ -599,7 +654,8 @@ async fn execute_paper_trade(
     // and produce fictional 50x outcomes that no real tx could ever achieve.
     let realistic = cfg.strategy.execution.paper_realistic_fills;
     if realistic && token.event.initial_liquidity_sol > 0.0 {
-        let max_fill = token.event.initial_liquidity_sol * (cfg.strategy.execution.paper_max_pool_fill_pct / 100.0);
+        let max_fill = token.event.initial_liquidity_sol
+            * (cfg.strategy.execution.paper_max_pool_fill_pct / 100.0);
         if buy_amount_sol > max_fill {
             warn!(
                 mint = %mint_str,
@@ -644,7 +700,10 @@ async fn execute_paper_trade(
         let lamports = (buy_amount_sol * 1_000_000_000.0) as u64;
         // Use the configured slippage as the quote tolerance
         let quote_slippage = if slippage_bps > 0 { slippage_bps } else { 500 };
-        match jupiter.get_quote(SOL_MINT, &mint_str, lamports, quote_slippage).await {
+        match jupiter
+            .get_quote(SOL_MINT, &mint_str, lamports, quote_slippage)
+            .await
+        {
             Ok(q) => {
                 let out_raw: f64 = q.out_amount.parse().unwrap_or(0.0);
                 let impact: f64 = q.price_impact_pct.parse().unwrap_or(0.0);
@@ -656,7 +715,11 @@ async fn execute_paper_trade(
                 token_amount = out_raw; // already in raw token units
                 let tokens_ui = out_raw / 1_000_000.0; // pump.fun = 6 decimals
                 let value_usd = buy_amount_sol * sol_usd;
-                entry_price_usd = if tokens_ui > 0.0 { value_usd / tokens_ui } else { 0.0 };
+                entry_price_usd = if tokens_ui > 0.0 {
+                    value_usd / tokens_ui
+                } else {
+                    0.0
+                };
                 used_jupiter_buy_quote = true;
                 info!(
                     mint = %mint_str,
@@ -673,25 +736,39 @@ async fn execute_paper_trade(
                     error = %e,
                     "Paper buy: Jupiter quote failed — falling back to DexScreener mid + flat slippage"
                 );
-                let px = match jupiter.get_price(&mint_str).await { Ok(p) if p > 0.0 => p, _ => 0.0 };
+                let px = match jupiter.get_price(&mint_str).await {
+                    Ok(p) if p > 0.0 => p,
+                    _ => 0.0,
+                };
                 entry_price_usd = if slippage_bps > 0 && px > 0.0 {
                     px * (1.0 + slippage_bps as f64 / 10_000.0)
-                } else { px };
+                } else {
+                    px
+                };
                 token_amount = if entry_price_usd > 0.0 {
                     (buy_amount_sol * sol_usd / entry_price_usd) * 1_000_000.0
-                } else { 0.0 };
+                } else {
+                    0.0
+                };
             }
         }
     } else {
         // Legacy DexScreener path
-        let px = match jupiter.get_price(&mint_str).await { Ok(p) if p > 0.0 => p, _ => 0.0 };
+        let px = match jupiter.get_price(&mint_str).await {
+            Ok(p) if p > 0.0 => p,
+            _ => 0.0,
+        };
         let pre_slippage_price = px;
         entry_price_usd = if slippage_bps > 0 && px > 0.0 {
             px * (1.0 + slippage_bps as f64 / 10_000.0)
-        } else { px };
+        } else {
+            px
+        };
         token_amount = if entry_price_usd > 0.0 {
             (buy_amount_sol * sol_usd / entry_price_usd) * 1_000_000.0
-        } else { 0.0 };
+        } else {
+            0.0
+        };
         if slippage_bps > 0 && pre_slippage_price > 0.0 {
             info!(
                 mint = %mint_str,
@@ -725,9 +802,15 @@ async fn execute_paper_trade(
                         "⏭️ Anti-chase: price moved {:.1}% since filter — skipping paper trade",
                         move_pct
                     );
-                    log_system_event(supabase, "anti_chase_skip",
-                        &format!("Mint: {} — price moved {:.1}% since filter (max {}%)",
-                            mint_str, move_pct, max_move_pct)).await;
+                    log_system_event(
+                        supabase,
+                        "anti_chase_skip",
+                        &format!(
+                            "Mint: {} — price moved {:.1}% since filter (max {}%)",
+                            mint_str, move_pct, max_move_pct
+                        ),
+                    )
+                    .await;
                     return Ok(None);
                 }
             }
@@ -843,7 +926,11 @@ async fn execute_paper_trade(
     } else {
         slippage_bps as f64
     };
-    let tx_sig_label = if used_jupiter_buy_quote { "paper_jupiter_quote" } else { "paper_dexscreener" };
+    let tx_sig_label = if used_jupiter_buy_quote {
+        "paper_jupiter_quote"
+    } else {
+        "paper_dexscreener"
+    };
     tokio::spawn(async move {
         let latency_payload = serde_json::json!({
             "position_id": position_id,
@@ -947,7 +1034,12 @@ async fn execute_real_trade(
 
         for attempt in 1..=QUOTE_RETRIES {
             match jupiter
-                .get_quote(SOL_MINT, &mint_str, amount_lamports, cfg.strategy.execution.slippage_bps)
+                .get_quote(
+                    SOL_MINT,
+                    &mint_str,
+                    amount_lamports,
+                    cfg.strategy.execution.slippage_bps,
+                )
                 .await
             {
                 Ok(q) => {
@@ -965,7 +1057,8 @@ async fn execute_real_trade(
                     );
                     last_err = Some(e);
                     if attempt < QUOTE_RETRIES {
-                        tokio::time::sleep(std::time::Duration::from_secs(QUOTE_RETRY_DELAY_SECS)).await;
+                        tokio::time::sleep(std::time::Duration::from_secs(QUOTE_RETRY_DELAY_SECS))
+                            .await;
                     }
                 }
                 Err(e) => {
@@ -977,8 +1070,15 @@ async fn execute_real_trade(
         match result_quote {
             Some(q) => q,
             None => {
-                log_system_event(supabase, "no_route_skip",
-                    &format!("Mint: {} — no Jupiter route after {} retries", mint_str, QUOTE_RETRIES)).await;
+                log_system_event(
+                    supabase,
+                    "no_route_skip",
+                    &format!(
+                        "Mint: {} — no Jupiter route after {} retries",
+                        mint_str, QUOTE_RETRIES
+                    ),
+                )
+                .await;
                 return Err(last_err.unwrap_or_else(|| anyhow::anyhow!("No route found")));
             }
         }
@@ -1007,7 +1107,8 @@ async fn execute_real_trade(
                     if sol_usd > 0.0 {
                         let filter_price_sol = filter_price / sol_usd;
                         if filter_price_sol > 0.0 {
-                            let move_pct = ((quote_price_sol - filter_price_sol) / filter_price_sol) * 100.0;
+                            let move_pct =
+                                ((quote_price_sol - filter_price_sol) / filter_price_sol) * 100.0;
                             debug!(
                                 mint = %mint_str,
                                 quote_price_sol = format!("{:.12}", quote_price_sol),
@@ -1023,9 +1124,15 @@ async fn execute_real_trade(
                                     "⏭️ Anti-chase: price moved {:.1}% since filter — aborting trade",
                                     move_pct
                                 );
-                                log_system_event(supabase, "anti_chase_skip",
-                                    &format!("Mint: {} — price moved {:.1}% since filter (max {}%)",
-                                        mint_str, move_pct, max_move_pct)).await;
+                                log_system_event(
+                                    supabase,
+                                    "anti_chase_skip",
+                                    &format!(
+                                        "Mint: {} — price moved {:.1}% since filter (max {}%)",
+                                        mint_str, move_pct, max_move_pct
+                                    ),
+                                )
+                                .await;
                                 return Ok(None);
                             }
                         }
@@ -1041,12 +1148,18 @@ async fn execute_real_trade(
     let priority_fee_rpc = cfg.env.solana_rpc_url.as_str();
     let dynamic_priority_fee = helius_sender::get_priority_fee_estimate(
         priority_fee_rpc,
-        &[SOL_MINT, &mint_str, "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"],
+        &[
+            SOL_MINT,
+            &mint_str,
+            "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+        ],
         &cfg.strategy.execution.priority_level,
         cfg.strategy.execution.priority_fee_max_lamports,
-    ).await;
+    )
+    .await;
     // Cap at the configured maximum to prevent runaway fees
-    let priority_fee_lamports = dynamic_priority_fee.min(cfg.strategy.execution.priority_fee_max_lamports);
+    let priority_fee_lamports =
+        dynamic_priority_fee.min(cfg.strategy.execution.priority_fee_max_lamports);
     debug!(
         mint = %mint_str,
         dynamic_priority_fee,
@@ -1059,7 +1172,10 @@ async fn execute_real_trade(
             &quote.raw,
             &wallet.pubkey().to_string(),
             None,
-            Some((priority_fee_lamports, &cfg.strategy.execution.priority_level)),
+            Some((
+                priority_fee_lamports,
+                &cfg.strategy.execution.priority_level,
+            )),
         )
         .await?;
     let swap_tx_ms = step2_start.elapsed().as_millis() as i64;
@@ -1072,11 +1188,8 @@ async fn execute_real_trade(
 
     // Step 3: Decode, deserialize, and sign (local — fast)
     let step3_start = Instant::now();
-    let tx_bytes = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        &swap_tx_b64,
-    )
-    .map_err(|e| anyhow::anyhow!("Failed to decode swap tx base64: {}", e))?;
+    let tx_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &swap_tx_b64)
+        .map_err(|e| anyhow::anyhow!("Failed to decode swap tx base64: {}", e))?;
 
     let mut versioned_tx: solana_sdk::transaction::VersionedTransaction =
         bincode::deserialize(&tx_bytes)
@@ -1103,7 +1216,8 @@ async fn execute_real_trade(
     // Step 4: Submit transaction (Chainstack Warp, Jito bundle, or regular RPC)
     let step4_start = Instant::now();
     let (tx_sig, jito_tip_sol) = if cfg.env.use_helius_sender {
-        let hs = helius_sender.ok_or_else(|| anyhow::anyhow!("Warp TX sender enabled but client not initialized"))?;
+        let hs = helius_sender
+            .ok_or_else(|| anyhow::anyhow!("Warp TX sender enabled but client not initialized"))?;
 
         // Dual-submit: fire-and-forget same signed tx to backup RPC for redundancy.
         let backup_tx = signed_tx.clone();
@@ -1116,8 +1230,12 @@ async fn execute_real_trade(
                 ..Default::default()
             };
             match backup.send_transaction_with_config(&backup_tx, cfg).await {
-                Ok(sig) => tracing::debug!(mint = %mint_log, sig = %sig, "📤 Dual-submit: backup RPC accepted"),
-                Err(e) => tracing::debug!(mint = %mint_log, "Dual-submit backup failed (non-critical): {}", e),
+                Ok(sig) => {
+                    tracing::debug!(mint = %mint_log, sig = %sig, "📤 Dual-submit: backup RPC accepted")
+                }
+                Err(e) => {
+                    tracing::debug!(mint = %mint_log, "Dual-submit backup failed (non-critical): {}", e)
+                }
             }
         });
 
@@ -1379,15 +1497,19 @@ async fn execute_real_trade(
     let slippage_bps_bg = cfg.strategy.execution.slippage_bps;
     let priority_fee_sol = lamports_to_sol(priority_fee_lamports);
     let network_fee_sol = 0.000005_f64; // base tx fee: 5000 lamports
-    // helius_tip_sol or jito_tip_sol is already captured in jito_tip_sol
+                                        // helius_tip_sol or jito_tip_sol is already captured in jito_tip_sol
     let tip_sol_bg = jito_tip_sol;
     let is_helius = cfg.env.use_helius_sender;
     let pre_buy_bal_bg = pre_buy_balance;
     tokio::spawn(async move {
         // Log balance event to Supabase (fire-and-forget)
         if let Some(bal) = balance_bg {
-            log_system_event(&supabase_bg, "balance_after_buy",
-                &format!("Mint: {} | SOL balance: {:.4}", mint_bg, bal)).await;
+            log_system_event(
+                &supabase_bg,
+                "balance_after_buy",
+                &format!("Mint: {} | SOL balance: {:.4}", mint_bg, bal),
+            )
+            .await;
         }
 
         // Log latency to Supabase (fire-and-forget)
@@ -1409,7 +1531,8 @@ async fn execute_real_trade(
 
         // Log cost breakdown for the buy side
         let total_fees = network_fee_sol + priority_fee_sol + tip_sol_bg;
-        let wallet_change = balance_bg.and_then(|after| pre_buy_bal_bg.map(|before| after - before));
+        let wallet_change =
+            balance_bg.and_then(|after| pre_buy_bal_bg.map(|before| after - before));
         let cost_payload = serde_json::json!({
             "position_id": position_id,
             "mint": mint_bg,
@@ -1614,7 +1737,10 @@ async fn submit_via_rpc(
                 &format!("Mint: {} — Primary: 429, Backup: {}", mint, e2),
             )
             .await;
-            Err(anyhow::anyhow!("Transaction submission failed on both RPCs: {}", e2))
+            Err(anyhow::anyhow!(
+                "Transaction submission failed on both RPCs: {}",
+                e2
+            ))
         }
     }
 }
@@ -1625,11 +1751,7 @@ async fn submit_via_rpc(
 /// wallet+mint from the chain after a confirmed buy.
 /// Uses `amount` (raw smallest-unit string) so the value is consistent
 /// with what Jupiter expects for sell quotes.
-async fn fetch_token_balance(
-    rpc: &RpcClient,
-    wallet: &Pubkey,
-    mint_str: &str,
-) -> Option<f64> {
+async fn fetch_token_balance(rpc: &RpcClient, wallet: &Pubkey, mint_str: &str) -> Option<f64> {
     let mint = Pubkey::from_str(mint_str).ok()?;
 
     let accounts = rpc
@@ -1643,8 +1765,7 @@ async fn fetch_token_balance(
     let balance: f64 = accounts
         .iter()
         .filter_map(|account| {
-            let data: serde_json::Value =
-                serde_json::to_value(&account.account.data).ok()?;
+            let data: serde_json::Value = serde_json::to_value(&account.account.data).ok()?;
             data.get("parsed")
                 .and_then(|p| p.get("info"))
                 .and_then(|i| i.get("tokenAmount"))
@@ -1664,10 +1785,7 @@ async fn fetch_token_balance(
 // ─── Supabase helpers ────────────────────────────────────────
 
 /// Insert a position into Supabase and return the assigned ID.
-async fn insert_position(
-    supabase: &SupabaseClient,
-    payload: &serde_json::Value,
-) -> Result<i64> {
+async fn insert_position(supabase: &SupabaseClient, payload: &serde_json::Value) -> Result<i64> {
     let url = format!("{}/positions", supabase.base_url);
     let resp = supabase
         .client
@@ -1700,17 +1818,17 @@ async fn update_position_field(
     payload: &serde_json::Value,
 ) -> Result<()> {
     let url = format!("{}/positions?id=eq.{}", supabase.base_url, position_id);
-    let resp = supabase
-        .client
-        .patch(&url)
-        .json(payload)
-        .send()
-        .await?;
+    let resp = supabase.client.patch(&url).json(payload).send().await?;
 
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("Failed to update position {}: HTTP {} — {}", position_id, status, body);
+        anyhow::bail!(
+            "Failed to update position {}: HTTP {} — {}",
+            position_id,
+            status,
+            body
+        );
     }
 
     Ok(())
@@ -1787,15 +1905,14 @@ async fn get_today_pnl(supabase: &SupabaseClient, paper_trade: bool) -> f64 {
             rows.iter()
                 .filter_map(|r| {
                     let pnl = r.get("pnl_sol").and_then(|v| v.as_f64())?;
-                    let sol_received = r.get("sol_received").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let sol_received = r
+                        .get("sol_received")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
                     let exit_reason = r.get("exit_reason").and_then(|v| v.as_str()).unwrap_or("");
                     // Skip ghost positions: recovery closed with no SOL returned
                     if exit_reason.contains("recovery_closed") && sol_received <= 0.0 {
-                        debug!(
-                            exit_reason,
-                            pnl,
-                            "Excluding ghost position from daily PnL"
-                        );
+                        debug!(exit_reason, pnl, "Excluding ghost position from daily PnL");
                         return None;
                     }
                     Some(pnl)

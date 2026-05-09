@@ -4,9 +4,9 @@ use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use tracing::{debug, info, warn};
 
-use crate::config::AppConfig;
 use super::rpc_fallback::is_rate_limited;
 use super::types::FilterResult;
+use crate::config::AppConfig;
 
 const CHECK_NAME: &str = "holders";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -18,11 +18,13 @@ impl HoldersFilter {
         Self
     }
 
-    pub async fn check(&self, mint: &Pubkey, cfg: &AppConfig, prefetched_supply: Option<f64>) -> (FilterResult, Option<f64>) {
-        let rpc = RpcClient::new_with_timeout(
-            cfg.env.solana_rpc_url.clone(),
-            REQUEST_TIMEOUT,
-        );
+    pub async fn check(
+        &self,
+        mint: &Pubkey,
+        cfg: &AppConfig,
+        prefetched_supply: Option<f64>,
+    ) -> (FilterResult, Option<f64>) {
+        let rpc = RpcClient::new_with_timeout(cfg.env.solana_rpc_url.clone(), REQUEST_TIMEOUT);
 
         // ── Resolve total supply (use pre-fetched value when available) ──
         let total_ui = if let Some(supply) = prefetched_supply {
@@ -31,7 +33,10 @@ impl HoldersFilter {
             let supply_result = rpc.get_token_supply(mint).await;
             let supply_result = if matches!(&supply_result, Err(e) if is_rate_limited(e)) {
                 warn!(mint = %mint, "QuickNode rate limited, using fallback RPC");
-                let fallback = RpcClient::new_with_timeout(cfg.env.solana_rpc_backup_url.clone(), REQUEST_TIMEOUT);
+                let fallback = RpcClient::new_with_timeout(
+                    cfg.env.solana_rpc_backup_url.clone(),
+                    REQUEST_TIMEOUT,
+                );
                 fallback.get_token_supply(mint).await
             } else {
                 supply_result
@@ -46,7 +51,10 @@ impl HoldersFilter {
                         return (FilterResult::pass(CHECK_NAME), None);
                     }
                     warn!(mint = %mint, "holders: supply fetch failed: {}", e);
-                    return (FilterResult::fail(CHECK_NAME, &format!("supply_fetch_failed: {}", e)), None);
+                    return (
+                        FilterResult::fail(CHECK_NAME, &format!("supply_fetch_failed: {}", e)),
+                        None,
+                    );
                 }
             };
 
@@ -55,7 +63,11 @@ impl HoldersFilter {
                 _ => {
                     let raw: f64 = total_supply.amount.parse().unwrap_or(0.0);
                     let d = total_supply.decimals as i32;
-                    if d > 0 { raw / 10_f64.powi(d) } else { raw }
+                    if d > 0 {
+                        raw / 10_f64.powi(d)
+                    } else {
+                        raw
+                    }
                 }
             }
         };
@@ -68,7 +80,8 @@ impl HoldersFilter {
         let largest_result = rpc.get_token_largest_accounts(mint).await;
         let largest_result = if matches!(&largest_result, Err(e) if is_rate_limited(e)) {
             warn!(mint = %mint, "QuickNode rate limited, using fallback RPC");
-            let fallback = RpcClient::new_with_timeout(cfg.env.solana_rpc_backup_url.clone(), REQUEST_TIMEOUT);
+            let fallback =
+                RpcClient::new_with_timeout(cfg.env.solana_rpc_backup_url.clone(), REQUEST_TIMEOUT);
             fallback.get_token_largest_accounts(mint).await
         } else {
             largest_result
@@ -78,7 +91,13 @@ impl HoldersFilter {
             Ok(accounts) => accounts,
             Err(e) => {
                 warn!(mint = %mint, "holders: largest accounts fetch failed: {}", e);
-                return (FilterResult::fail(CHECK_NAME, &format!("largest_accounts_fetch_failed: {}", e)), None);
+                return (
+                    FilterResult::fail(
+                        CHECK_NAME,
+                        &format!("largest_accounts_fetch_failed: {}", e),
+                    ),
+                    None,
+                );
             }
         };
 
@@ -88,7 +107,11 @@ impl HoldersFilter {
             let holder_ui = acct.amount.ui_amount.unwrap_or_else(|| {
                 let raw: f64 = acct.amount.amount.parse().unwrap_or(0.0);
                 let d = acct.amount.decimals as i32;
-                if d > 0 { raw / 10_f64.powi(d) } else { raw }
+                if d > 0 {
+                    raw / 10_f64.powi(d)
+                } else {
+                    raw
+                }
             });
             let pct = (holder_ui / total_ui) * 100.0;
             holder_pcts.push(pct);
@@ -110,7 +133,7 @@ impl HoldersFilter {
                     CHECK_NAME,
                     &format!("top10_{:.1}pct_exceeds_max_{:.1}pct", top_10_sum, max_top),
                 ),
-                Some(top_10_sum),  // ← still return the value even on fail
+                Some(top_10_sum), // ← still return the value even on fail
             );
         }
 
@@ -138,7 +161,11 @@ impl HoldersFilter {
         // ── Single-wallet dominance: reject if any one wallet holds too much ──
         let max_single = cfg.strategy.filters.max_single_holder_pct;
         if max_single > 0.0 {
-            if let Some((idx, &biggest_pct)) = holder_pcts.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()) {
+            if let Some((idx, &biggest_pct)) = holder_pcts
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            {
                 if biggest_pct > max_single {
                     info!(
                         mint = %mint,

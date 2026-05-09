@@ -1,5 +1,5 @@
-pub mod bags;
 pub mod api_limiter;
+pub mod bags;
 pub mod enrichment_sampler;
 pub mod helius_price_ws;
 pub mod helius_ws;
@@ -60,10 +60,10 @@ use crate::filters::post_buy::PostBuyAlert;
 use crate::logger::SupabaseClient;
 use crate::narrative::{self, NarrativeContext, NarrativeResult, NarrativeState};
 
-use moonbag::{MoonbagCommand, PromotionSource};
 use enrichment_sampler::SamplerCtx;
+use moonbag::{MoonbagCommand, PromotionSource};
 use price::PriceFetcher;
-use tick_stream::{DipAction, DipConfig, DipState, TickWindow, evaluate_dip};
+use tick_stream::{evaluate_dip, DipAction, DipConfig, DipState, TickWindow};
 use triggers::{check_triggers, PositionState};
 use types::{ExitResult, ExitSignal};
 
@@ -100,7 +100,12 @@ pub fn start(
     trading_state: Arc<TradingState>,
     mut alert_rx: mpsc::Receiver<PostBuyAlert>,
     moonbag_tx: mpsc::Sender<MoonbagCommand>,
-) -> (mpsc::Receiver<ExitSignal>, broadcast::Sender<ExitResult>, mpsc::Sender<PositionOpened>, mpsc::Sender<ExitSignal>) {
+) -> (
+    mpsc::Receiver<ExitSignal>,
+    broadcast::Sender<ExitResult>,
+    mpsc::Sender<PositionOpened>,
+    mpsc::Sender<ExitSignal>,
+) {
     let (exit_tx, exit_rx) = mpsc::channel::<ExitSignal>(EXIT_CHANNEL_CAPACITY);
     let exit_tx_for_moonbag = exit_tx.clone();
     let (confirm_tx, _) = broadcast::channel::<ExitResult>(CONFIRM_CHANNEL_CAPACITY);
@@ -153,7 +158,9 @@ pub fn start(
                 {
                     // Derive bot wallet pubkey from private key for gRPC tx confirmation.
                     use solana_sdk::signer::Signer;
-                    let bot_wallet = bs58::decode(&cfg.env.wallet_private_key).into_vec().ok()
+                    let bot_wallet = bs58::decode(&cfg.env.wallet_private_key)
+                        .into_vec()
+                        .ok()
                         .and_then(|kb| solana_sdk::signature::Keypair::from_bytes(&kb).ok())
                         .map(|kp| kp.pubkey().to_string());
                     if bot_wallet.is_none() {
@@ -170,8 +177,7 @@ pub fn start(
             ));
             info!("📡 Yellowstone gRPC price stream ENABLED (Chainstack, Jito ShredStream)");
             (Some(cache), Some(PriceStreamBackend::Yellowstone(handle)))
-        } else if cfg.strategy.monitoring.enable_helius_price_ws
-            && cfg.env.helius_ws_url.is_some()
+        } else if cfg.strategy.monitoring.enable_helius_price_ws && cfg.env.helius_ws_url.is_some()
         {
             let cache = Arc::new(helius_price_ws::HeliusPriceCache::new());
             price_fetcher = price_fetcher.with_helius_cache(Arc::clone(&cache));
@@ -208,7 +214,8 @@ pub fn start(
 
         // Enrichment sampler (passive data collection — Tiers 1/2/3).
         // Built once and cloned into each per-position task when enabled.
-        let sampler_ctx: Option<SamplerCtx> = if cfg.strategy.monitoring.enrichment_sampler_enabled {
+        let sampler_ctx: Option<SamplerCtx> = if cfg.strategy.monitoring.enrichment_sampler_enabled
+        {
             info!("🧪 Enrichment sampler ENABLED — snapshots scheduled per position");
             Some(SamplerCtx::new(Arc::clone(&cfg), Arc::clone(&supabase)))
         } else {
@@ -374,19 +381,25 @@ async fn monitor_position(
     let started_at = Instant::now();
     let mut tp1_triggered = false;
     let mut tp2_triggered = false;
-    let mut moonbag_eval_done = false;  // v14.1: tick-level early-promote runs at most once
+    let mut moonbag_eval_done = false; // v14.1: tick-level early-promote runs at most once
     let mut peak_price = position.entry_price_usd;
     let mut remaining_token_amount = position.token_amount;
     let mut remaining_sol_spent = position.sol_spent;
     let mut entry_price_usd = position.entry_price_usd;
     let mut entry_price_corrected = entry_price_usd >= 0.000001;
     let mut consecutive_exit_failures: u32 = 0;
+    let is_creator_rebuy_quality = is_creator_rebuy_quality_entry(&position);
+    let mut creator_rebuy_protection_started_at: Option<Instant> = None;
     const MAX_EXIT_FAILURES: u32 = 5;
 
     // ── Narrative moonbag state ──────────────────────────
-    let has_narrative = cfg.strategy.monitoring.narrative_check_enabled
-        && cfg.env.openai_api_key.is_some();
-    let narrative_intervals = cfg.strategy.monitoring.narrative_check_intervals_secs.clone();
+    let has_narrative =
+        cfg.strategy.monitoring.narrative_check_enabled && cfg.env.openai_api_key.is_some();
+    let narrative_intervals = cfg
+        .strategy
+        .monitoring
+        .narrative_check_intervals_secs
+        .clone();
     let mut narrative_state = NarrativeState::NoSignal;
     let mut narrative_check_idx: usize = 0;
     let mut narrative_in_flight = false;
@@ -396,20 +409,22 @@ async fn monitor_position(
         .build()
         .unwrap_or_default();
 
-    let dev_wallet_pubkey = position.dev_wallet.as_deref().and_then(|s| {
-        match Pubkey::from_str(s) {
-            Ok(pk) => Some(pk),
-            Err(e) => {
-                warn!(
-                    mint = %position.mint,
-                    dev_wallet = s,
-                    "Failed to parse dev wallet pubkey — dev dump protection disabled: {}",
-                    e
-                );
-                None
-            }
-        }
-    });
+    let dev_wallet_pubkey =
+        position
+            .dev_wallet
+            .as_deref()
+            .and_then(|s| match Pubkey::from_str(s) {
+                Ok(pk) => Some(pk),
+                Err(e) => {
+                    warn!(
+                        mint = %position.mint,
+                        dev_wallet = s,
+                        "Failed to parse dev wallet pubkey — dev dump protection disabled: {}",
+                        e
+                    );
+                    None
+                }
+            });
     let dev_initial_balance = position.dev_initial_balance.unwrap_or(0);
     let mint_pubkey = Pubkey::from_str(&position.mint).ok();
     let mut last_dev_check = Instant::now();
@@ -454,14 +469,16 @@ async fn monitor_position(
                 let shutdown_rx = helius_shutdown_tx.subscribe();
                 let watcher_clone = helius_ws::HeliusWatcher::new(safety_ws_url.clone());
                 tokio::spawn(async move {
-                    watcher_clone.watch_dev_wallet(
-                        dev_ata,
-                        dev_initial_balance,
-                        dev_dump_threshold_pct,
-                        exit_tx_clone,
-                        ctx,
-                        shutdown_rx,
-                    ).await;
+                    watcher_clone
+                        .watch_dev_wallet(
+                            dev_ata,
+                            dev_initial_balance,
+                            dev_dump_threshold_pct,
+                            exit_tx_clone,
+                            ctx,
+                            shutdown_rx,
+                        )
+                        .await;
                 });
             }
         }
@@ -512,14 +529,16 @@ async fn monitor_position(
                         }
                     };
                     let watcher = helius_ws::HeliusWatcher::new(ws_url);
-                    watcher.watch_lp_vault(
-                        pool_pubkey,
-                        initial_lamports,
-                        lp_threshold,
-                        exit_tx_clone,
-                        ctx,
-                        shutdown_rx,
-                    ).await;
+                    watcher
+                        .watch_lp_vault(
+                            pool_pubkey,
+                            initial_lamports,
+                            lp_threshold,
+                            exit_tx_clone,
+                            ctx,
+                            shutdown_rx,
+                        )
+                        .await;
                 });
             }
         }
@@ -549,7 +568,12 @@ async fn monitor_position(
                 // data; legacy Raydium pools use ATA derivation.
                 let (token_vault, sol_vault, sol_vault_is_token_account, resolve_method) =
                     match helius_ws::resolve_pool_vaults(&rpc, &pool_pubkey, mint_pub).await {
-                        Some(v) => (v.token_vault, v.sol_vault, v.sol_vault_is_token_account, "pumpswap_onchain"),
+                        Some(v) => (
+                            v.token_vault,
+                            v.sol_vault,
+                            v.sol_vault_is_token_account,
+                            "pumpswap_onchain",
+                        ),
                         None => {
                             // Fallback for non-PumpSwap pools (Raydium etc.)
                             let tv = helius_ws::derive_ata(&pool_pubkey, mint_pub);
@@ -641,16 +665,18 @@ async fn monitor_position(
                     };
 
                     let watcher = helius_ws::HeliusWatcher::new(ws_url);
-                    watcher.watch_pool_trades(
-                        token_vault,
-                        sol_vault,
-                        initial_token,
-                        initial_sol,
-                        tick_window_clone,
-                        mint_str,
-                        shutdown_rx,
-                        sol_vault_is_token_account,
-                    ).await;
+                    watcher
+                        .watch_pool_trades(
+                            token_vault,
+                            sol_vault,
+                            initial_token,
+                            initial_sol,
+                            tick_window_clone,
+                            mint_str,
+                            shutdown_rx,
+                            sol_vault_is_token_account,
+                        )
+                        .await;
                 });
             }
         }
@@ -676,9 +702,7 @@ async fn monitor_position(
         let pos_id = position.position_id;
         let supa = Arc::clone(&supabase);
         tokio::spawn(async move {
-            st_trades::watch_trades(
-                st_key, mint_str, pos_id, supa, shutdown_rx,
-            ).await;
+            st_trades::watch_trades(st_key, mint_str, pos_id, supa, shutdown_rx).await;
         });
         debug!(mint = %position.mint, "ST trades observe-only watcher spawned");
     }
@@ -706,12 +730,17 @@ async fn monitor_position(
     let mut cto_stage_prices: Vec<f64> = Vec::new(); // price at each checkpoint for higher-lows detection
 
     // Extract dev hold % from sniper enrichment features (from SolanaTracker or Birdeye)
-    let cto_dev_hold_pct: f64 = position.sniper_features.as_ref().and_then(|f| {
-        // Try SolanaTracker dev_pct first, fall back to Birdeye owner/creator pct
-        f.get("st_dev_pct").and_then(|v| v.as_f64())
-            .or_else(|| f.get("be_owner_balance_pct").and_then(|v| v.as_f64()))
-            .or_else(|| f.get("be_creator_balance_pct").and_then(|v| v.as_f64()))
-    }).unwrap_or(0.0);
+    let cto_dev_hold_pct: f64 = position
+        .sniper_features
+        .as_ref()
+        .and_then(|f| {
+            // Try SolanaTracker dev_pct first, fall back to Birdeye owner/creator pct
+            f.get("st_dev_pct")
+                .and_then(|v| v.as_f64())
+                .or_else(|| f.get("be_owner_balance_pct").and_then(|v| v.as_f64()))
+                .or_else(|| f.get("be_creator_balance_pct").and_then(|v| v.as_f64()))
+        })
+        .unwrap_or(0.0);
 
     // ── Shadow logging: start from entry, runs in parallel with monitoring ──
     let (shadow_exit_tx, shadow_exit_rx) = tokio::sync::watch::channel::<Option<String>>(None);
@@ -767,7 +796,7 @@ async fn monitor_position(
         //   Post-TP1: 2x base   (30min — gives the bag time to either run or trail out)
         //   Post-TP2: 4x base   (60min — proven runner, let trailing govern)
         let elapsed_seconds = started_at.elapsed().as_secs();
-        let creator_rebuy_runner_grace_active = is_creator_rebuy_quality_entry(&position)
+        let creator_rebuy_initial_grace_active = is_creator_rebuy_quality
             && cfg.strategy.monitoring.creator_rebuy_runner_grace_secs > 0
             && elapsed_seconds < cfg.strategy.monitoring.creator_rebuy_runner_grace_secs;
         let effective_max_hold_loop = if tp2_triggered {
@@ -781,7 +810,11 @@ async fn monitor_position(
             // Try to get a price for the exit signal; fall back to entry price
             let exit_price = {
                 let p = price_fetcher.get_price(&position.mint).await;
-                if p > 0.0 { p } else { entry_price_usd }
+                if p > 0.0 {
+                    p
+                } else {
+                    entry_price_usd
+                }
             };
 
             info!(
@@ -864,7 +897,8 @@ async fn monitor_position(
         // For GRADUATED tokens (PumpSwap/Raydium): WS cache has no entry, so
         // get_monitoring_price() returns stale last_known. We must periodically
         // call Jupiter (get_price) to get fresh quotes.
-        let ws_has_fresh = price_fetcher.helius_cache()
+        let ws_has_fresh = price_fetcher
+            .helius_cache()
             .map_or(false, |c| c.get(&position.mint).is_some());
         let mut current_price = if ws_has_fresh {
             // Bonding-curve token with live WS feed — use cache (fast, free)
@@ -991,14 +1025,44 @@ async fn monitor_position(
             });
         }
 
+        let peak_multiplier = if entry_price_usd > 0.0 {
+            peak_price / entry_price_usd
+        } else {
+            0.0
+        };
+        let protection_trigger = cfg
+            .strategy
+            .monitoring
+            .creator_rebuy_runner_protection_peak_multiplier;
+        let protection_secs = cfg.strategy.monitoring.creator_rebuy_runner_protection_secs;
+        if is_creator_rebuy_quality
+            && protection_secs > 0
+            && protection_trigger > 0.0
+            && peak_multiplier >= protection_trigger
+            && creator_rebuy_protection_started_at.is_none()
+        {
+            creator_rebuy_protection_started_at = Some(Instant::now());
+            info!(
+                mint = %position.mint,
+                peak_multiplier = format!("{:.2}x", peak_multiplier),
+                protection_secs,
+                "🛡️ Creator-rebuy protected-runner state armed"
+            );
+        }
+        let creator_rebuy_protected_runner_active = creator_rebuy_protection_started_at
+            .map(|armed_at| protection_secs > 0 && armed_at.elapsed().as_secs() < protection_secs)
+            .unwrap_or(false);
+        let creator_rebuy_runner_soft_protection_active =
+            creator_rebuy_initial_grace_active || creator_rebuy_protected_runner_active;
+
         // ── Pattern #5: Round Number Rejection ──────────────────
         // If price hits a round multiplier (2x, 3x, 5x, 10x) and then
         // drops >5% from that touch within 60 seconds → exit.
         if entry_price_usd > 0.000001 && elapsed_seconds >= 30 {
             let multiplier = current_price / entry_price_usd;
-            let near_round = [2.0, 3.0, 5.0, 10.0].iter().any(|&level| {
-                (multiplier - level).abs() / level < 0.05
-            });
+            let near_round = [2.0, 3.0, 5.0, 10.0]
+                .iter()
+                .any(|&level| (multiplier - level).abs() / level < 0.05);
 
             if near_round && round_touch_price.is_none() {
                 round_touch_price = Some(current_price);
@@ -1235,7 +1299,8 @@ async fn monitor_position(
                         // Track price at each checkpoint for higher-lows detection
                         cto_stage_prices.push(current_price);
                         let making_higher_lows = cto_stage_prices.len() >= 2
-                            && cto_stage_prices.last() > cto_stage_prices.get(cto_stage_prices.len() - 2);
+                            && cto_stage_prices.last()
+                                > cto_stage_prices.get(cto_stage_prices.len() - 2);
 
                         info!(
                             mint = %position.mint,
@@ -1304,10 +1369,10 @@ async fn monitor_position(
 
                         if is_final {
                             // Final stage (10min) — grade the CTO using momentum + price
-                            let is_strong = recovery_pct >= cto_strong_pct
-                                && momentum >= cto_strong_momentum;
-                            let is_strong_by_trend = momentum >= cto_strong_momentum
-                                && making_higher_lows;
+                            let is_strong =
+                                recovery_pct >= cto_strong_pct && momentum >= cto_strong_momentum;
+                            let is_strong_by_trend =
+                                momentum >= cto_strong_momentum && making_higher_lows;
                             let is_moderate = recovery_pct >= cto_moderate_pct
                                 && momentum >= cto_moderate_momentum;
 
@@ -1352,12 +1417,9 @@ async fn monitor_position(
                                 };
 
                                 if moonbag_tx.send(cmd).await.is_ok() {
-                                    trading_state.record_exit(
-                                        &position.mint,
-                                        position.sol_spent,
-                                        0.0,
-                                        true,
-                                    ).await;
+                                    trading_state
+                                        .record_exit(&position.mint, position.sol_spent, 0.0, true)
+                                        .await;
                                     info!(mint = %position.mint, "🌙 CTO strong → moonbag promotion complete");
                                     last_exit_reason = Some("cto_strong_moonbag".to_string());
                                     break;
@@ -1404,12 +1466,9 @@ async fn monitor_position(
                                 };
 
                                 if moonbag_tx.send(cmd).await.is_ok() {
-                                    trading_state.record_exit(
-                                        &position.mint,
-                                        position.sol_spent,
-                                        0.0,
-                                        true,
-                                    ).await;
+                                    trading_state
+                                        .record_exit(&position.mint, position.sol_spent, 0.0, true)
+                                        .await;
                                     info!(mint = %position.mint, "🌙 CTO moderate → moonbag promotion complete");
                                     last_exit_reason = Some("cto_moderate_moonbag".to_string());
                                     break;
@@ -1470,15 +1529,25 @@ async fn monitor_position(
         //   1. Stop re-checks once score already meets moonbag threshold (no point)
         //   2. Price gate: skip if price < 1.2× entry (flat/down token won't promote)
         //   3. Momentum gate: skip if momentum < 0.5 (more selling than buying)
-        let current_score = last_narrative_result.as_ref().map(|nr| nr.score as f64).unwrap_or(0.0);
-        let score_below_threshold = current_score < cfg.strategy.monitoring.moonbag_promotion_min_score;
-        if has_narrative && !narrative_in_flight && narrative_check_idx < narrative_intervals.len()
+        let current_score = last_narrative_result
+            .as_ref()
+            .map(|nr| nr.score as f64)
+            .unwrap_or(0.0);
+        let score_below_threshold =
+            current_score < cfg.strategy.monitoring.moonbag_promotion_min_score;
+        if has_narrative
+            && !narrative_in_flight
+            && narrative_check_idx < narrative_intervals.len()
             && score_below_threshold
         {
             let target_secs = narrative_intervals[narrative_check_idx];
             if elapsed_seconds >= target_secs {
                 // Price gate: token must be up at least 20% from entry
-                let price_ratio = if entry_price_usd > 0.0 { current_price / entry_price_usd } else { 0.0 };
+                let price_ratio = if entry_price_usd > 0.0 {
+                    current_price / entry_price_usd
+                } else {
+                    0.0
+                };
                 if price_ratio < 1.2 || last_momentum.momentum_ratio < 0.5 {
                     // Skip this check — token is flat/down or momentum is weak
                     info!(
@@ -1490,92 +1559,101 @@ async fn monitor_position(
                     );
                     narrative_check_idx += 1;
                 } else {
-                narrative_in_flight = true;
-                let api_key = cfg.env.openai_api_key.clone().unwrap_or_default();
-                let birdeye_key = cfg.env.birdeye_api_key.clone().unwrap_or_default();
-                let x_bearer = cfg.env.x_api_bearer_token.clone().unwrap_or_default();
-                let ctx = NarrativeContext {
-                    mint: position.mint.clone(),
-                    name: position.token_name.clone(),
-                    symbol: position.token_symbol.clone(),
-                    current_price_usd: current_price,
-                    entry_price_usd,
-                    peak_multiplier: if entry_price_usd > 0.0 { peak_price / entry_price_usd } else { 1.0 },
-                    hold_seconds: elapsed_seconds,
-                    buy_count: last_momentum.buy_count,
-                    sell_count: last_momentum.sell_count,
-                    momentum_ratio: last_momentum.momentum_ratio,
-                    buy_volume_sol: last_momentum.buy_volume_sol,
-                    sell_volume_sol: last_momentum.sell_volume_sol,
-                };
-                let client = http_client.clone();
-                let mint_log = position.mint.clone();
-
-                // Run narrative check in a spawned task to avoid blocking price polling
-                let (ntx, nrx) = tokio::sync::oneshot::channel();
-                tokio::spawn(async move {
-                    let result = narrative::check_narrative(&client, &api_key, &birdeye_key, &x_bearer, &ctx).await;
-                    let _ = ntx.send(result);
-                });
-
-                // Check for result non-blocking on next iterations
-                // Store the receiver for later polling
-                let result = tokio::time::timeout(
-                    std::time::Duration::from_secs(35),
-                    nrx,
-                ).await;
-
-                narrative_in_flight = false;
-                narrative_check_idx += 1;
-
-                match result {
-                    Ok(Ok(Ok(nr))) => {
-                        // Ratchet-only: state can only go UP
-                        if nr.state > narrative_state {
-                            info!(
-                                mint = %mint_log,
-                                old_state = %narrative_state,
-                                new_state = %nr.state,
-                                score = nr.score,
-                                check_num = narrative_check_idx,
-                                "🔮 Narrative state UPGRADED"
-                            );
-                            narrative_state = nr.state;
+                    narrative_in_flight = true;
+                    let api_key = cfg.env.openai_api_key.clone().unwrap_or_default();
+                    let birdeye_key = cfg.env.birdeye_api_key.clone().unwrap_or_default();
+                    let x_bearer = cfg.env.x_api_bearer_token.clone().unwrap_or_default();
+                    let ctx = NarrativeContext {
+                        mint: position.mint.clone(),
+                        name: position.token_name.clone(),
+                        symbol: position.token_symbol.clone(),
+                        current_price_usd: current_price,
+                        entry_price_usd,
+                        peak_multiplier: if entry_price_usd > 0.0 {
+                            peak_price / entry_price_usd
                         } else {
-                            info!(
-                                mint = %mint_log,
-                                state = %narrative_state,
-                                score = nr.score,
-                                check_num = narrative_check_idx,
-                                "🔮 Narrative check — no upgrade"
-                            );
-                        }
+                            1.0
+                        },
+                        hold_seconds: elapsed_seconds,
+                        buy_count: last_momentum.buy_count,
+                        sell_count: last_momentum.sell_count,
+                        momentum_ratio: last_momentum.momentum_ratio,
+                        buy_volume_sol: last_momentum.buy_volume_sol,
+                        sell_volume_sol: last_momentum.sell_volume_sol,
+                    };
+                    let client = http_client.clone();
+                    let mint_log = position.mint.clone();
 
-                        // Persist full OpenAI output to positions table
-                        {
-                            let sb = Arc::clone(&supabase);
-                            let pid = position.position_id;
-                            let nr_json = serde_json::to_value(&nr).unwrap_or_default();
-                            tokio::spawn(async move {
-                                let url = format!("{}/positions?id=eq.{}", sb.base_url, pid);
-                                let payload = serde_json::json!({
-                                    "narrative_state": nr.state.to_string(),
-                                    "narrative_score": nr.score,
-                                    "narrative_result": nr_json,
+                    // Run narrative check in a spawned task to avoid blocking price polling
+                    let (ntx, nrx) = tokio::sync::oneshot::channel();
+                    tokio::spawn(async move {
+                        let result = narrative::check_narrative(
+                            &client,
+                            &api_key,
+                            &birdeye_key,
+                            &x_bearer,
+                            &ctx,
+                        )
+                        .await;
+                        let _ = ntx.send(result);
+                    });
+
+                    // Check for result non-blocking on next iterations
+                    // Store the receiver for later polling
+                    let result =
+                        tokio::time::timeout(std::time::Duration::from_secs(35), nrx).await;
+
+                    narrative_in_flight = false;
+                    narrative_check_idx += 1;
+
+                    match result {
+                        Ok(Ok(Ok(nr))) => {
+                            // Ratchet-only: state can only go UP
+                            if nr.state > narrative_state {
+                                info!(
+                                    mint = %mint_log,
+                                    old_state = %narrative_state,
+                                    new_state = %nr.state,
+                                    score = nr.score,
+                                    check_num = narrative_check_idx,
+                                    "🔮 Narrative state UPGRADED"
+                                );
+                                narrative_state = nr.state;
+                            } else {
+                                info!(
+                                    mint = %mint_log,
+                                    state = %narrative_state,
+                                    score = nr.score,
+                                    check_num = narrative_check_idx,
+                                    "🔮 Narrative check — no upgrade"
+                                );
+                            }
+
+                            // Persist full OpenAI output to positions table
+                            {
+                                let sb = Arc::clone(&supabase);
+                                let pid = position.position_id;
+                                let nr_json = serde_json::to_value(&nr).unwrap_or_default();
+                                tokio::spawn(async move {
+                                    let url = format!("{}/positions?id=eq.{}", sb.base_url, pid);
+                                    let payload = serde_json::json!({
+                                        "narrative_state": nr.state.to_string(),
+                                        "narrative_score": nr.score,
+                                        "narrative_result": nr_json,
+                                    });
+                                    let _ = sb.client.patch(&url).json(&payload).send().await;
                                 });
-                                let _ = sb.client.patch(&url).json(&payload).send().await;
-                            });
-                        }
+                            }
 
-                        last_narrative_result = Some(nr);
+                            last_narrative_result = Some(nr);
+                        }
+                        Ok(Ok(Err(e))) => {
+                            warn!(mint = %mint_log, "Narrative check failed: {}", e);
+                        }
+                        _ => {
+                            warn!(mint = %mint_log, "Narrative check timed out or channel dropped");
+                        }
                     }
-                    Ok(Ok(Err(e))) => {
-                        warn!(mint = %mint_log, "Narrative check failed: {}", e);
-                    }
-                    _ => {
-                        warn!(mint = %mint_log, "Narrative check timed out or channel dropped");
-                    }
-                }
                 } // end else (price/momentum gate passed)
             }
         }
@@ -1594,7 +1672,7 @@ async fn monitor_position(
             elapsed_seconds,
             is_paper_trade: position.is_paper_trade,
             initial_liquidity_sol: position.initial_liquidity_sol,
-            runner_grace_active: creator_rebuy_runner_grace_active,
+            runner_grace_active: creator_rebuy_runner_soft_protection_active,
         };
 
         // ── Tick stream momentum + dip state machine ──────────
@@ -1634,14 +1712,15 @@ async fn monitor_position(
         // Handle dip death signals (immediate exit)
         // Gate: skip dip_death if position is younger than min_hold_before_dip_death
         if let DipAction::ImmediateExit { reason: dip_reason } = &dip_action {
-            if creator_rebuy_runner_grace_active && is_soft_dip_death_reason(dip_reason) {
+            if creator_rebuy_runner_soft_protection_active && is_soft_dip_death_reason(dip_reason) {
                 debug!(
                     mint = %position.mint,
                     reason = dip_reason,
                     age_secs = elapsed_seconds,
-                    grace_secs = cfg.strategy.monitoring.creator_rebuy_runner_grace_secs,
+                    initial_grace_secs = cfg.strategy.monitoring.creator_rebuy_runner_grace_secs,
+                    protected_runner = creator_rebuy_protected_runner_active,
                     pnl_pct = format!("{:.2}", pnl_pct),
-                    "🛡️ Soft dip death suppressed — creator-rebuy runner grace active"
+                    "🛡️ Soft dip death suppressed — creator-rebuy runner protection active"
                 );
             } else if elapsed_seconds < cfg.strategy.monitoring.min_hold_before_dip_death {
                 debug!(
@@ -1678,7 +1757,8 @@ async fn monitor_position(
                             dev_wallet.as_deref(),
                             elapsed,
                             &trigger,
-                        ).await;
+                        )
+                        .await;
                     });
                 }
                 let signal = ExitSignal {
@@ -1699,6 +1779,41 @@ async fn monitor_position(
                 last_exit_reason = Some("dip_death".to_string());
                 break;
             }
+        }
+
+        let protected_floor = cfg
+            .strategy
+            .monitoring
+            .creator_rebuy_runner_floor_multiplier;
+        if creator_rebuy_protected_runner_active
+            && protected_floor > 0.0
+            && entry_price_usd > 0.000001
+            && current_price / entry_price_usd <= protected_floor
+        {
+            info!(
+                mint = %position.mint,
+                current_multiplier = format!("{:.2}x", current_price / entry_price_usd),
+                floor = format!("{:.2}x", protected_floor),
+                peak_multiplier = format!("{:.2}x", peak_multiplier),
+                "🛡️ Protected creator-rebuy runner floor hit — taking profit before round-trip"
+            );
+            let signal = ExitSignal {
+                position_id: position.position_id,
+                mint: position.mint.clone(),
+                pct_to_sell: 100,
+                reason: types::ExitReason::TrailingStop,
+                current_price,
+                entry_price_usd,
+                sol_spent: remaining_sol_spent,
+                token_amount: remaining_token_amount,
+                is_paper_trade: position.is_paper_trade,
+                sub_reason: Some("creator_rebuy_protected_runner_floor".to_string()),
+            };
+            if exit_tx.send(signal).await.is_err() {
+                warn!(mint = %position.mint, "Monitoring → exit channel closed");
+            }
+            last_exit_reason = Some("creator_rebuy_protected_runner_floor".to_string());
+            break;
         }
 
         let suppress_trailing = matches!(dip_action, DipAction::SuppressTrailingStop);
@@ -1725,19 +1840,22 @@ async fn monitor_position(
             && remaining_token_amount > 1.0
             && current_price / entry_price_usd >= exit_cfg.tp1_multiplier
         {
-            let early_eval = moonbag::evaluate_paper_paths_detail(
-                position.sniper_features.as_ref(),
-            );
+            let early_eval =
+                moonbag::evaluate_paper_paths_detail(position.sniper_features.as_ref());
 
             // v18.7: on-chain bc_score is the primary moonbag gate; narrative
             // score is optional and additive. We promote at the TP1 cross
             // when EITHER the on-chain score clears the gate OR a v14
             // paper-path matched.
-            let early_onchain_score = position.sniper_features.as_ref()
+            let early_onchain_score = position
+                .sniper_features
+                .as_ref()
                 .and_then(|f| f.get("bc_score").and_then(|v| v.as_f64()))
                 .unwrap_or(0.0);
-            let early_narrative_score = last_narrative_result.as_ref()
-                .map(|nr| nr.score as f64).unwrap_or(0.0);
+            let early_narrative_score = last_narrative_result
+                .as_ref()
+                .map(|nr| nr.score as f64)
+                .unwrap_or(0.0);
             let early_effective_score = early_onchain_score.max(early_narrative_score);
             let early_min_score = cfg.strategy.monitoring.moonbag_promotion_min_score;
             let early_score_passes = early_effective_score >= early_min_score;
@@ -1760,10 +1878,17 @@ async fn monitor_position(
                 };
                 tokio::spawn(async move {
                     moonbag::write_path_eval_log(
-                        &sb, pos_id, &mint_bg, "early_tick",
-                        logged_score, min_score, false,
-                        &eval, decision,
-                    ).await;
+                        &sb,
+                        pos_id,
+                        &mint_bg,
+                        "early_tick",
+                        logged_score,
+                        min_score,
+                        false,
+                        &eval,
+                        decision,
+                    )
+                    .await;
                 });
             }
 
@@ -1800,12 +1925,9 @@ async fn monitor_position(
                 };
 
                 if moonbag_tx.send(cmd).await.is_ok() {
-                    trading_state.record_exit(
-                        &position.mint,
-                        position.sol_spent,
-                        0.0,
-                        true,
-                    ).await;
+                    trading_state
+                        .record_exit(&position.mint, position.sol_spent, 0.0, true)
+                        .await;
                     info!(mint = %position.mint, "🌙 Slot freed — moonbag tracker now owns this position");
                     last_exit_reason = Some("moonbag_promoted_early".to_string());
                     break;
@@ -1849,24 +1971,30 @@ async fn monitor_position(
             }
 
             // ── TP2 moonbag intercept: on-chain score OR fast-runner OR paper-path ──
-            if signal_reason_clone == types::ExitReason::TakeProfit2
-                && remaining_token_amount > 1.0
+            if signal_reason_clone == types::ExitReason::TakeProfit2 && remaining_token_amount > 1.0
             {
                 // v18.7: gate uses on-chain bc_score as the primary signal,
                 // narrative score (if present) is additive via .max().
-                let onchain_score = position.sniper_features.as_ref()
+                let onchain_score = position
+                    .sniper_features
+                    .as_ref()
                     .and_then(|f| f.get("bc_score").and_then(|v| v.as_f64()))
                     .unwrap_or(0.0);
-                let narrative_score = last_narrative_result.as_ref().map(|nr| nr.score as f64).unwrap_or(0.0);
+                let narrative_score = last_narrative_result
+                    .as_ref()
+                    .map(|nr| nr.score as f64)
+                    .unwrap_or(0.0);
                 let openai_score = onchain_score.max(narrative_score);
                 let min_score = cfg.strategy.monitoring.moonbag_promotion_min_score;
                 let elapsed_secs = started_at.elapsed().as_secs();
                 let fast_runner_threshold = cfg.strategy.monitoring.fast_runner_threshold_secs;
-                let is_fast_runner = elapsed_secs < fast_runner_threshold && last_narrative_result.is_none();
+                let is_fast_runner =
+                    elapsed_secs < fast_runner_threshold && last_narrative_result.is_none();
 
                 // v14 data-driven paths (B/C/D) — fall-back when score is below threshold
                 // and the position is not a fast runner.
-                let tp2_eval = moonbag::evaluate_paper_paths_detail(position.sniper_features.as_ref());
+                let tp2_eval =
+                    moonbag::evaluate_paper_paths_detail(position.sniper_features.as_ref());
                 let paper_path = if openai_score < min_score && !is_fast_runner {
                     tp2_eval.selected.clone()
                 } else {
@@ -1874,7 +2002,8 @@ async fn monitor_position(
                 };
 
                 // Determine if we should promote
-                let should_promote = openai_score >= min_score || is_fast_runner || paper_path.is_some();
+                let should_promote =
+                    openai_score >= min_score || is_fast_runner || paper_path.is_some();
                 let promotion_source = if is_fast_runner {
                     PromotionSource::FastRunner
                 } else if openai_score >= min_score {
@@ -1903,10 +2032,17 @@ async fn monitor_position(
                     let is_fr = is_fast_runner;
                     tokio::spawn(async move {
                         moonbag::write_path_eval_log(
-                            &sb, pos_id, &mint_bg, "tp2",
-                            openai_score, min_score, is_fr,
-                            &eval, tp2_decision,
-                        ).await;
+                            &sb,
+                            pos_id,
+                            &mint_bg,
+                            "tp2",
+                            openai_score,
+                            min_score,
+                            is_fr,
+                            &eval,
+                            tp2_decision,
+                        )
+                        .await;
                     });
                 }
 
@@ -1923,12 +2059,17 @@ async fn monitor_position(
                     let lp = last_price;
                     let ep = entry_price_usd;
                     let mr = last_momentum.momentum_ratio;
-                    let pk = if entry_price_usd > 0.0 { peak_price / entry_price_usd } else { 1.0 };
+                    let pk = if entry_price_usd > 0.0 {
+                        peak_price / entry_price_usd
+                    } else {
+                        1.0
+                    };
                     let nr_clone = last_narrative_result.clone();
                     let source_str = promotion_source.to_string();
                     let is_fr = is_fast_runner;
                     tokio::spawn(async move {
-                        let nr_json = nr_clone.as_ref()
+                        let nr_json = nr_clone
+                            .as_ref()
                             .and_then(|nr| serde_json::to_value(nr).ok())
                             .unwrap_or(serde_json::json!(null));
                         let payload = serde_json::json!({
@@ -2013,12 +2154,9 @@ async fn monitor_position(
                     };
 
                     if moonbag_tx.send(cmd).await.is_ok() {
-                        trading_state.record_exit(
-                            &position.mint,
-                            position.sol_spent,
-                            0.0,
-                            true,
-                        ).await;
+                        trading_state
+                            .record_exit(&position.mint, position.sol_spent, 0.0, true)
+                            .await;
 
                         info!(
                             mint = %position.mint,
@@ -2175,11 +2313,20 @@ async fn monitor_position(
                 && tp1_triggered
                 && remaining_token_amount > 1.0
             {
-                let peak_mult = if entry_price_usd > 0.0 { peak_price / entry_price_usd } else { 1.0 };
-                let onchain_score = position.sniper_features.as_ref()
+                let peak_mult = if entry_price_usd > 0.0 {
+                    peak_price / entry_price_usd
+                } else {
+                    1.0
+                };
+                let onchain_score = position
+                    .sniper_features
+                    .as_ref()
                     .and_then(|f| f.get("bc_score").and_then(|v| v.as_f64()))
                     .unwrap_or(0.0);
-                let narrative_score = last_narrative_result.as_ref().map(|nr| nr.score as f64).unwrap_or(0.0);
+                let narrative_score = last_narrative_result
+                    .as_ref()
+                    .map(|nr| nr.score as f64)
+                    .unwrap_or(0.0);
                 let openai_score = onchain_score.max(narrative_score);
                 let min_score = cfg.strategy.monitoring.moonbag_promotion_min_score;
 
@@ -2198,7 +2345,8 @@ async fn monitor_position(
                     let mr = last_momentum.momentum_ratio;
                     let nr_clone = last_narrative_result.clone();
                     tokio::spawn(async move {
-                        let nr_json = nr_clone.as_ref()
+                        let nr_json = nr_clone
+                            .as_ref()
                             .and_then(|nr| serde_json::to_value(nr).ok())
                             .unwrap_or(serde_json::json!(null));
                         let payload = serde_json::json!({
@@ -2231,7 +2379,8 @@ async fn monitor_position(
                 }
 
                 // v14 data-driven paths B/C/D \u2014 fallback when OpenAI score below gate.
-                let tp1_eval = moonbag::evaluate_paper_paths_detail(position.sniper_features.as_ref());
+                let tp1_eval =
+                    moonbag::evaluate_paper_paths_detail(position.sniper_features.as_ref());
                 let tp1_paper_path = if openai_score < min_score {
                     tp1_eval.selected.clone()
                 } else {
@@ -2252,10 +2401,17 @@ async fn monitor_position(
                     let eval = tp1_eval.clone();
                     tokio::spawn(async move {
                         moonbag::write_path_eval_log(
-                            &sb, pos_id, &mint_bg, "tp1",
-                            openai_score, min_score, false,
-                            &eval, tp1_decision,
-                        ).await;
+                            &sb,
+                            pos_id,
+                            &mint_bg,
+                            "tp1",
+                            openai_score,
+                            min_score,
+                            false,
+                            &eval,
+                            tp1_decision,
+                        )
+                        .await;
                     });
                 }
 
@@ -2302,12 +2458,9 @@ async fn monitor_position(
                     };
 
                     if moonbag_tx.send(cmd).await.is_ok() {
-                        trading_state.record_exit(
-                            &position.mint,
-                            position.sol_spent,
-                            0.0,
-                            true,
-                        ).await;
+                        trading_state
+                            .record_exit(&position.mint, position.sol_spent, 0.0, true)
+                            .await;
 
                         info!(
                             mint = %position.mint,
@@ -2331,7 +2484,6 @@ async fn monitor_position(
             // Otherwise, continue monitoring — next trigger will fire on next iteration
             continue;
         }
-
     }
 
     // ── Gap 6: Write monitoring_snapshot JSONB to positions at exit ──
@@ -2371,7 +2523,10 @@ async fn monitor_position(
         },
     });
     {
-        let url = format!("{}/positions?id=eq.{}", supabase.base_url, position.position_id);
+        let url = format!(
+            "{}/positions?id=eq.{}",
+            supabase.base_url, position.position_id
+        );
         let payload = serde_json::json!({ "monitoring_snapshot": monitoring_snapshot });
         let supabase_bg = Arc::clone(&supabase);
         tokio::spawn(async move {
@@ -2399,7 +2554,10 @@ async fn monitor_position(
     // If this was a moonbag promotion, persist exit_reason marker.
     // moonbag_promoted/status are now set by moonbag tracker only after INSERT succeeds.
     if exit_reason_str.contains("moonbag_promoted") {
-        let url = format!("{}/positions?id=eq.{}", supabase.base_url, position.position_id);
+        let url = format!(
+            "{}/positions?id=eq.{}",
+            supabase.base_url, position.position_id
+        );
         let payload = serde_json::json!({
             "exit_reason": &exit_reason_str,
         });
@@ -2453,7 +2611,11 @@ async fn monitor_position(
             );
             if let Ok(resp) = sb.client.get(&url).send().await {
                 if let Ok(rows) = resp.json::<Vec<serde_json::Value>>().await {
-                    if let Some(cid) = rows.first().and_then(|r| r.get("id")).and_then(|v| v.as_i64()) {
+                    if let Some(cid) = rows
+                        .first()
+                        .and_then(|r| r.get("id"))
+                        .and_then(|v| v.as_i64())
+                    {
                         crate::sniper::tracker::spawn_rejected_tracker(
                             Arc::clone(&sb),
                             cid,
@@ -2648,7 +2810,13 @@ async fn shadow_log_loop(
         "mint": mint,
         "entry_price_usd": entry_price_usd,
     });
-    let row_inserted = match supabase.client.post(&insert_url).json(&insert_payload).send().await {
+    let row_inserted = match supabase
+        .client
+        .post(&insert_url)
+        .json(&insert_payload)
+        .send()
+        .await
+    {
         Ok(resp) if resp.status().is_success() => true,
         Ok(resp) => {
             let body = resp.text().await.unwrap_or_default();
@@ -2761,8 +2929,8 @@ async fn shadow_log_loop(
         // Each PATCH re-sends the full (growing) snapshot array, so we throttle
         // post-exit to keep network/Supabase write amplification bounded over 24h.
         let flush_period_secs: u64 = if exit_elapsed_secs.is_some() { 300 } else { 30 };
-        let should_flush = tick_count == 1
-            || elapsed_secs.saturating_sub(last_flush_secs) >= flush_period_secs;
+        let should_flush =
+            tick_count == 1 || elapsed_secs.saturating_sub(last_flush_secs) >= flush_period_secs;
         if should_flush {
             last_flush_secs = elapsed_secs;
             let payload = serde_json::json!({
@@ -2774,7 +2942,13 @@ async fn shadow_log_loop(
                 "exit_at_secs": exit_elapsed_secs,
             });
 
-            match supabase.client.patch(&patch_url).json(&payload).send().await {
+            match supabase
+                .client
+                .patch(&patch_url)
+                .json(&payload)
+                .send()
+                .await
+            {
                 Ok(resp) if resp.status().is_success() => {}
                 Ok(resp) => {
                     let body = resp.text().await.unwrap_or_default();
@@ -2806,7 +2980,13 @@ async fn shadow_log_loop(
         "completed_at": chrono::Utc::now().to_rfc3339(),
     });
 
-    match supabase.client.patch(&patch_url).json(&final_payload).send().await {
+    match supabase
+        .client
+        .patch(&patch_url)
+        .json(&final_payload)
+        .send()
+        .await
+    {
         Ok(resp) if resp.status().is_success() => {
             info!(
                 mint = %mint,
@@ -2830,11 +3010,7 @@ async fn shadow_log_loop(
 }
 
 /// Correct a broken entry price in Supabase (when price was near-zero at buy time).
-async fn update_entry_price(
-    supabase: &SupabaseClient,
-    position_id: i64,
-    entry_price_usd: f64,
-) {
+async fn update_entry_price(supabase: &SupabaseClient, position_id: i64, entry_price_usd: f64) {
     let url = format!("{}/positions?id=eq.{}", supabase.base_url, position_id);
     let payload = serde_json::json!({
         "entry_price_usd": entry_price_usd,
@@ -2844,7 +3020,11 @@ async fn update_entry_price(
 
     match supabase.client.patch(&url).json(&payload).send().await {
         Ok(resp) if resp.status().is_success() => {
-            tracing::info!(position_id, entry_price_usd, "✅ Corrected entry price in DB");
+            tracing::info!(
+                position_id,
+                entry_price_usd,
+                "✅ Corrected entry price in DB"
+            );
         }
         Ok(resp) => {
             let body = resp.text().await.unwrap_or_default();
@@ -2856,12 +3036,7 @@ async fn update_entry_price(
     }
 }
 
-async fn update_tp_flags(
-    supabase: &SupabaseClient,
-    position_id: i64,
-    tp1: bool,
-    tp2: bool,
-) {
+async fn update_tp_flags(supabase: &SupabaseClient, position_id: i64, tp1: bool, tp2: bool) {
     let url = format!("{}/positions?id=eq.{}", supabase.base_url, position_id);
     let payload = serde_json::json!({
         "tp1_triggered": tp1,
@@ -2911,8 +3086,7 @@ async fn check_dev_wallet(
     let current_balance: u64 = token_accounts
         .iter()
         .filter_map(|account| {
-            let data: serde_json::Value =
-                serde_json::to_value(&account.account.data).ok()?;
+            let data: serde_json::Value = serde_json::to_value(&account.account.data).ok()?;
             data.get("parsed")
                 .and_then(|p| p.get("info"))
                 .and_then(|i| i.get("tokenAmount"))

@@ -1,7 +1,7 @@
 use tracing::{debug, warn};
 
-use crate::config::AppConfig;
 use super::types::FilterResult;
+use crate::config::AppConfig;
 
 const CHECK_NAME: &str = "price_impact";
 

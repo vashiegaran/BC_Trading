@@ -122,7 +122,10 @@ async fn cleanup_old_records(supabase: &SupabaseClient) {
     for &(table, column, days) in tables {
         let cutoff = chrono::Utc::now() - chrono::Duration::days(days);
         let cutoff_str = cutoff.to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
-        let url = format!("{}/{}?{}=lt.{}", supabase.base_url, table, column, cutoff_str);
+        let url = format!(
+            "{}/{}?{}=lt.{}",
+            supabase.base_url, table, column, cutoff_str
+        );
 
         match supabase.client.delete(&url).send().await {
             Ok(resp) if resp.status().is_success() => {
@@ -131,12 +134,7 @@ async fn cleanup_old_records(supabase: &SupabaseClient) {
             Ok(resp) => {
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
-                warn!(
-                    table = table,
-                    "Cleanup failed: HTTP {} — {}",
-                    status,
-                    body
-                );
+                warn!(table = table, "Cleanup failed: HTTP {} — {}", status, body);
             }
             Err(e) => {
                 warn!(table = table, "Cleanup failed: {}", e);
@@ -199,17 +197,16 @@ async fn main() {
     const BUILD_TIMESTAMP: &str = compile_time_stamp!();
 
     println!("═══════════════════════════════════════════════════");
-    println!("  Build version  : {} (built {})", BUILD_VERSION, BUILD_TIMESTAMP);
+    println!(
+        "  Build version  : {} (built {})",
+        BUILD_VERSION, BUILD_TIMESTAMP
+    );
     println!("  Wallet address : {}", pubkey);
     println!("  Paper trade    : {}", cfg.env.paper_trade);
     println!("  Network        : {}", cfg.env.solana_network);
 
     // ── 4. Initialize Supabase logger client ────────────
-    let supabase = SupabaseClient::init(
-        &cfg.env.supabase_url,
-        &cfg.env.supabase_service_key,
-    )
-    .await;
+    let supabase = SupabaseClient::init(&cfg.env.supabase_url, &cfg.env.supabase_service_key).await;
 
     info!("Supabase client initialized");
 
@@ -227,17 +224,20 @@ async fn main() {
     });
 
     let url = format!("{}/system_events", supabase.base_url);
-    match supabase.client.post(&url).json(&startup_payload).send().await {
+    match supabase
+        .client
+        .post(&url)
+        .json(&startup_payload)
+        .send()
+        .await
+    {
         Ok(resp) if resp.status().is_success() => {
             info!("Startup event logged to Supabase");
         }
         Ok(resp) => {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            error!(
-                "Failed to log startup event: HTTP {} — {}",
-                status, body
-            );
+            error!("Failed to log startup event: HTTP {} — {}", status, body);
         }
         Err(e) => {
             error!("Failed to log startup event: {}", e);
@@ -283,7 +283,12 @@ async fn main() {
             "message": format!("Starting SOL balance: {:.4}", bal),
         });
         let balance_url = format!("{}/system_events", supabase.base_url);
-        let _ = supabase.client.post(&balance_url).json(&balance_payload).send().await;
+        let _ = supabase
+            .client
+            .post(&balance_url)
+            .json(&balance_payload)
+            .send()
+            .await;
     }
 
     println!("═══════════════════════════════════════════════════");
@@ -293,13 +298,16 @@ async fn main() {
 
     // ── 6b. Initialize in-memory trading state ──────────
     let trading_state = execution::state::TradingState::new();
-    trading_state.hydrate_from_supabase(&supabase_arc, cfg_arc.env.paper_trade).await;
+    trading_state
+        .hydrate_from_supabase(&supabase_arc, cfg_arc.env.paper_trade)
+        .await;
 
     // ── 6c. Recover rejected-token trackers interrupted by restart ──
     sniper::tracker::recover_pending_trackers(Arc::clone(&supabase_arc)).await;
 
     // ── 7. Start detection engine ───────────────────────
-    let (detection_rx, bc_cache) = detection::start(Arc::clone(&cfg_arc), Arc::clone(&supabase_arc));
+    let (detection_rx, bc_cache) =
+        detection::start(Arc::clone(&cfg_arc), Arc::clone(&supabase_arc));
     info!("Detection engine started — listening for new tokens");
 
     // ── 7a. Start Bags launch monitor (research only) ──
@@ -331,8 +339,13 @@ async fn main() {
         Arc::clone(&wallet),
         Arc::clone(&trading_state),
     );
-    info!("Execution engine started — {} mode",
-        if cfg_arc.env.paper_trade { "PAPER" } else { "LIVE" }
+    info!(
+        "Execution engine started — {} mode",
+        if cfg_arc.env.paper_trade {
+            "PAPER"
+        } else {
+            "LIVE"
+        }
     );
 
     // ── 10. Start moonbag tracker ──────────────────────
@@ -353,15 +366,19 @@ async fn main() {
     {
         let mb_cfg = Arc::clone(&cfg_arc);
         let mb_supa = Arc::clone(&supabase_arc);
+        let mb_confirm_rx = confirm_tx.subscribe();
         tokio::spawn(async move {
             monitoring::moonbag::run_moonbag_tracker(
                 moonbag_rx,
                 exit_tx_for_moonbag,
+                mb_confirm_rx,
                 mb_cfg,
                 mb_supa,
-            ).await;
+            )
+            .await;
         });
-        info!("Moonbag tracker started — {} max concurrent",
+        info!(
+            "Moonbag tracker started — {} max concurrent",
             cfg_arc.strategy.monitoring.moonbag_max_concurrent
         );
     }
@@ -378,16 +395,14 @@ async fn main() {
     info!("Exit engine started — ready to process exit signals");
 
     // ── 11a. Start re-entry shadow watcher (post-moonbag exit) ──
-    reentry::start(Arc::clone(&cfg_arc), Arc::clone(&supabase_arc), filter_tx.clone());
+    reentry::start(
+        Arc::clone(&cfg_arc),
+        Arc::clone(&supabase_arc),
+        filter_tx.clone(),
+    );
 
     // ── 11b. Recover stuck positions from previous runs ─
-    recover_stuck_positions(
-        &cfg_arc,
-        &supabase_arc,
-        &wallet,
-        &recovery_tx,
-    )
-    .await;
+    recover_stuck_positions(&cfg_arc, &supabase_arc, &wallet, &recovery_tx).await;
 
     // ── 12. Register Ctrl+C handler (SAFETY Rule 8) ─────
     let shutdown_supabase = Arc::clone(&supabase_arc);
@@ -465,14 +480,23 @@ async fn recover_stuck_positions(
         return;
     }
 
-    info!(count = rows.len(), "🔄 Found stuck positions — starting recovery");
+    info!(
+        count = rows.len(),
+        "🔄 Found stuck positions — starting recovery"
+    );
 
     for row in &rows {
         let position_id = row.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
         let mint = row.get("mint").and_then(|v| v.as_str()).unwrap_or("");
-        let entry_price = row.get("entry_price_usd").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let entry_price = row
+            .get("entry_price_usd")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
         let sol_spent = row.get("sol_spent").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let _db_token_amount = row.get("token_amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let _db_token_amount = row
+            .get("token_amount")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
         let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
 
         if mint.is_empty() || position_id == 0 {
@@ -480,18 +504,15 @@ async fn recover_stuck_positions(
         }
 
         // Check on-chain token balance
-        let on_chain_balance = fetch_recovery_token_balance(
-            &rpc,
-            &wallet.pubkey(),
-            mint,
-        )
-        .await
-        .unwrap_or(0.0);
+        let on_chain_balance = fetch_recovery_token_balance(&rpc, &wallet.pubkey(), mint)
+            .await
+            .unwrap_or(0.0);
 
         if on_chain_balance <= 0.0 {
             // No tokens on-chain — mark as closed.
             // Preserve sol_received from any partial TP sells that already executed.
-            let prev_sol_received = row.get("sol_received")
+            let prev_sol_received = row
+                .get("sol_received")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.0);
             let actual_pnl_sol = prev_sol_received - sol_spent;
@@ -520,7 +541,13 @@ async fn recover_stuck_positions(
                 "pnl_pct": actual_pnl_pct,
                 "token_amount": 0,
             });
-            match supabase.client.patch(&close_url).json(&payload).send().await {
+            match supabase
+                .client
+                .patch(&close_url)
+                .json(&payload)
+                .send()
+                .await
+            {
                 Ok(resp) if resp.status().is_success() => {
                     info!(position_id, "Position closed via recovery");
                 }
@@ -533,9 +560,7 @@ async fn recover_stuck_positions(
         // authoritative, update DB, and re-monitor
         info!(
             position_id,
-            mint,
-            on_chain_balance,
-            "Updating token_amount from chain and re-monitoring"
+            mint, on_chain_balance, "Updating token_amount from chain and re-monitoring"
         );
         let fix_url = format!("{}/positions?id=eq.{}", supabase.base_url, position_id);
         let payload = serde_json::json!({ "token_amount": on_chain_balance, "status": "open" });
@@ -544,13 +569,17 @@ async fn recover_stuck_positions(
 
         info!(
             position_id,
-            mint,
-            token_amount,
-            "Re-injecting position into monitoring"
+            mint, token_amount, "Re-injecting position into monitoring"
         );
 
-        let pool_address = row.get("pool_address").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let dev_wallet = row.get("dev_wallet").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let pool_address = row
+            .get("pool_address")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let dev_wallet = row
+            .get("dev_wallet")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
         let opened = PositionOpened {
             position_id,
@@ -597,8 +626,7 @@ async fn fetch_recovery_token_balance(
     let balance: f64 = accounts
         .iter()
         .filter_map(|account| {
-            let data: serde_json::Value =
-                serde_json::to_value(&account.account.data).ok()?;
+            let data: serde_json::Value = serde_json::to_value(&account.account.data).ok()?;
             data.get("parsed")
                 .and_then(|p| p.get("info"))
                 .and_then(|i| i.get("tokenAmount"))
@@ -608,5 +636,9 @@ async fn fetch_recovery_token_balance(
         })
         .sum();
 
-    if balance > 0.0 { Some(balance) } else { None }
+    if balance > 0.0 {
+        Some(balance)
+    } else {
+        None
+    }
 }

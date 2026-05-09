@@ -60,7 +60,11 @@ async fn jup_throttle_wait() {
         let mut g = jup_throttle().lock().await;
         let now = Instant::now();
         let wait = g.next_allowed_at.saturating_duration_since(now);
-        let base = if wait.is_zero() { now } else { g.next_allowed_at };
+        let base = if wait.is_zero() {
+            now
+        } else {
+            g.next_allowed_at
+        };
         g.next_allowed_at = base + g.min_interval;
         wait
     };
@@ -210,7 +214,10 @@ impl JupiterClient {
 
         let quote_url = format!("{}/quote", JUPITER_BASE_URL);
         let mut last_err: Option<anyhow::Error> = None;
-        let _permit = self.rate_limiter.acquire().await
+        let _permit = self
+            .rate_limiter
+            .acquire()
+            .await
             .map_err(|_| anyhow::anyhow!("Jupiter rate limiter closed"))?;
 
         for attempt in 0..self.max_retries {
@@ -287,9 +294,8 @@ impl JupiterClient {
                         return Ok(quote);
                     }
                     // Read Retry-After BEFORE consuming the body.
-                    let retry_after = parse_retry_after(
-                        resp.headers().get(reqwest::header::RETRY_AFTER),
-                    );
+                    let retry_after =
+                        parse_retry_after(resp.headers().get(reqwest::header::RETRY_AFTER));
                     let is_429 = status.as_u16() == 429;
                     let body = resp.text().await.unwrap_or_default();
                     // Permanent failures — no point retrying
@@ -303,11 +309,7 @@ impl JupiterClient {
                         );
                         jup_throttle_cooldown(retry_after).await;
                     }
-                    last_err = Some(anyhow::anyhow!(
-                        "Jupiter quote HTTP {} — {}",
-                        status,
-                        body
-                    ));
+                    last_err = Some(anyhow::anyhow!("Jupiter quote HTTP {} — {}", status, body));
                 }
                 Err(e) => {
                     last_err = Some(e.into());
@@ -375,7 +377,10 @@ impl JupiterClient {
         }
 
         let mut last_err: Option<anyhow::Error> = None;
-        let _permit = self.rate_limiter.acquire().await
+        let _permit = self
+            .rate_limiter
+            .acquire()
+            .await
             .map_err(|_| anyhow::anyhow!("Jupiter rate limiter closed"))?;
 
         for attempt in 0..self.max_retries {
@@ -387,7 +392,13 @@ impl JupiterClient {
                 tokio::time::sleep(backoff).await;
             }
 
-            let result = self.client.post(&swap_url).header("x-api-key", &api_key).json(&body).send().await;
+            let result = self
+                .client
+                .post(&swap_url)
+                .header("x-api-key", &api_key)
+                .json(&body)
+                .send()
+                .await;
 
             match result {
                 Ok(resp) => {
@@ -399,9 +410,8 @@ impl JupiterClient {
                             .context("Failed to parse Jupiter swap response")?;
                         return Ok(swap_resp.swap_transaction);
                     }
-                    let retry_after = parse_retry_after(
-                        resp.headers().get(reqwest::header::RETRY_AFTER),
-                    );
+                    let retry_after =
+                        parse_retry_after(resp.headers().get(reqwest::header::RETRY_AFTER));
                     let is_429 = status.as_u16() == 429;
                     let resp_body = resp.text().await.unwrap_or_default();
                     if is_429 {
@@ -466,9 +476,7 @@ impl JupiterClient {
             .await
             .context("Failed to parse DexScreener price response")?;
 
-        let pairs = body
-            .pairs
-            .context("No pairs returned by DexScreener")?;
+        let pairs = body.pairs.context("No pairs returned by DexScreener")?;
 
         let pair = pairs
             .iter()

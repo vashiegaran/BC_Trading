@@ -80,13 +80,27 @@ impl Default for ReentryConfig {
     }
 }
 
-fn default_reentry_window_seconds() -> u64 { 21_600 }            // 6h
-fn default_reentry_min_dip_pct() -> f64 { 0.15 }                 // 15%
-fn default_reentry_min_narrative_score() -> u8 { 60 }            // 0..100 scale
-fn default_reentry_check_interval_seconds() -> u64 { 90 }
-fn default_reentry_outcome_interval_seconds() -> u64 { 300 }     // 5m
-fn default_reentry_enqueue_lookback_seconds() -> u64 { 300 }     // 5m
-fn default_reentry_min_peak_multiplier() -> f64 { 3.0 }          // moonbag-only by default
+fn default_reentry_window_seconds() -> u64 {
+    21_600
+} // 6h
+fn default_reentry_min_dip_pct() -> f64 {
+    0.15
+} // 15%
+fn default_reentry_min_narrative_score() -> u8 {
+    60
+} // 0..100 scale
+fn default_reentry_check_interval_seconds() -> u64 {
+    90
+}
+fn default_reentry_outcome_interval_seconds() -> u64 {
+    300
+} // 5m
+fn default_reentry_enqueue_lookback_seconds() -> u64 {
+    300
+} // 5m
+fn default_reentry_min_peak_multiplier() -> f64 {
+    3.0
+} // moonbag-only by default
 
 #[derive(Debug, Deserialize)]
 pub struct DetectionConfig {
@@ -196,30 +210,78 @@ pub struct DetectionConfig {
     pub early_buyer_rebuy_max_progress_pct: f64,
 }
 
-fn default_true() -> bool { true }
-fn default_bc_signal_volume_threshold() -> f64 { 50.0 }
-fn default_launch_label_shadow_max_age_seconds() -> u64 { 30 }
-fn default_launch_label_shadow_max_progress_pct() -> f64 { 25.0 }
-fn default_launch_label_shadow_min_prior_mints() -> usize { 1 }
-fn default_launch_label_shadow_min_prior_creators() -> usize { 1 }
-fn default_launch_label_shadow_max_gap_seconds() -> u64 { 180 }
-fn default_label_flow_shadow_min_progress_pct() -> f64 { 30.0 }
-fn default_label_flow_shadow_min_prior_mints() -> usize { 1 }
-fn default_label_flow_shadow_max_gap_seconds() -> u64 { 1_800 }
-fn default_narrative_cluster_min_prior_mints() -> usize { 1 }
-fn default_narrative_cluster_min_progress_pct() -> f64 { 20.0 }
-fn default_narrative_cluster_max_progress_pct() -> f64 { 100.0 }
-fn default_narrative_cluster_max_gap_seconds() -> u64 { 1_800 }
-fn default_narrative_cluster_min_score() -> f64 { 45.0 }
-fn default_probe_add_probe_progress_pct() -> f64 { 60.0 }
-fn default_probe_add_add_progress_pct() -> f64 { 75.0 }
-fn default_probe_add_min_unique_buyer_delta() -> usize { 10 }
-fn default_probe_add_min_volume_multiplier() -> f64 { 1.5 }
-fn default_early_buyer_rebuy_first_n() -> usize { 5 }
-fn default_early_buyer_rebuy_min_rebuy_wallets() -> usize { 1 }
-fn default_early_buyer_rebuy_max_progress_pct() -> f64 { 100.0 }
-fn default_max_liquidity_usd() -> u64 { 0 } // 0 = disabled, must be set explicitly to take effect
-fn default_max_initial_liquidity_sol() -> f64 { 0.0 } // 0 = disabled
+fn default_true() -> bool {
+    true
+}
+fn default_bc_signal_volume_threshold() -> f64 {
+    50.0
+}
+fn default_launch_label_shadow_max_age_seconds() -> u64 {
+    30
+}
+fn default_launch_label_shadow_max_progress_pct() -> f64 {
+    25.0
+}
+fn default_launch_label_shadow_min_prior_mints() -> usize {
+    1
+}
+fn default_launch_label_shadow_min_prior_creators() -> usize {
+    1
+}
+fn default_launch_label_shadow_max_gap_seconds() -> u64 {
+    180
+}
+fn default_label_flow_shadow_min_progress_pct() -> f64 {
+    30.0
+}
+fn default_label_flow_shadow_min_prior_mints() -> usize {
+    1
+}
+fn default_label_flow_shadow_max_gap_seconds() -> u64 {
+    1_800
+}
+fn default_narrative_cluster_min_prior_mints() -> usize {
+    1
+}
+fn default_narrative_cluster_min_progress_pct() -> f64 {
+    20.0
+}
+fn default_narrative_cluster_max_progress_pct() -> f64 {
+    100.0
+}
+fn default_narrative_cluster_max_gap_seconds() -> u64 {
+    1_800
+}
+fn default_narrative_cluster_min_score() -> f64 {
+    45.0
+}
+fn default_probe_add_probe_progress_pct() -> f64 {
+    60.0
+}
+fn default_probe_add_add_progress_pct() -> f64 {
+    75.0
+}
+fn default_probe_add_min_unique_buyer_delta() -> usize {
+    10
+}
+fn default_probe_add_min_volume_multiplier() -> f64 {
+    1.5
+}
+fn default_early_buyer_rebuy_first_n() -> usize {
+    5
+}
+fn default_early_buyer_rebuy_min_rebuy_wallets() -> usize {
+    1
+}
+fn default_early_buyer_rebuy_max_progress_pct() -> f64 {
+    100.0
+}
+fn default_max_liquidity_usd() -> u64 {
+    0
+} // 0 = disabled, must be set explicitly to take effect
+fn default_max_initial_liquidity_sol() -> f64 {
+    0.0
+} // 0 = disabled
 
 #[derive(Debug, Deserialize)]
 pub struct FiltersConfig {
@@ -375,30 +437,78 @@ pub struct FiltersConfig {
     pub graduation_goplus_enabled: bool,
 }
 
-fn default_max_single_holder_pct() -> f64 { 25.0 }
-fn default_min_holder_count() -> usize { 8 }
-fn default_min_buy_sell_ratio() -> f64 { 1.2 }
-fn default_creator_rebuy_shadow_min_score() -> f64 { 60.0 }
-fn default_creator_rebuy_live_test_min_score() -> f64 { 63.0 }
-fn default_creator_rebuy_live_test_min_buy_pressure_pct() -> f64 { 80.0 }
-fn default_creator_rebuy_live_test_min_buy_sell_ratio() -> f64 { 4.0 }
-fn default_creator_rebuy_live_test_min_unique_buyers() -> usize { 0 }
-fn default_creator_rebuy_live_test_max_sell_count() -> u64 { 3 }
-fn default_creator_rebuy_live_test_min_initial_liquidity_sol() -> f64 { 30.0 }
-fn default_creator_rebuy_live_test_max_initial_liquidity_sol() -> f64 { 80.0 }
-fn default_creator_rebuy_live_test_max_open_positions() -> u32 { 1 }
-fn default_creator_rebuy_live_test_max_bc_progress_pct() -> f64 { 45.0 }
-fn default_creator_rebuy_live_test_min_total_volume_sol() -> f64 { 30.0 }
-fn default_creator_rebuy_live_test_min_whale_buy_sol() -> f64 { 4.0 }
-fn default_creator_rebuy_live_test_zero_sell_min_score() -> f64 { 50.0 }
-fn default_creator_rebuy_live_test_zero_sell_min_buy_pressure_pct() -> f64 { 70.0 }
-fn default_creator_rebuy_live_test_zero_sell_min_buy_sell_ratio() -> f64 { 5.0 }
-fn default_creator_rebuy_live_test_strong_flow_min_bc_progress_pct() -> f64 { 20.0 }
-fn default_max_bc_sell_count() -> u64 { 40 }
-fn default_min_sniper_score() -> f64 { 60.0 }
-fn default_bc_fast_track_min_score() -> f64 { 65.0 }
-fn default_standard_lane_enabled() -> bool { true }
-fn default_graduation_goplus_enabled() -> bool { true }
+fn default_max_single_holder_pct() -> f64 {
+    25.0
+}
+fn default_min_holder_count() -> usize {
+    8
+}
+fn default_min_buy_sell_ratio() -> f64 {
+    1.2
+}
+fn default_creator_rebuy_shadow_min_score() -> f64 {
+    60.0
+}
+fn default_creator_rebuy_live_test_min_score() -> f64 {
+    63.0
+}
+fn default_creator_rebuy_live_test_min_buy_pressure_pct() -> f64 {
+    80.0
+}
+fn default_creator_rebuy_live_test_min_buy_sell_ratio() -> f64 {
+    4.0
+}
+fn default_creator_rebuy_live_test_min_unique_buyers() -> usize {
+    0
+}
+fn default_creator_rebuy_live_test_max_sell_count() -> u64 {
+    3
+}
+fn default_creator_rebuy_live_test_min_initial_liquidity_sol() -> f64 {
+    30.0
+}
+fn default_creator_rebuy_live_test_max_initial_liquidity_sol() -> f64 {
+    80.0
+}
+fn default_creator_rebuy_live_test_max_open_positions() -> u32 {
+    1
+}
+fn default_creator_rebuy_live_test_max_bc_progress_pct() -> f64 {
+    45.0
+}
+fn default_creator_rebuy_live_test_min_total_volume_sol() -> f64 {
+    30.0
+}
+fn default_creator_rebuy_live_test_min_whale_buy_sol() -> f64 {
+    4.0
+}
+fn default_creator_rebuy_live_test_zero_sell_min_score() -> f64 {
+    50.0
+}
+fn default_creator_rebuy_live_test_zero_sell_min_buy_pressure_pct() -> f64 {
+    70.0
+}
+fn default_creator_rebuy_live_test_zero_sell_min_buy_sell_ratio() -> f64 {
+    5.0
+}
+fn default_creator_rebuy_live_test_strong_flow_min_bc_progress_pct() -> f64 {
+    20.0
+}
+fn default_max_bc_sell_count() -> u64 {
+    40
+}
+fn default_min_sniper_score() -> f64 {
+    60.0
+}
+fn default_bc_fast_track_min_score() -> f64 {
+    65.0
+}
+fn default_standard_lane_enabled() -> bool {
+    true
+}
+fn default_graduation_goplus_enabled() -> bool {
+    true
+}
 
 #[derive(Debug, Deserialize)]
 pub struct ExecutionConfig {
@@ -474,16 +584,36 @@ pub struct ExecutionConfig {
     pub creator_rebuy_live_test_buy_amount_sol: f64,
 }
 
-fn default_paper_slippage_bps() -> u64 { 0 }
-fn default_paper_exit_delay_ms() -> u64 { 0 }
-fn default_paper_realistic_fills() -> bool { true }
-fn default_paper_max_pool_fill_pct() -> f64 { 5.0 }
-fn default_moonbag_liq_min_sol() -> f64 { 0.0 }
-fn default_moonbag_liq_max_sol() -> f64 { 0.0 }
-fn default_moonbag_vol_24h_usd_max() -> f64 { 0.0 }
-fn default_priority_fee_max_lamports() -> u64 { 1_000_000 }
-fn default_priority_level() -> String { "veryHigh".to_string() }
-fn default_max_entry_price_move_pct() -> f64 { 50.0 }
+fn default_paper_slippage_bps() -> u64 {
+    0
+}
+fn default_paper_exit_delay_ms() -> u64 {
+    0
+}
+fn default_paper_realistic_fills() -> bool {
+    true
+}
+fn default_paper_max_pool_fill_pct() -> f64 {
+    5.0
+}
+fn default_moonbag_liq_min_sol() -> f64 {
+    0.0
+}
+fn default_moonbag_liq_max_sol() -> f64 {
+    0.0
+}
+fn default_moonbag_vol_24h_usd_max() -> f64 {
+    0.0
+}
+fn default_priority_fee_max_lamports() -> u64 {
+    1_000_000
+}
+fn default_priority_level() -> String {
+    "veryHigh".to_string()
+}
+fn default_max_entry_price_move_pct() -> f64 {
+    50.0
+}
 
 #[derive(Debug, Deserialize)]
 pub struct JitoConfig {
@@ -554,16 +684,36 @@ pub struct ExitConfig {
     pub momentum_kill_min_multiplier: f64,
 }
 
-fn default_never_profitable_stop_loss_pct() -> f64 { 0.0 }
-fn default_never_profitable_grace_secs() -> u64 { 30 }
-fn default_momentum_kill_min_multiplier() -> f64 { 1.3 }
-fn default_trailing_stop_post_tp1_pct() -> f64 { 15.0 }
-fn default_trailing_stop_post_tp1_floor() -> bool { true }
-fn default_trailing_stop_post_tp2_pct() -> f64 { 20.0 }
-fn default_max_realized_loss_pct() -> f64 { 40.0 }
-fn default_min_hold_before_stop_loss() -> u64 { 5 }
-fn default_trailing_stop_adaptive_multiplier() -> f64 { 2.5 }
-fn default_trailing_stop_adaptive_pct() -> f64 { 40.0 }
+fn default_never_profitable_stop_loss_pct() -> f64 {
+    0.0
+}
+fn default_never_profitable_grace_secs() -> u64 {
+    30
+}
+fn default_momentum_kill_min_multiplier() -> f64 {
+    1.3
+}
+fn default_trailing_stop_post_tp1_pct() -> f64 {
+    15.0
+}
+fn default_trailing_stop_post_tp1_floor() -> bool {
+    true
+}
+fn default_trailing_stop_post_tp2_pct() -> f64 {
+    20.0
+}
+fn default_max_realized_loss_pct() -> f64 {
+    40.0
+}
+fn default_min_hold_before_stop_loss() -> u64 {
+    5
+}
+fn default_trailing_stop_adaptive_multiplier() -> f64 {
+    2.5
+}
+fn default_trailing_stop_adaptive_pct() -> f64 {
+    40.0
+}
 
 #[derive(Debug, Deserialize)]
 pub struct RiskConfig {
@@ -620,6 +770,16 @@ pub struct MonitoringConfig {
     /// hard protections (stop loss, dev dump, LP drain, whale dump) remain live.
     #[serde(default)]
     pub creator_rebuy_runner_grace_secs: u64,
+    /// Peak multiplier that arms the strict creator-rebuy protected-runner state.
+    /// Once armed, soft exits remain suppressed for `creator_rebuy_runner_protection_secs`.
+    #[serde(default = "default_creator_rebuy_runner_protection_peak_multiplier")]
+    pub creator_rebuy_runner_protection_peak_multiplier: f64,
+    /// Protected-runner duration after the peak trigger arms. 0 = disabled.
+    #[serde(default)]
+    pub creator_rebuy_runner_protection_secs: u64,
+    /// Profit floor for protected creator-rebuy runners. 0 = disabled.
+    #[serde(default = "default_creator_rebuy_runner_floor_multiplier")]
+    pub creator_rebuy_runner_floor_multiplier: f64,
     /// How long (seconds) to continue shadow-logging price after a position
     /// is closed. 0 = disabled.  Data is written to the `shadow_log` table.
     #[serde(default)]
@@ -734,6 +894,31 @@ pub struct MonitoringConfig {
     /// wider trail before normal multiplier-based tightening resumes.
     #[serde(default)]
     pub moonbag_early_trailing_grace_secs: u64,
+    /// Moonbag split exit: percent of the promoted moonbag stack to sell at 3x.
+    #[serde(default = "default_moonbag_partial_3x_pct")]
+    pub moonbag_partial_3x_pct: u8,
+    /// Moonbag split exit: percent of the promoted moonbag stack to sell at 5x.
+    #[serde(default = "default_moonbag_partial_5x_pct")]
+    pub moonbag_partial_5x_pct: u8,
+    /// Minimum age before soft/full moonbag trailing exits are allowed.
+    /// Partial exits and floor/max-hold exits are still allowed.
+    #[serde(default = "default_moonbag_min_hold_secs")]
+    pub moonbag_min_hold_secs: u64,
+    /// Price-only confirmation checks required before a soft trailing tail exit.
+    /// This is the no-extra-API fallback for weak-flow confirmation.
+    #[serde(default = "default_moonbag_trailing_confirm_checks")]
+    pub moonbag_trailing_confirm_checks: u32,
+    /// Multiplier-based trailing tiers for moonbag tails.
+    #[serde(default = "default_moonbag_trail_2x_5x")]
+    pub moonbag_trail_2x_5x: f64,
+    #[serde(default = "default_moonbag_trail_5x_10x")]
+    pub moonbag_trail_5x_10x: f64,
+    #[serde(default = "default_moonbag_trail_10x_15x")]
+    pub moonbag_trail_10x_15x: f64,
+    #[serde(default = "default_moonbag_trail_15x_20x")]
+    pub moonbag_trail_15x_20x: f64,
+    #[serde(default = "default_moonbag_trail_20x_plus")]
+    pub moonbag_trail_20x_plus: f64,
     /// Peak multiplier threshold before age-based trail decay kicks in.
     /// Below this, keep the initial wide trail to avoid premature exits.
     #[serde(default = "default_moonbag_profit_gate_multiplier")]
@@ -791,49 +976,168 @@ pub struct MonitoringConfig {
     pub cto_moderate_momentum: f64,
 }
 
-fn default_lp_drop_threshold_pct() -> f64 { 20.0 }
-fn default_lp_grace_period_secs() -> u64 { 45 }
-fn default_tick_window_secs() -> f64 { 5.0 }
-fn default_dip_threshold_pct() -> f64 { 15.0 }
-fn default_dip_grace_period_secs() -> f64 { 5.0 }
-fn default_dip_recovery_buy_ratio() -> f64 { 0.55 }
-fn default_dip_min_volume_sol() -> f64 { 0.5 }
-fn default_dip_whale_sell_multiplier() -> f64 { 2.5 }
-fn default_dip_no_trades_timeout_secs() -> f64 { 4.0 }
-fn default_min_hold_before_dip_death() -> u64 { 45 }
-fn default_stale_position_timeout_secs() -> u64 { 1800 }
-fn default_bags_launch_poll_interval_secs() -> u64 { 15 }
-fn default_bags_demand_window_secs() -> u64 { 900 }
-fn default_bags_real_demand_min_unique_buyers() -> usize { 8 }
-fn default_bags_real_demand_min_buy_txs() -> usize { 6 }
-fn default_bags_real_demand_min_buy_volume_sol() -> f64 { 6.0 }
-fn default_bags_creator_watch_min_launches() -> usize { 2 }
-fn default_bags_creator_watch_min_demand_rate() -> f64 { 0.5 }
-fn default_bags_watchworthy_shadow_max_age_seconds() -> u64 { 180 }
-fn default_bags_shadow_entry_price_max_wait_secs() -> u64 { 90 }
-fn default_bags_shadow_poll_interval_secs() -> u64 { 60 }
-fn default_bags_shadow_duration_secs() -> u64 { 21_600 }
-fn default_narrative_check_intervals() -> Vec<u64> { vec![120, 300] }
-fn default_moonbag_max_concurrent() -> usize { 20 }
-fn default_moonbag_max_hold_early_hours() -> u64 { 12 }
-fn default_moonbag_max_hold_expanding_hours() -> u64 { 24 }
-fn default_moonbag_max_hold_confirmed_hours() -> u64 { 48 }
-fn default_moonbag_floor_multiplier() -> f64 { 1.2 }
-fn default_moonbag_trailing_early() -> f64 { 45.0 }
-fn default_moonbag_trailing_expanding() -> f64 { 55.0 }
-fn default_moonbag_trailing_confirmed() -> f64 { 55.0 }
-fn default_moonbag_profit_gate_multiplier() -> f64 { 2.0 }
-fn default_moonbag_promotion_min_score() -> f64 { 60.0 }
-fn default_moonbag_downgrade_consecutive() -> u32 { 2 }
-fn default_fast_runner_threshold_secs() -> u64 { 60 }
-fn default_cto_min_dev_hold_pct() -> f64 { 3.0 }
-fn default_cto_stage_secs() -> Vec<u64> { vec![120, 300, 600] }
-fn default_cto_strong_recovery_pct() -> f64 { 70.0 }
-fn default_cto_moderate_recovery_pct() -> f64 { 30.0 }
-fn default_cto_collapse_pct() -> f64 { 20.0 }
-fn default_cto_early_kill_momentum() -> f64 { 0.3 }
-fn default_cto_strong_momentum() -> f64 { 0.5 }
-fn default_cto_moderate_momentum() -> f64 { 0.4 }
+fn default_lp_drop_threshold_pct() -> f64 {
+    20.0
+}
+fn default_lp_grace_period_secs() -> u64 {
+    45
+}
+fn default_tick_window_secs() -> f64 {
+    5.0
+}
+fn default_dip_threshold_pct() -> f64 {
+    15.0
+}
+fn default_dip_grace_period_secs() -> f64 {
+    5.0
+}
+fn default_dip_recovery_buy_ratio() -> f64 {
+    0.55
+}
+fn default_dip_min_volume_sol() -> f64 {
+    0.5
+}
+fn default_dip_whale_sell_multiplier() -> f64 {
+    2.5
+}
+fn default_dip_no_trades_timeout_secs() -> f64 {
+    4.0
+}
+fn default_min_hold_before_dip_death() -> u64 {
+    45
+}
+fn default_creator_rebuy_runner_protection_peak_multiplier() -> f64 {
+    1.5
+}
+fn default_creator_rebuy_runner_floor_multiplier() -> f64 {
+    1.15
+}
+fn default_stale_position_timeout_secs() -> u64 {
+    1800
+}
+fn default_bags_launch_poll_interval_secs() -> u64 {
+    15
+}
+fn default_bags_demand_window_secs() -> u64 {
+    900
+}
+fn default_bags_real_demand_min_unique_buyers() -> usize {
+    8
+}
+fn default_bags_real_demand_min_buy_txs() -> usize {
+    6
+}
+fn default_bags_real_demand_min_buy_volume_sol() -> f64 {
+    6.0
+}
+fn default_bags_creator_watch_min_launches() -> usize {
+    2
+}
+fn default_bags_creator_watch_min_demand_rate() -> f64 {
+    0.5
+}
+fn default_bags_watchworthy_shadow_max_age_seconds() -> u64 {
+    180
+}
+fn default_bags_shadow_entry_price_max_wait_secs() -> u64 {
+    90
+}
+fn default_bags_shadow_poll_interval_secs() -> u64 {
+    60
+}
+fn default_bags_shadow_duration_secs() -> u64 {
+    21_600
+}
+fn default_narrative_check_intervals() -> Vec<u64> {
+    vec![120, 300]
+}
+fn default_moonbag_max_concurrent() -> usize {
+    20
+}
+fn default_moonbag_max_hold_early_hours() -> u64 {
+    12
+}
+fn default_moonbag_max_hold_expanding_hours() -> u64 {
+    24
+}
+fn default_moonbag_max_hold_confirmed_hours() -> u64 {
+    48
+}
+fn default_moonbag_floor_multiplier() -> f64 {
+    1.2
+}
+fn default_moonbag_trailing_early() -> f64 {
+    45.0
+}
+fn default_moonbag_trailing_expanding() -> f64 {
+    55.0
+}
+fn default_moonbag_trailing_confirmed() -> f64 {
+    55.0
+}
+fn default_moonbag_partial_3x_pct() -> u8 {
+    30
+}
+fn default_moonbag_partial_5x_pct() -> u8 {
+    20
+}
+fn default_moonbag_min_hold_secs() -> u64 {
+    3600
+}
+fn default_moonbag_trailing_confirm_checks() -> u32 {
+    2
+}
+fn default_moonbag_trail_2x_5x() -> f64 {
+    70.0
+}
+fn default_moonbag_trail_5x_10x() -> f64 {
+    50.0
+}
+fn default_moonbag_trail_10x_15x() -> f64 {
+    40.0
+}
+fn default_moonbag_trail_15x_20x() -> f64 {
+    30.0
+}
+fn default_moonbag_trail_20x_plus() -> f64 {
+    20.0
+}
+fn default_moonbag_profit_gate_multiplier() -> f64 {
+    2.0
+}
+fn default_moonbag_promotion_min_score() -> f64 {
+    60.0
+}
+fn default_moonbag_downgrade_consecutive() -> u32 {
+    2
+}
+fn default_fast_runner_threshold_secs() -> u64 {
+    60
+}
+fn default_cto_min_dev_hold_pct() -> f64 {
+    3.0
+}
+fn default_cto_stage_secs() -> Vec<u64> {
+    vec![120, 300, 600]
+}
+fn default_cto_strong_recovery_pct() -> f64 {
+    70.0
+}
+fn default_cto_moderate_recovery_pct() -> f64 {
+    30.0
+}
+fn default_cto_collapse_pct() -> f64 {
+    20.0
+}
+fn default_cto_early_kill_momentum() -> f64 {
+    0.3
+}
+fn default_cto_strong_momentum() -> f64 {
+    0.5
+}
+fn default_cto_moderate_momentum() -> f64 {
+    0.4
+}
 
 // ── Env-sourced config ───────────────────────────────────────
 
@@ -979,7 +1283,8 @@ impl AppConfig {
         let detection_method = require_env("DETECTION_METHOD");
         let use_jito_str = optional_env("USE_JITO").unwrap_or_else(|| "false".to_string());
         let jito_block_engine_url = optional_env("JITO_BLOCK_ENGINE_URL").unwrap_or_default();
-        let jito_max_tip_str = optional_env("JITO_MAX_TIP_SOL").unwrap_or_else(|| "0.02".to_string());
+        let jito_max_tip_str =
+            optional_env("JITO_MAX_TIP_SOL").unwrap_or_else(|| "0.02".to_string());
         let paper_trade_str = require_env("PAPER_TRADE");
 
         // Helius Sender (optional — defaults to disabled)
@@ -1003,9 +1308,9 @@ impl AppConfig {
         let helius_ws_url = optional_env("HELIUS_WS_URL");
 
         // Derive Helius RPC URL from WebSocket URL (wss:// → https://)
-        let helius_rpc_url = helius_ws_url.as_ref().map(|ws| {
-            ws.replace("wss://", "https://")
-        });
+        let helius_rpc_url = helius_ws_url
+            .as_ref()
+            .map(|ws| ws.replace("wss://", "https://"));
 
         let poll_raydium = optional_env("POLL_RAYDIUM")
             .map(|v| v == "true")

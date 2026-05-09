@@ -157,11 +157,17 @@ impl TickWindow {
             return false;
         }
         let mid = self.ticks.len() / 2;
-        let older_sell_vol: f64 = self.ticks.iter().take(mid)
+        let older_sell_vol: f64 = self
+            .ticks
+            .iter()
+            .take(mid)
             .filter(|t| t.direction == TickDirection::Sell)
             .map(|t| t.sol_amount)
             .sum();
-        let recent_sell_vol: f64 = self.ticks.iter().skip(mid)
+        let recent_sell_vol: f64 = self
+            .ticks
+            .iter()
+            .skip(mid)
             .filter(|t| t.direction == TickDirection::Sell)
             .map(|t| t.sol_amount)
             .sum();
@@ -338,11 +344,11 @@ pub fn evaluate_dip(
     // ── Age-aware grace scaling ──
     // Young post-graduation tokens often dip then rip. Give them more room.
     let age_grace_multiplier: f64 = if age_secs < 90 {
-        2.5   // 0-90s: 2.5× grace (8s → 20s)
+        2.5 // 0-90s: 2.5× grace (8s → 20s)
     } else if age_secs < 180 {
-        1.5   // 90-180s: 1.5× grace (8s → 12s)
+        1.5 // 90-180s: 1.5× grace (8s → 12s)
     } else {
-        1.0   // >180s: normal
+        1.0 // >180s: normal
     };
 
     // ── Profit-aware death signal threshold ──
@@ -358,7 +364,7 @@ pub fn evaluate_dip(
     match state {
         DipState::Normal => {
             *consecutive_death_ticks = 0; // reset on normal state
-            // Check if we've entered a dip
+                                          // Check if we've entered a dip
             if drawdown_from_peak >= dip_cfg.dip_threshold_pct {
                 debug!(
                     drawdown_pct = format!("{:.1}", drawdown_from_peak),
@@ -374,7 +380,11 @@ pub fn evaluate_dip(
             DipAction::Normal
         }
 
-        DipState::DipWatch { entered_at, dip_entry_price, dip_floor_price } => {
+        DipState::DipWatch {
+            entered_at,
+            dip_entry_price,
+            dip_floor_price,
+        } => {
             // Update floor
             if current_price < *dip_floor_price {
                 *dip_floor_price = current_price;
@@ -387,7 +397,8 @@ pub fn evaluate_dip(
             // 1. Whale sell: single sell > whale_multiplier × average
             if momentum.has_enough_data
                 && momentum.avg_trade_sol > 0.0
-                && momentum.max_single_sell_sol > dip_cfg.whale_sell_multiplier * momentum.avg_trade_sol
+                && momentum.max_single_sell_sol
+                    > dip_cfg.whale_sell_multiplier * momentum.avg_trade_sol
             {
                 warn!(
                     whale_sell = format!("{:.4}", momentum.max_single_sell_sol),
@@ -395,21 +406,30 @@ pub fn evaluate_dip(
                     "🚨 Whale sell detected during dip — death signal"
                 );
                 *state = DipState::Normal;
-                return DipAction::ImmediateExit { reason: "whale_sell_during_dip" };
+                return DipAction::ImmediateExit {
+                    reason: "whale_sell_during_dip",
+                };
             }
 
             // 2. Sell volume accelerating
-            if momentum.has_enough_data && momentum.sell_accelerating && momentum.consecutive_sells >= 3 {
+            if momentum.has_enough_data
+                && momentum.sell_accelerating
+                && momentum.consecutive_sells >= 3
+            {
                 warn!("🚨 Sell acceleration during dip — death signal");
                 *state = DipState::Normal;
-                return DipAction::ImmediateExit { reason: "sell_acceleration" };
+                return DipAction::ImmediateExit {
+                    reason: "sell_acceleration",
+                };
             }
 
             // 3. No trades (everyone left)
             //    Young or profitable tokens get extended no-trades timeout.
             if momentum.total_ticks == 0 && elapsed > effective_no_trades {
                 if in_profit {
-                    debug!("🤔 No trades during dip but position is profitable — extending patience");
+                    debug!(
+                        "🤔 No trades during dip but position is profitable — extending patience"
+                    );
                     // Don't kill profitable positions on no-trades alone;
                     // let grace expiry handle it (which is also extended).
                 } else {
@@ -417,9 +437,14 @@ pub fn evaluate_dip(
                     if *consecutive_death_ticks >= 3 {
                         warn!("🚨 No trades during dip grace (3 consecutive checks) — token dead");
                         *state = DipState::Normal;
-                        return DipAction::ImmediateExit { reason: "no_trades_during_dip" };
+                        return DipAction::ImmediateExit {
+                            reason: "no_trades_during_dip",
+                        };
                     }
-                    debug!(consecutive_death_ticks, "⚠️ No trades during dip — waiting for 3 consecutive");
+                    debug!(
+                        consecutive_death_ticks,
+                        "⚠️ No trades during dip — waiting for 3 consecutive"
+                    );
                 }
             }
 
@@ -443,7 +468,10 @@ pub fn evaluate_dip(
 
             if recovery_signals >= 2 {
                 *consecutive_death_ticks = 0; // recovery detected — reset counter
-                debug!(recovery_signals, "📈 Recovery signals detected — entering RECOVERING");
+                debug!(
+                    recovery_signals,
+                    "📈 Recovery signals detected — entering RECOVERING"
+                );
                 *state = DipState::Recovering {
                     entered_at: *entered_at,
                     dip_entry_price: *dip_entry_price,
@@ -479,7 +507,9 @@ pub fn evaluate_dip(
                         "⏰ Dip grace expired — no recovery (3 consecutive checks)"
                     );
                     *state = DipState::Normal;
-                    return DipAction::ImmediateExit { reason: "dip_grace_expired" };
+                    return DipAction::ImmediateExit {
+                        reason: "dip_grace_expired",
+                    };
                 }
                 debug!(
                     elapsed_secs = format!("{:.1}", elapsed),
@@ -491,7 +521,11 @@ pub fn evaluate_dip(
             DipAction::SuppressTrailingStop
         }
 
-        DipState::Recovering { entered_at, dip_entry_price: _, dip_floor_price: _ } => {
+        DipState::Recovering {
+            entered_at,
+            dip_entry_price: _,
+            dip_floor_price: _,
+        } => {
             // Check if price has recovered above dip threshold → back to normal
             if drawdown_from_peak < dip_cfg.dip_threshold_pct * 0.5 {
                 debug!("✅ Price recovered from dip — back to NORMAL");
@@ -502,17 +536,25 @@ pub fn evaluate_dip(
             // Even in recovery, still check for death signals
             if momentum.has_enough_data
                 && momentum.avg_trade_sol > 0.0
-                && momentum.max_single_sell_sol > dip_cfg.whale_sell_multiplier * momentum.avg_trade_sol
+                && momentum.max_single_sell_sol
+                    > dip_cfg.whale_sell_multiplier * momentum.avg_trade_sol
             {
                 warn!("🚨 Whale sell during recovery — death signal");
                 *state = DipState::Normal;
-                return DipAction::ImmediateExit { reason: "whale_sell_during_recovery" };
+                return DipAction::ImmediateExit {
+                    reason: "whale_sell_during_recovery",
+                };
             }
 
-            if momentum.has_enough_data && momentum.sell_accelerating && momentum.consecutive_sells >= 3 {
+            if momentum.has_enough_data
+                && momentum.sell_accelerating
+                && momentum.consecutive_sells >= 3
+            {
                 warn!("🚨 Sell acceleration during recovery — death signal");
                 *state = DipState::Normal;
-                return DipAction::ImmediateExit { reason: "sell_acceleration_in_recovery" };
+                return DipAction::ImmediateExit {
+                    reason: "sell_acceleration_in_recovery",
+                };
             }
 
             // Extended grace: recovery gets more time (2x normal grace period)
@@ -524,9 +566,14 @@ pub fn evaluate_dip(
                     if *consecutive_death_ticks >= 3 {
                         debug!("⏰ Extended grace expired with weak momentum (3 consecutive) — exiting");
                         *state = DipState::Normal;
-                        return DipAction::ImmediateExit { reason: "extended_grace_expired_weak" };
+                        return DipAction::ImmediateExit {
+                            reason: "extended_grace_expired_weak",
+                        };
                     }
-                    debug!(consecutive_death_ticks, "⏰ Extended grace weak tick — waiting for 3 consecutive");
+                    debug!(
+                        consecutive_death_ticks,
+                        "⏰ Extended grace weak tick — waiting for 3 consecutive"
+                    );
                 } else {
                     // Momentum is OK — go back to normal, trailing stop will handle it
                     *consecutive_death_ticks = 0;

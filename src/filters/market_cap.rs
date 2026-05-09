@@ -6,9 +6,9 @@ use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use tracing::{debug, warn};
 
-use crate::config::AppConfig;
 use super::rpc_fallback::is_rate_limited;
 use super::types::FilterResult;
+use crate::config::AppConfig;
 
 const CHECK_NAME: &str = "market_cap";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -74,14 +74,14 @@ impl MarketCapFilter {
         let total_supply_ui = if let Some(supply) = prefetched_supply {
             supply
         } else {
-            let rpc = RpcClient::new_with_timeout(
-                cfg.env.solana_rpc_url.clone(),
-                REQUEST_TIMEOUT,
-            );
+            let rpc = RpcClient::new_with_timeout(cfg.env.solana_rpc_url.clone(), REQUEST_TIMEOUT);
             let supply_result = rpc.get_token_supply(mint).await;
             let supply_result = if matches!(&supply_result, Err(e) if is_rate_limited(e)) {
                 warn!(mint = %mint, "QuickNode rate limited, using fallback RPC");
-                let fallback = RpcClient::new_with_timeout(cfg.env.solana_rpc_backup_url.clone(), REQUEST_TIMEOUT);
+                let fallback = RpcClient::new_with_timeout(
+                    cfg.env.solana_rpc_backup_url.clone(),
+                    REQUEST_TIMEOUT,
+                );
                 fallback.get_token_supply(mint).await
             } else {
                 supply_result
@@ -141,7 +141,11 @@ impl MarketCapFilter {
             );
         }
 
-        (FilterResult::pass(CHECK_NAME), Some(market_cap_usd), Some(token_price))
+        (
+            FilterResult::pass(CHECK_NAME),
+            Some(market_cap_usd),
+            Some(token_price),
+        )
     }
 
     async fn fetch_price(&self, mint: &str) -> Result<f64, String> {
@@ -163,7 +167,9 @@ impl MarketCapFilter {
             .await
             .map_err(|e| format!("parse_failed: {}", e))?;
 
-        let pairs = body.pairs.ok_or_else(|| "no_pairs_in_response".to_string())?;
+        let pairs = body
+            .pairs
+            .ok_or_else(|| "no_pairs_in_response".to_string())?;
         let pair = pairs
             .iter()
             .find(|p| p.chain_id == "solana")

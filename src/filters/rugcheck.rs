@@ -6,8 +6,8 @@ use reqwest::Client;
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
-use crate::config::AppConfig;
 use super::types::{FilterResult, RugCheckReport};
+use crate::config::AppConfig;
 
 const CHECK_NAME: &str = "rugcheck";
 const RUGCHECK_BASE_URL: &str = "https://api.rugcheck.xyz/v1/tokens";
@@ -76,7 +76,11 @@ impl RugCheckFilter {
                 result
             }
             Err(reason) => {
-                if reason.starts_with("http_4") || reason.starts_with("http_5") || reason.contains("request_failed") || reason.contains("rate_limited") {
+                if reason.starts_with("http_4")
+                    || reason.starts_with("http_5")
+                    || reason.contains("request_failed")
+                    || reason.contains("rate_limited")
+                {
                     warn!(mint, reason = %reason, "rugcheck API error — passing through");
                     (FilterResult::pass(CHECK_NAME), None)
                 } else {
@@ -100,7 +104,11 @@ impl RugCheckFilter {
             .map_err(|e| format!("request_failed: {}", e))?;
 
         if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            warn!(mint, "rugcheck 429 — retrying in {}s", RATE_LIMIT_WAIT.as_secs());
+            warn!(
+                mint,
+                "rugcheck 429 — retrying in {}s",
+                RATE_LIMIT_WAIT.as_secs()
+            );
             tokio::time::sleep(RATE_LIMIT_WAIT).await;
 
             let retry = self

@@ -16,9 +16,9 @@ use std::time::Duration;
 use tokio::sync::{Semaphore, SemaphorePermit};
 use tracing::{debug, warn};
 
-const FAILURE_WINDOW_MS: u64 = 60_000;   // 60 s
+const FAILURE_WINDOW_MS: u64 = 60_000; // 60 s
 const FAILURE_THRESHOLD: u32 = 3;
-const COOLDOWN_MS: u64 = 5 * 60 * 1000;  // 5 min
+const COOLDOWN_MS: u64 = 5 * 60 * 1000; // 5 min
 const DEFAULT_ACQUIRE_TIMEOUT_MS: u64 = 500;
 
 fn now_ms() -> u64 {

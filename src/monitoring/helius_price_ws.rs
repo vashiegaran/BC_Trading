@@ -109,7 +109,10 @@ impl HeliusPriceCache {
     /// cache warm in real time.
     pub fn get(&self, mint: &str) -> Option<f64> {
         let guard = self.prices.lock().ok()?;
-        guard.get(mint).map(|(price, _)| *price).filter(|p| *p > 0.0)
+        guard
+            .get(mint)
+            .map(|(price, _)| *price)
+            .filter(|p| *p > 0.0)
     }
 
     pub fn set(&self, mint: String, price_usd: f64) {
@@ -156,7 +159,9 @@ impl HeliusPriceCache {
 }
 
 impl Default for HeliusPriceCache {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ── Bonding curve decoding ────────────────────────────────────
@@ -179,10 +184,10 @@ impl BondingCurveSnapshot {
         if data.len() < 49 {
             return None;
         }
-        let virtual_token_reserves = u64::from_le_bytes(data[8..16].try_into().ok()?) as f64
-            / 1_000_000.0;
-        let virtual_sol_reserves = u64::from_le_bytes(data[16..24].try_into().ok()?) as f64
-            / 1_000_000_000.0;
+        let virtual_token_reserves =
+            u64::from_le_bytes(data[8..16].try_into().ok()?) as f64 / 1_000_000.0;
+        let virtual_sol_reserves =
+            u64::from_le_bytes(data[16..24].try_into().ok()?) as f64 / 1_000_000_000.0;
         let complete = data[48] != 0;
         if virtual_token_reserves <= 0.0 {
             return None;
@@ -202,8 +207,7 @@ impl BondingCurveSnapshot {
 fn derive_bonding_curve_pda(mint: &str) -> Option<Pubkey> {
     let mint_pk = Pubkey::from_str(mint).ok()?;
     let program = Pubkey::from_str(PUMPFUN_PROGRAM).ok()?;
-    let (pda, _) =
-        Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &program);
+    let (pda, _) = Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &program);
     Some(pda)
 }
 
@@ -518,7 +522,11 @@ async fn handle_ws_message(
             sub_id_to_mint.insert(result, mint.clone());
             info!(mint = %mint, sub_id = result, req_id, "helius_price_ws mux: sub confirmed");
         } else {
-            warn!(req_id, sub_id = result, "helius_price_ws mux: orphan sub confirmation (no pending state match)");
+            warn!(
+                req_id,
+                sub_id = result,
+                "helius_price_ws mux: orphan sub confirmation (no pending state match)"
+            );
         }
         return;
     }
@@ -545,7 +553,11 @@ async fn handle_ws_message(
     let mint = match sub_id_to_mint.get(&sub_id) {
         Some(m) => m.clone(),
         None => {
-            warn!(sub_id, known_subs = sub_id_to_mint.len(), "helius_price_ws mux: unknown sub_id");
+            warn!(
+                sub_id,
+                known_subs = sub_id_to_mint.len(),
+                "helius_price_ws mux: unknown sub_id"
+            );
             return;
         }
     };
@@ -628,8 +640,8 @@ pub async fn flush_metrics_loop(cache: Arc<HeliusPriceCache>, supabase: Arc<Supa
         let url = format!("{}/system_events", supabase.base_url);
         let _ = supabase.client.post(&url).json(&payload).send().await;
         info!(
-            hits, misses, hit_rate, active, reconnects,
-            "📊 helius_price_ws metrics flushed"
+            hits,
+            misses, hit_rate, active, reconnects, "📊 helius_price_ws metrics flushed"
         );
     }
 }

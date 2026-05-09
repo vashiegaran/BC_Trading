@@ -9,6 +9,47 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.7.7 — Moonbag Split + Protected Runner (2026-05-09)
+
+**strategy_version**: `v18.7.7-moonbag-split-runner-protection`
+
+### Why
+May 8/9 live analysis showed entries were catching real runners, but exit logic
+was the main leak. `alondemia` and `UVO` were correctly promoted to moonbags but
+closed far before their post-exit peaks, while strict creator-rebuy runners still
+needed a middle state after proving strength.
+
+### Changes
+- Adds balanced moonbag split exits:
+  - sell 30% of the promoted moonbag stack at 3x.
+  - sell 20% of the promoted moonbag stack at 5x.
+  - keep roughly 50% as the long tail.
+- Keeps moonbag partial exits confirmation-aware: in-memory tail amount is only reduced after the exit engine confirms the sell.
+- Widens early moonbag tail trailing and tightens only at higher multiples:
+  - 2x–5x: 70%
+  - 5x–10x: 50%
+  - 10x–15x: 40%
+  - 15x–20x: 30%
+  - 20x+: 20%
+- Adds `moonbag_min_hold_secs = 3600` so soft trailing cannot close a moonbag tail during the first 60 minutes.
+- Adds price-only weak-flow confirmation via `moonbag_trailing_confirm_checks = 2`; no social/Twitter/Google API calls are added to the live path.
+- Adds `moonbag_exit_events` logging via [migrations/031_moonbag_exit_events.sql](migrations/031_moonbag_exit_events.sql).
+- Extends strict creator-rebuy runner protection: once a canary reaches 1.5x, soft dip-death/momentum-kill protection lasts 10 minutes from that trigger, with a 1.15x profit floor.
+- Hard exits remain active: stop loss, dev dump, LP drain, whale/sell-acceleration dip death, malformed/zero price safety, and post-buy verification exits.
+
+### Rollback
+Set these in [config.toml](config.toml), then restart PM2:
+
+- `moonbag_partial_3x_pct = 0`
+- `moonbag_partial_5x_pct = 0`
+- `moonbag_min_hold_secs = 0`
+- `moonbag_trailing_confirm_checks = 1`
+- `creator_rebuy_runner_protection_secs = 0`
+
+To fully revert trailing behavior, restore the v18.7.6 moonbag trailing values.
+
+---
+
 ## v18.7.6 — Runner Grace Exit Protection (2026-05-08)
 
 **strategy_version**: `v18.7.6-runner-grace-exit-protection`

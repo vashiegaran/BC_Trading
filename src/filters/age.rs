@@ -1,8 +1,8 @@
 use tracing::debug;
 
-use crate::config::AppConfig;
-use crate::detection::types::{GraduatedToken, DetectionSource};
 use super::types::FilterResult;
+use crate::config::AppConfig;
+use crate::detection::types::{DetectionSource, GraduatedToken};
 
 const CHECK_NAME: &str = "age";
 
