@@ -56,7 +56,10 @@ fn narrative_cluster_live_canary_rejection_reason(
         }
     }
 
-    if filters_cfg.reject_creator_rebuy && (token.creator_rebuy || context.creator_rebuy_bypassed) {
+    if filters_cfg.reject_creator_rebuy
+        && !filters_cfg.narrative_cluster_live_canary_allow_creator_rebuy
+        && (token.creator_rebuy || context.creator_rebuy_bypassed)
+    {
         return Some("narrative_cluster_live_creator_rebuy_blocked".to_string());
     }
 
@@ -126,6 +129,99 @@ fn narrative_cluster_live_canary_rejection_reason(
     if max_liq > 0.0 && initial_liquidity_sol > max_liq {
         return Some(format!(
             "initial_liquidity_sol_{:.1}_above_narrative_live_max_{:.1}",
+            initial_liquidity_sol, max_liq
+        ));
+    }
+
+    None
+}
+
+fn narrative_cluster_phase2_shadow_rejection_reason(
+    token: &GraduatedToken,
+    context: &NarrativeClusterContext,
+    filters_cfg: &FiltersConfig,
+    initial_liquidity_sol: f64,
+) -> Option<String> {
+    if !filters_cfg.narrative_cluster_phase2_shadow_enabled {
+        return Some("narrative_cluster_phase2_shadow_disabled".to_string());
+    }
+
+    if filters_cfg.narrative_cluster_phase2_shadow_require_valid_identity {
+        if token.name.trim().is_empty() || token.symbol.trim().is_empty() {
+            return Some("narrative_cluster_phase2_missing_token_identity".to_string());
+        }
+        if token.creator_wallet.to_string() == SYSTEM_PROGRAM_ID {
+            return Some("narrative_cluster_phase2_creator_wallet_system_program".to_string());
+        }
+    }
+
+    if context.narrative_score < filters_cfg.narrative_cluster_phase2_shadow_min_score {
+        return Some(format!(
+            "narrative_score_{:.1}_below_phase2_min_{:.1}",
+            context.narrative_score, filters_cfg.narrative_cluster_phase2_shadow_min_score
+        ));
+    }
+
+    if context.entry_buy_pressure_pct
+        < filters_cfg.narrative_cluster_phase2_shadow_min_buy_pressure_pct
+    {
+        return Some(format!(
+            "entry_buy_pressure_{:.1}_below_phase2_min_{:.1}",
+            context.entry_buy_pressure_pct,
+            filters_cfg.narrative_cluster_phase2_shadow_min_buy_pressure_pct
+        ));
+    }
+
+    if context.entry_buy_sell_ratio < filters_cfg.narrative_cluster_phase2_shadow_min_buy_sell_ratio
+    {
+        return Some(format!(
+            "entry_buy_sell_ratio_{:.2}_below_phase2_min_{:.2}",
+            context.entry_buy_sell_ratio,
+            filters_cfg.narrative_cluster_phase2_shadow_min_buy_sell_ratio
+        ));
+    }
+
+    if context.entry_sell_count > filters_cfg.narrative_cluster_phase2_shadow_max_sell_count {
+        return Some(format!(
+            "entry_sell_count_{}_above_phase2_max_{}",
+            context.entry_sell_count, filters_cfg.narrative_cluster_phase2_shadow_max_sell_count
+        ));
+    }
+
+    if filters_cfg.narrative_cluster_phase2_shadow_require_no_creator_sold
+        && context.creator_sold_during_bc
+    {
+        return Some("creator_sold_during_bc".to_string());
+    }
+
+    let max_gap = filters_cfg.narrative_cluster_phase2_shadow_max_label_gap_seconds;
+    if max_gap > 0 {
+        match context.seconds_since_label_seen {
+            Some(gap) if gap <= max_gap as i64 => {}
+            Some(gap) => {
+                return Some(format!("label_gap_{}_above_phase2_max_{}", gap, max_gap));
+            }
+            None => return Some("label_gap_unknown_for_phase2_shadow".to_string()),
+        }
+    }
+
+    let min_liq = filters_cfg.narrative_cluster_phase2_shadow_min_initial_liquidity_sol;
+    if min_liq > 0.0 {
+        if initial_liquidity_sol <= 0.0 {
+            return Some("initial_liquidity_sol_unknown_for_phase2_shadow".to_string());
+        }
+        if initial_liquidity_sol < min_liq {
+            return Some(format!(
+                "initial_liquidity_sol_{:.1}_below_phase2_min_{:.1}",
+                initial_liquidity_sol, min_liq
+            ));
+        }
+    }
+
+    let max_liq = filters_cfg.narrative_cluster_phase2_shadow_max_initial_liquidity_sol;
+    if max_liq > 0.0 && initial_liquidity_sol > max_liq {
+        return Some(format!(
+            "initial_liquidity_sol_{:.1}_above_phase2_max_{:.1}",
             initial_liquidity_sol, max_liq
         ));
     }
@@ -311,7 +407,7 @@ pub fn start(
             if token.source == crate::detection::types::DetectionSource::PumpFun {
                 let bc_score = bc_entry.as_ref().map(|entry| entry.score);
 
-                let bc_pattern_reason =
+                let mut bc_pattern_reason =
                     filters::check_bc_pattern(&token, &cfg.strategy.filters, bc_score).or_else(
                         || {
                             if cfg.strategy.filters.reject_creator_rebuy
@@ -326,6 +422,71 @@ pub fn start(
                             }
                         },
                     );
+
+                if let Some(reason) = bc_pattern_reason.clone() {
+                    if let Some(narrative_context) = token.narrative_cluster.clone() {
+                        let phase2_passed = narrative_cluster_phase2_shadow_rejection_reason(
+                            &token,
+                            &narrative_context,
+                            &cfg.strategy.filters,
+                            initial_liquidity_sol,
+                        )
+                        .is_none();
+                        let live_canary_can_bypass_creator_rebuy = reason
+                            == "creator_rebuy_detected"
+                            && narrative_cluster_live_canary_rejection_reason(
+                                &token,
+                                &narrative_context,
+                                &cfg.strategy.filters,
+                                initial_liquidity_sol,
+                            )
+                            .is_none();
+
+                        if phase2_passed {
+                            info!(
+                                mint = %mint_str,
+                                label = %narrative_context.normalized_label,
+                                narrative_score = format!("{:.1}", narrative_context.narrative_score),
+                                bc_rejection = %reason,
+                                "🧪 NARRATIVE-CLUSTER PHASE2 SHADOW PASS — marking wider profile, no live execution"
+                            );
+                            let phase2_supabase = Arc::clone(&supabase);
+                            let phase2_mint = mint_str.clone();
+                            tokio::spawn(async move {
+                                mark_narrative_cluster_phase2_shadow(
+                                    &phase2_supabase,
+                                    &phase2_mint,
+                                )
+                                .await;
+                            });
+
+                            if !live_canary_can_bypass_creator_rebuy {
+                                log_narrative_cluster_phase2_shadow_candidate(
+                                    &supabase,
+                                    &token,
+                                    &mint_str,
+                                    &creator_str,
+                                    initial_liquidity_sol,
+                                    &narrative_context,
+                                    Some("shadow_only_pre_enrichment_block"),
+                                    Some(&reason),
+                                    &cfg.strategy.filters,
+                                )
+                                .await;
+                            }
+                        }
+
+                        if live_canary_can_bypass_creator_rebuy {
+                            info!(
+                                mint = %mint_str,
+                                label = %narrative_context.normalized_label,
+                                narrative_score = format!("{:.1}", narrative_context.narrative_score),
+                                "🚦 NARRATIVE-CLUSTER LIVE CANARY — allowing creator-rebuy only inside strict narrative profile"
+                            );
+                            bc_pattern_reason = None;
+                        }
+                    }
+                }
 
                 if let Some(reason) = bc_pattern_reason {
                     let creator_rebuy_shadow_qualifies = reason == "creator_rebuy_detected"
@@ -692,15 +853,53 @@ pub fn start(
             // ── Narrative-cluster live canary ──
             // Uses the exact shadow arm-time snapshot that produced the May 7-9
             // strict profile. It bypasses the Standard-lane kill switch, but only
-            // after Fast-Track safety passes and broad creator-rebuy remains blocked.
+            // after Fast-Track safety passes. v18.9 allows creator-rebuy only
+            // inside this strict narrative profile; broad creator-rebuy remains blocked.
             if token.source == crate::detection::types::DetectionSource::PumpFun {
                 if let Some(narrative_context) = token.narrative_cluster.clone() {
+                    let phase2_rejection = narrative_cluster_phase2_shadow_rejection_reason(
+                        &token,
+                        &narrative_context,
+                        &cfg.strategy.filters,
+                        initial_liquidity_sol,
+                    );
+
+                    if phase2_rejection.is_none() {
+                        info!(
+                            mint = %mint_str,
+                            label = %narrative_context.normalized_label,
+                            narrative_score = format!("{:.1}", narrative_context.narrative_score),
+                            "🧪 NARRATIVE-CLUSTER PHASE2 SHADOW PASS — marking wider profile, no live execution"
+                        );
+                        let phase2_supabase = Arc::clone(&supabase);
+                        let phase2_mint = mint_str.clone();
+                        tokio::spawn(async move {
+                            mark_narrative_cluster_phase2_shadow(&phase2_supabase, &phase2_mint)
+                                .await;
+                        });
+                    }
+
                     let narrative_rejection = narrative_cluster_live_canary_rejection_reason(
                         &token,
                         &narrative_context,
                         &cfg.strategy.filters,
                         initial_liquidity_sol,
                     );
+
+                    if phase2_rejection.is_none() && narrative_rejection.is_some() {
+                        log_narrative_cluster_phase2_shadow_candidate(
+                            &supabase,
+                            &token,
+                            &mint_str,
+                            &creator_str,
+                            initial_liquidity_sol,
+                            &narrative_context,
+                            narrative_rejection.as_deref(),
+                            None,
+                            &cfg.strategy.filters,
+                        )
+                        .await;
+                    }
 
                     if narrative_rejection.is_none() {
                         info!(
@@ -744,7 +943,14 @@ pub fn start(
                             "narrative_cluster_live_max_initial_liquidity_sol": cfg.strategy.filters.narrative_cluster_live_canary_max_initial_liquidity_sol,
                             "narrative_cluster_live_require_valid_identity": cfg.strategy.filters.narrative_cluster_live_canary_require_valid_identity,
                             "narrative_cluster_live_require_no_creator_sold": cfg.strategy.filters.narrative_cluster_live_canary_require_no_creator_sold,
+                            "narrative_cluster_live_allow_creator_rebuy": cfg.strategy.filters.narrative_cluster_live_canary_allow_creator_rebuy,
                             "narrative_cluster_live_buy_amount_sol": cfg.strategy.execution.narrative_cluster_live_canary_buy_amount_sol,
+                            "narrative_cluster_phase2_shadow_enabled": cfg.strategy.filters.narrative_cluster_phase2_shadow_enabled,
+                            "narrative_cluster_phase2_shadow_passed": phase2_rejection.is_none(),
+                            "narrative_cluster_phase2_shadow_rejection_reason": phase2_rejection.as_deref(),
+                            "narrative_cluster_phase2_shadow_min_score": cfg.strategy.filters.narrative_cluster_phase2_shadow_min_score,
+                            "narrative_cluster_phase2_shadow_max_label_gap_seconds": cfg.strategy.filters.narrative_cluster_phase2_shadow_max_label_gap_seconds,
+                            "narrative_cluster_phase2_shadow_max_initial_liquidity_sol": cfg.strategy.filters.narrative_cluster_phase2_shadow_max_initial_liquidity_sol,
                             "narrative_score": narrative_context.narrative_score,
                             "normalized_label": narrative_context.normalized_label,
                             "cluster_rank": narrative_context.cluster_rank,
@@ -1309,6 +1515,75 @@ async fn log_sniper_candidate(
     }
 }
 
+async fn log_narrative_cluster_phase2_shadow_candidate(
+    supabase: &SupabaseClient,
+    token: &GraduatedToken,
+    mint: &str,
+    creator_wallet: &str,
+    initial_liquidity_sol: f64,
+    context: &NarrativeClusterContext,
+    live_rejection_reason: Option<&str>,
+    bc_rejection_reason: Option<&str>,
+    filters_cfg: &FiltersConfig,
+) -> Option<i64> {
+    let phase2_features = serde_json::json!({
+        "entry_tier": "narrative_cluster_phase2_shadow",
+        "shadow_mode": true,
+        "live_forwarded": false,
+        "live_rejection_reason": live_rejection_reason,
+        "bc_rejection_reason": bc_rejection_reason,
+        "narrative_cluster_phase2_shadow_enabled": filters_cfg.narrative_cluster_phase2_shadow_enabled,
+        "narrative_cluster_phase2_shadow_min_score": filters_cfg.narrative_cluster_phase2_shadow_min_score,
+        "narrative_cluster_phase2_shadow_min_buy_pressure_pct": filters_cfg.narrative_cluster_phase2_shadow_min_buy_pressure_pct,
+        "narrative_cluster_phase2_shadow_min_buy_sell_ratio": filters_cfg.narrative_cluster_phase2_shadow_min_buy_sell_ratio,
+        "narrative_cluster_phase2_shadow_max_sell_count": filters_cfg.narrative_cluster_phase2_shadow_max_sell_count,
+        "narrative_cluster_phase2_shadow_max_label_gap_seconds": filters_cfg.narrative_cluster_phase2_shadow_max_label_gap_seconds,
+        "narrative_cluster_phase2_shadow_min_initial_liquidity_sol": filters_cfg.narrative_cluster_phase2_shadow_min_initial_liquidity_sol,
+        "narrative_cluster_phase2_shadow_max_initial_liquidity_sol": filters_cfg.narrative_cluster_phase2_shadow_max_initial_liquidity_sol,
+        "narrative_cluster_phase2_shadow_require_valid_identity": filters_cfg.narrative_cluster_phase2_shadow_require_valid_identity,
+        "narrative_cluster_phase2_shadow_require_no_creator_sold": filters_cfg.narrative_cluster_phase2_shadow_require_no_creator_sold,
+        "narrative_score": context.narrative_score,
+        "normalized_label": context.normalized_label,
+        "cluster_rank": context.cluster_rank,
+        "prior_same_label_mints_6h": context.prior_same_label_mints_6h,
+        "prior_same_label_creators_6h": context.prior_same_label_creators_6h,
+        "seconds_since_label_seen": context.seconds_since_label_seen,
+        "entry_volume_sol": context.entry_volume_sol,
+        "entry_buy_count": context.entry_buy_count,
+        "entry_sell_count": context.entry_sell_count,
+        "entry_unique_buyers": context.entry_unique_buyers,
+        "entry_buy_sell_ratio": context.entry_buy_sell_ratio,
+        "entry_buy_pressure_pct": context.entry_buy_pressure_pct,
+        "creator_rebuy_bypassed": context.creator_rebuy_bypassed,
+        "creator_sold_during_bc": context.creator_sold_during_bc,
+        "whale_buy": context.whale_buy,
+        "whale_buy_max_sol": context.whale_buy_max_sol,
+        "initial_liquidity_sol": initial_liquidity_sol,
+    });
+
+    log_sniper_candidate(
+        supabase,
+        mint,
+        &token.name,
+        &token.symbol,
+        token
+            .pool_address
+            .as_ref()
+            .map(|p| p.to_string())
+            .as_deref(),
+        creator_wallet,
+        initial_liquidity_sol,
+        "narrative_cluster_phase2_shadow_passed",
+        live_rejection_reason
+            .or(bc_rejection_reason)
+            .or(Some("shadow_only_not_live")),
+        Some("narrative_cluster_phase2_shadow"),
+        context.narrative_score,
+        &phase2_features,
+    )
+    .await
+}
+
 async fn mark_narrative_cluster_would_trade_live(supabase: &SupabaseClient, mint: &str) {
     let url = format!(
         "{}/narrative_cluster_shadow?mint=eq.{}",
@@ -1326,6 +1601,29 @@ async fn mark_narrative_cluster_would_trade_live(supabase: &SupabaseClient, mint
         }
         Err(e) => {
             warn!(mint = %mint, "narrative_cluster_shadow live marker error: {}", e);
+        }
+    }
+}
+
+async fn mark_narrative_cluster_phase2_shadow(supabase: &SupabaseClient, mint: &str) {
+    let url = format!(
+        "{}/narrative_cluster_shadow?mint=eq.{}",
+        supabase.base_url, mint
+    );
+    let payload = serde_json::json!({
+        "phase2_shadow_passed": true,
+        "phase2_shadow_profile": "score70_pressure80_bsr4_sells3_gap300_liq30_85_no_creator_sold_allow_rebuy",
+        "phase2_shadow_checked_at": chrono::Utc::now().to_rfc3339(),
+    });
+
+    match supabase.client.patch(&url).json(&payload).send().await {
+        Ok(resp) if resp.status().is_success() => {}
+        Ok(resp) => {
+            let body = resp.text().await.unwrap_or_default();
+            warn!(mint = %mint, "Failed to mark narrative_cluster_shadow Phase 2 candidate: {}", body);
+        }
+        Err(e) => {
+            warn!(mint = %mint, "narrative_cluster_shadow Phase 2 marker error: {}", e);
         }
     }
 }

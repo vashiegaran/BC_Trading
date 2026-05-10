@@ -431,6 +431,41 @@ pub struct FiltersConfig {
     /// Require no creator sell during the bonding-curve snapshot.
     #[serde(default = "default_true")]
     pub narrative_cluster_live_canary_require_no_creator_sold: bool,
+    /// Allow creator-rebuy only inside the strict narrative-cluster live canary.
+    /// Broad creator-rebuy remains blocked by `reject_creator_rebuy` everywhere else.
+    #[serde(default)]
+    pub narrative_cluster_live_canary_allow_creator_rebuy: bool,
+    /// Shadow-only Phase 2 narrative profile. This marks wider candidates for
+    /// follow-up analytics but never forwards them to live execution.
+    #[serde(default)]
+    pub narrative_cluster_phase2_shadow_enabled: bool,
+    /// Minimum narrative score for the Phase 2 shadow profile.
+    #[serde(default = "default_narrative_cluster_phase2_shadow_min_score")]
+    pub narrative_cluster_phase2_shadow_min_score: f64,
+    /// Minimum buy pressure for the Phase 2 shadow profile.
+    #[serde(default = "default_narrative_cluster_phase2_shadow_min_buy_pressure_pct")]
+    pub narrative_cluster_phase2_shadow_min_buy_pressure_pct: f64,
+    /// Minimum buy/sell ratio for the Phase 2 shadow profile.
+    #[serde(default = "default_narrative_cluster_phase2_shadow_min_buy_sell_ratio")]
+    pub narrative_cluster_phase2_shadow_min_buy_sell_ratio: f64,
+    /// Maximum sell count for the Phase 2 shadow profile.
+    #[serde(default = "default_narrative_cluster_phase2_shadow_max_sell_count")]
+    pub narrative_cluster_phase2_shadow_max_sell_count: u64,
+    /// Maximum seconds since the prior same-label mint for Phase 2 shadow.
+    #[serde(default = "default_narrative_cluster_phase2_shadow_max_label_gap_seconds")]
+    pub narrative_cluster_phase2_shadow_max_label_gap_seconds: u64,
+    /// Minimum SOL-side pool liquidity for Phase 2 shadow.
+    #[serde(default = "default_narrative_cluster_phase2_shadow_min_initial_liquidity_sol")]
+    pub narrative_cluster_phase2_shadow_min_initial_liquidity_sol: f64,
+    /// Maximum SOL-side pool liquidity for Phase 2 shadow.
+    #[serde(default = "default_narrative_cluster_phase2_shadow_max_initial_liquidity_sol")]
+    pub narrative_cluster_phase2_shadow_max_initial_liquidity_sol: f64,
+    /// Require non-empty token identity and a non-sentinel creator wallet for Phase 2.
+    #[serde(default = "default_true")]
+    pub narrative_cluster_phase2_shadow_require_valid_identity: bool,
+    /// Require no creator sell during the bonding-curve snapshot for Phase 2.
+    #[serde(default = "default_true")]
+    pub narrative_cluster_phase2_shadow_require_no_creator_sold: bool,
     /// Minimum buy/sell ratio on the bonding curve.
     /// Data: Q4 (>2.3) graduates at 10.9% vs Q1 (<1.1) at 3.2%.
     #[serde(default = "default_min_buy_sell_ratio")]
@@ -556,6 +591,27 @@ fn default_narrative_cluster_live_canary_max_initial_liquidity_sol() -> f64 {
 }
 fn default_narrative_cluster_live_canary_max_open_positions() -> u32 {
     1
+}
+fn default_narrative_cluster_phase2_shadow_min_score() -> f64 {
+    70.0
+}
+fn default_narrative_cluster_phase2_shadow_min_buy_pressure_pct() -> f64 {
+    80.0
+}
+fn default_narrative_cluster_phase2_shadow_min_buy_sell_ratio() -> f64 {
+    4.0
+}
+fn default_narrative_cluster_phase2_shadow_max_sell_count() -> u64 {
+    3
+}
+fn default_narrative_cluster_phase2_shadow_max_label_gap_seconds() -> u64 {
+    300
+}
+fn default_narrative_cluster_phase2_shadow_min_initial_liquidity_sol() -> f64 {
+    30.0
+}
+fn default_narrative_cluster_phase2_shadow_max_initial_liquidity_sol() -> f64 {
+    85.0
 }
 fn default_max_bc_sell_count() -> u64 {
     40

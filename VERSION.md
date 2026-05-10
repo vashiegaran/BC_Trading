@@ -9,6 +9,33 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.9 — Narrative Rebuy Exception + Phase 2 Shadow (2026-05-11)
+
+**strategy_version**: `v18.9-narrative-rebuy-exception`
+
+### Why
+May 7-10 `narrative_cluster_shadow` analysis showed the strict narrative profile was not firing live because creator-rebuy was still globally blocking it. The profitable subset was strict narrative flow plus a creator-rebuy exception inside that lane only: score ≥80, buy pressure ≥80%, buy/sell ratio ≥4, sells ≤3, no creator sell, label gap ≤60s, and 30-80 SOL liquidity.
+
+### Changes
+- Allows creator-rebuy only inside the strict `narrative_cluster_live_canary` profile via `narrative_cluster_live_canary_allow_creator_rebuy = true`.
+- Keeps broad creator-rebuy blocked everywhere else by `reject_creator_rebuy = true`.
+- Keeps strict live sizing/cap: 0.05 SOL and max 1 open narrative canary position.
+- Adds Phase 2 shadow-only narrative markers via [migrations/033_narrative_phase2_shadow.sql](migrations/033_narrative_phase2_shadow.sql):
+  - score ≥70.
+  - buy pressure ≥80%.
+  - buy/sell ratio ≥4.
+  - sells ≤3.
+  - no creator sell.
+  - label gap ≤300s.
+  - liquidity 30-85 SOL.
+  - creator-rebuy allowed in shadow only.
+- Phase 2 never forwards live; it only marks `narrative_cluster_shadow.phase2_shadow_passed` for fresh-data validation.
+
+### Rollback
+Set `narrative_cluster_live_canary_allow_creator_rebuy = false` and/or `narrative_cluster_phase2_shadow_enabled = false` in [config.toml](config.toml), then restart PM2.
+
+---
+
 ## v18.8 — Proven Runner Scale-In Shadow (2026-05-10)
 
 **strategy_version**: `v18.8-proven-runner-scale-in-shadow`

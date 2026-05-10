@@ -9,7 +9,7 @@
 #   filterable in analytics vs the broken v16.1 binary that was running
 #   from never-committed source. Detection: pumpfun_ws. Fast-track:
 #   2-source (on_chain_mint + goplus) so GoPlus runs PRE-buy.
-strategy_version = "v18.8-proven-runner-scale-in-shadow"
+strategy_version = "v18.9-narrative-rebuy-exception"
 
 # ============================================================
 # DETECTION
@@ -193,10 +193,11 @@ creator_rebuy_live_test_zero_sell_min_buy_pressure_pct = 70.0
 creator_rebuy_live_test_zero_sell_min_buy_sell_ratio = 5.0
 creator_rebuy_live_test_strong_flow_min_bc_progress_pct = 20.0
 
-# Narrative cluster live canary: only the strict May 7-9 profile goes live.
-# Backtest: score>=80, buy_pressure>=80, BSR>=4, sells<=3, no creator sell,
-# label gap<=60s, liq 30-80 SOL → median 2.90x, 48% hit 3x, 20% hit 5x.
-# Broad narrative remains shadow-only; broad creator-rebuy remains blocked.
+# Narrative cluster live canary: only the strict May 7-10 profile goes live.
+# v18.9 Phase 1: allow creator-rebuy ONLY inside this strict narrative lane.
+# Backtest/sim: score>=80, buy_pressure>=80, BSR>=4, sells<=3, no creator sell,
+# label gap<=60s, liq 30-80 SOL, creator-rebuy allowed in-lane only
+# → 26 signals, 65% WR, +5.14 SOL moonbag-style sim; broad creator-rebuy stays blocked.
 narrative_cluster_live_canary_enabled = true
 narrative_cluster_live_canary_min_score = 80.0
 narrative_cluster_live_canary_min_buy_pressure_pct = 80.0
@@ -208,6 +209,20 @@ narrative_cluster_live_canary_max_initial_liquidity_sol = 80.0
 narrative_cluster_live_canary_max_open_positions = 1
 narrative_cluster_live_canary_require_valid_identity = true
 narrative_cluster_live_canary_require_no_creator_sold = true
+narrative_cluster_live_canary_allow_creator_rebuy = true
+
+# v18.9 Phase 2 shadow-only profit-max profile. Never forwards live; marks
+# narrative_cluster_shadow rows so we can validate on fresh data before promotion.
+narrative_cluster_phase2_shadow_enabled = true
+narrative_cluster_phase2_shadow_min_score = 70.0
+narrative_cluster_phase2_shadow_min_buy_pressure_pct = 80.0
+narrative_cluster_phase2_shadow_min_buy_sell_ratio = 4.0
+narrative_cluster_phase2_shadow_max_sell_count = 3
+narrative_cluster_phase2_shadow_max_label_gap_seconds = 300
+narrative_cluster_phase2_shadow_min_initial_liquidity_sol = 30.0
+narrative_cluster_phase2_shadow_max_initial_liquidity_sol = 85.0
+narrative_cluster_phase2_shadow_require_valid_identity = true
+narrative_cluster_phase2_shadow_require_no_creator_sold = true
 
 # Minimum buy/sell ratio on the bonding curve.
 # Data: ratio > 2.3 graduates at 10.9% vs < 1.1 at 3.2%. Using 1.2 to avoid over-filtering.
