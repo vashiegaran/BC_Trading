@@ -23,6 +23,7 @@ Full `narrative_cluster_shadow` history showed the raw lane is too noisy, but th
 - Requires Fast-Track safety before forwarding to the filter engine.
 - Adds a lane-specific max-open cap of 1 and 0.05 SOL controlled sizing.
 - Treats narrative canary entries as protected runners for the existing soft-exit grace/protection logic.
+- Reserves the single Chainstack Yellowstone stream for pump.fun gRPC detection when both detection and monitoring gRPC are enabled; monitoring falls back to WS/polling instead of causing `ResourceExhausted` reconnect loops.
 
 ### Rollback
 Set `narrative_cluster_live_canary_enabled = false` in [config.toml](config.toml), then restart PM2. Shadow recording can remain enabled.

@@ -138,11 +138,25 @@ pub fn start(
         //   1. Yellowstone gRPC (Chainstack) — if enabled AND endpoint set.
         //      Replaces Helius WS entirely; empirically Helius Developer
         //      plan silently drops accountNotifications for pump.fun PDAs.
+        //      However, low-tier Chainstack plans can allow only one active
+        //      Yellowstone stream. If pump.fun gRPC detection is enabled, reserve
+        //      that stream for detection and let monitoring use the WS/polling
+        //      fallback instead of starving entries with ResourceExhausted.
         //   2. Helius WS mux — fallback for when Yellowstone isn't
-        //      configured or was intentionally disabled.
+        //      configured or was intentionally disabled/reserved for detection.
         //   3. None — pure-polling v5 behavior.
+        let reserve_yellowstone_for_detection = cfg.env.use_grpc_pumpfun_detection
+            && cfg.env.enable_yellowstone_grpc
+            && cfg.env.yellowstone_grpc_endpoint.is_some();
+        if reserve_yellowstone_for_detection {
+            warn!(
+                "Yellowstone gRPC price stream disabled — reserving Chainstack stream capacity for pump.fun detection"
+            );
+        }
+
         let (helius_price_cache, helius_price_handle) = if cfg.env.enable_yellowstone_grpc
             && cfg.env.yellowstone_grpc_endpoint.is_some()
+            && !reserve_yellowstone_for_detection
         {
             let cache = Arc::new(helius_price_ws::HeliusPriceCache::new());
             price_fetcher = price_fetcher.with_helius_cache(Arc::clone(&cache));
