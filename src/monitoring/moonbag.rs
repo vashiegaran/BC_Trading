@@ -295,6 +295,8 @@ struct MoonbagPosition {
     is_fast_runner: bool,
     /// Pending background narrative check result (fast-runner only).
     pending_narrative_rx: Option<tokio::sync::oneshot::Receiver<NarrativeResult>>,
+    /// Shadow-only add-on candidate has been logged for this promoted runner.
+    scale_in_shadow_logged: bool,
 }
 
 impl MoonbagPosition {
@@ -352,6 +354,7 @@ impl MoonbagPosition {
             price_at_promotion: cmd.price_at_promotion,
             is_fast_runner: cmd.promotion_source == PromotionSource::FastRunner,
             pending_narrative_rx: None,
+            scale_in_shadow_logged: false,
         }
     }
 
@@ -1107,6 +1110,37 @@ pub async fn run_moonbag_tracker(
                         pos.trailing_breach_count = 0;
                     }
 
+                    if cfg.strategy.monitoring.scale_in_shadow_enabled
+                        && !pos.scale_in_shadow_logged
+                        && !pos.partial_3x_done
+                        && multiplier >= cfg.strategy.monitoring.scale_in_shadow_min_multiplier
+                        && multiplier <= cfg.strategy.monitoring.scale_in_shadow_max_multiplier
+                        && drawdown_from_peak <= cfg.strategy.monitoring.scale_in_shadow_max_drawdown_pct
+                    {
+                        pos.scale_in_shadow_logged = true;
+                        info!(
+                            mint = %pos.mint,
+                            multiplier = format!("{:.2}x", multiplier),
+                            peak_multiplier = format!("{:.2}x", peak_mult),
+                            drawdown = format!("{:.1}%", drawdown_from_peak),
+                            hypothetical_add_sol = format!(
+                                "{:.3}",
+                                cfg.strategy.monitoring.scale_in_shadow_amount_sol
+                            ),
+                            "🌙 Proven-runner scale-in SHADOW — would add here"
+                        );
+                        log_scale_in_shadow_candidate(
+                            Arc::clone(&supabase),
+                            pos,
+                            current_price,
+                            multiplier,
+                            peak_mult,
+                            drawdown_from_peak,
+                            cfg.strategy.monitoring.scale_in_shadow_amount_sol,
+                            cfg.strategy.strategy_version.clone().unwrap_or_else(|| "unknown".to_string()),
+                        );
+                    }
+
                     if let Some(stage) = pos.next_partial_stage(multiplier) {
                         let pct_to_sell = pos.pct_of_remaining_for_stage(stage);
                         info!(
@@ -1412,7 +1446,15 @@ pub async fn run_moonbag_tracker(
                             mark_parent_position_moonbag_after_partial(
                                 Arc::clone(&supabase),
                                 position_id,
-                                mint_for_confirm,
+                                mint_for_confirm.clone(),
+                            );
+                            update_scale_in_shadow_outcome(
+                                Arc::clone(&supabase),
+                                position_id,
+                                peak_multiplier,
+                                None,
+                                None,
+                                false,
                             );
                         }
                         MoonbagExitAction::Final => {
@@ -1432,7 +1474,7 @@ pub async fn run_moonbag_tracker(
                                 position_id,
                                 mint_for_confirm,
                                 "tail_exit".to_string(),
-                                reason,
+                                reason.clone(),
                                 signal.pct_to_sell,
                                 token_amount_before,
                                 token_amount_requested,
@@ -1444,6 +1486,14 @@ pub async fn run_moonbag_tracker(
                                 true,
                                 signal.is_paper_trade,
                                 cfg.strategy.strategy_version.clone().unwrap_or_else(|| "unknown".to_string()),
+                            );
+                            update_scale_in_shadow_outcome(
+                                Arc::clone(&supabase),
+                                position_id,
+                                peak_multiplier,
+                                Some(reason.clone()),
+                                Some(multiplier),
+                                true,
                             );
                             positions.remove(idx);
                         }
@@ -1645,6 +1695,104 @@ fn log_moonbag_exit_event(
         let url = format!("{}/moonbag_exit_events", supabase.base_url);
         if let Err(e) = supabase.client.post(&url).json(&payload).send().await {
             tracing::debug!(position_id, "moonbag_exit_events insert error: {}", e);
+        }
+    });
+}
+
+fn log_scale_in_shadow_candidate(
+    supabase: Arc<SupabaseClient>,
+    pos: &MoonbagPosition,
+    trigger_price_usd: f64,
+    trigger_multiplier: f64,
+    peak_multiplier: f64,
+    drawdown_from_peak_pct: f64,
+    addon_amount_sol: f64,
+    strategy_version: String,
+) {
+    let payload = serde_json::json!({
+        "position_id": pos.position_id,
+        "mint": pos.mint.clone(),
+        "token_name": pos.token_name.clone(),
+        "token_symbol": pos.token_symbol.clone(),
+        "strategy_version": strategy_version,
+        "is_paper_trade": pos.is_paper_trade,
+        "trigger": "moonbag_proven_runner_scale_in",
+        "shadow_only": true,
+        "would_add_live": true,
+        "addon_amount_sol": addon_amount_sol,
+        "entry_price_usd": pos.entry_price_usd,
+        "trigger_price_usd": trigger_price_usd,
+        "trigger_multiplier": trigger_multiplier,
+        "peak_price_usd_at_trigger": pos.peak_price,
+        "peak_multiplier_at_trigger": peak_multiplier,
+        "drawdown_from_peak_pct": drawdown_from_peak_pct,
+        "promotion_source": pos.promotion_source.to_string(),
+        "narrative_state": pos.narrative_state.to_string(),
+        "promoted_age_secs": pos.promoted_at.elapsed().as_secs() as i64,
+        "partial_3x_done": pos.partial_3x_done,
+        "partial_5x_done": pos.partial_5x_done,
+        "outcome_hit_3x": peak_multiplier >= 3.0,
+        "outcome_hit_5x": peak_multiplier >= 5.0,
+        "outcome_peak_multiplier": peak_multiplier,
+        "created_at": chrono::Utc::now().to_rfc3339(),
+        "updated_at": chrono::Utc::now().to_rfc3339(),
+    });
+    tokio::spawn(async move {
+        let url = format!("{}/position_scale_in_shadow", supabase.base_url);
+        match supabase.client.post(&url).json(&payload).send().await {
+            Ok(resp) if resp.status().is_success() => {}
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                tracing::warn!(status = %status, body = %body, "position_scale_in_shadow insert failed");
+            }
+            Err(e) => {
+                tracing::warn!("position_scale_in_shadow insert error: {}", e);
+            }
+        }
+    });
+}
+
+fn update_scale_in_shadow_outcome(
+    supabase: Arc<SupabaseClient>,
+    position_id: i64,
+    peak_multiplier: f64,
+    exit_reason: Option<String>,
+    exit_multiplier: Option<f64>,
+    completed: bool,
+) {
+    tokio::spawn(async move {
+        let mut payload = serde_json::json!({
+            "outcome_hit_3x": peak_multiplier >= 3.0,
+            "outcome_hit_5x": peak_multiplier >= 5.0,
+            "outcome_peak_multiplier": peak_multiplier,
+            "updated_at": chrono::Utc::now().to_rfc3339(),
+        });
+        if let Some(reason) = exit_reason {
+            payload
+                .as_object_mut()
+                .unwrap()
+                .insert("outcome_exit_reason".to_string(), serde_json::json!(reason));
+        }
+        if let Some(multiplier) = exit_multiplier {
+            payload.as_object_mut().unwrap().insert(
+                "outcome_exit_multiplier".to_string(),
+                serde_json::json!(multiplier),
+            );
+        }
+        if completed {
+            payload.as_object_mut().unwrap().insert(
+                "outcome_completed_at".to_string(),
+                serde_json::json!(chrono::Utc::now().to_rfc3339()),
+            );
+        }
+
+        let url = format!(
+            "{}/position_scale_in_shadow?position_id=eq.{}",
+            supabase.base_url, position_id
+        );
+        if let Err(e) = supabase.client.patch(&url).json(&payload).send().await {
+            tracing::debug!(position_id, "position_scale_in_shadow update error: {}", e);
         }
     });
 }

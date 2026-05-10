@@ -9,7 +9,7 @@
 #   filterable in analytics vs the broken v16.1 binary that was running
 #   from never-committed source. Detection: pumpfun_ws. Fast-track:
 #   2-source (on_chain_mint + goplus) so GoPlus runs PRE-buy.
-strategy_version = "v18.7.9-narrative-cluster-live-canary"
+strategy_version = "v18.8-proven-runner-scale-in-shadow"
 
 # ============================================================
 # DETECTION
@@ -615,6 +615,16 @@ moonbag_downgrade_consecutive = 2
 # AND has no narrative result yet, auto-promote to moonbag.
 # A background narrative check fires immediately for data collection.
 fast_runner_threshold_secs = 60
+
+# ── Proven-runner scale-in shadow ──
+# Observe-only: log where we would add to an already-promoted moonbag runner,
+# but never execute the add-on buy. This collects the proof needed before any
+# future 0.05/0.10 SOL live scale-in rollout.
+scale_in_shadow_enabled = true
+scale_in_shadow_amount_sol = 0.05
+scale_in_shadow_min_multiplier = 2.2
+scale_in_shadow_max_multiplier = 2.8
+scale_in_shadow_max_drawdown_pct = 12.0
 
 # ── CTO (Community Takeover) detection ──
 # When dev sells 100% of tokens (balance → 0), treat as bullish CTO signal

@@ -9,6 +9,28 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.8 — Proven Runner Scale-In Shadow (2026-05-10)
+
+**strategy_version**: `v18.8-proven-runner-scale-in-shadow`
+
+### Why
+Live moonbag handling is correctly promoting candidates around TP1 and confirming true runners at 3x, but the next question is whether a proven runner between 2.2x and 2.8x deserves an add-on buy before the 3x partial. This version records those would-add moments without executing any additional buy.
+
+### Changes
+- Adds `position_scale_in_shadow` via [migrations/032_proven_runner_scale_in_shadow.sql](migrations/032_proven_runner_scale_in_shadow.sql).
+- Enables shadow-only scale-in observation for promoted moonbags:
+  - trigger window: 2.2x-2.8x from original entry.
+  - max drawdown from peak: 12%.
+  - hypothetical add size: 0.05 SOL.
+  - one shadow trigger per promoted moonbag before the 3x partial.
+- Patches shadow outcome fields when the runner hits 3x/5x or exits, so later analysis can measure whether a 0.05/0.10 SOL add-on would have helped.
+- Does **not** execute live add-on buys and does **not** bypass duplicate-mint execution guards.
+
+### Rollback
+Set `scale_in_shadow_enabled = false` in [config.toml](config.toml), then restart PM2. No schema rollback is required.
+
+---
+
 ## v18.7.9 — Narrative Cluster Live Canary (2026-05-10)
 
 **strategy_version**: `v18.7.9-narrative-cluster-live-canary`

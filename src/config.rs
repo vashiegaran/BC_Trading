@@ -1008,6 +1008,23 @@ pub struct MonitoringConfig {
     #[serde(default = "default_fast_runner_threshold_secs")]
     pub fast_runner_threshold_secs: u64,
 
+    /// Shadow-only proven-runner scale-in observer. When enabled, moonbag
+    /// tracker logs where an add-on buy would have fired, but never buys.
+    #[serde(default)]
+    pub scale_in_shadow_enabled: bool,
+    /// Hypothetical SOL amount for the shadow add-on.
+    #[serde(default = "default_scale_in_shadow_amount_sol")]
+    pub scale_in_shadow_amount_sol: f64,
+    /// Minimum multiplier from original entry before the shadow add-on can fire.
+    #[serde(default = "default_scale_in_shadow_min_multiplier")]
+    pub scale_in_shadow_min_multiplier: f64,
+    /// Maximum multiplier from original entry. Above this, the add-on is chasey.
+    #[serde(default = "default_scale_in_shadow_max_multiplier")]
+    pub scale_in_shadow_max_multiplier: f64,
+    /// Maximum drawdown from current high-water mark allowed at trigger time.
+    #[serde(default = "default_scale_in_shadow_max_drawdown_pct")]
+    pub scale_in_shadow_max_drawdown_pct: f64,
+
     /// Minimum dev holding (% of supply) to qualify for CTO path.
     /// Dev with <3% selling to 0 is noise, not a meaningful CTO.
     #[serde(default = "default_cto_min_dev_hold_pct")]
@@ -1181,6 +1198,18 @@ fn default_moonbag_downgrade_consecutive() -> u32 {
 }
 fn default_fast_runner_threshold_secs() -> u64 {
     60
+}
+fn default_scale_in_shadow_amount_sol() -> f64 {
+    0.05
+}
+fn default_scale_in_shadow_min_multiplier() -> f64 {
+    2.2
+}
+fn default_scale_in_shadow_max_multiplier() -> f64 {
+    2.8
+}
+fn default_scale_in_shadow_max_drawdown_pct() -> f64 {
+    12.0
 }
 fn default_cto_min_dev_hold_pct() -> f64 {
     3.0
