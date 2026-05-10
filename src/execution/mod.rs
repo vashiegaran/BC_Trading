@@ -33,6 +33,7 @@ use wallet::BotWallet;
 /// Channel capacity for execution → monitoring pipeline.
 const CHANNEL_CAPACITY: usize = 50;
 const CREATOR_REBUY_LIVE_TEST_ENTRY_TIER: &str = "creator_rebuy_live_test_fast_track";
+const NARRATIVE_CLUSTER_LIVE_CANARY_ENTRY_TIER: &str = "narrative_cluster_live_canary";
 
 /// Minimum liquidity floor for dynamic sizing scale (SOL).
 const DYNAMIC_SIZE_LIQ_FLOOR: f64 = 30.0;
@@ -69,6 +70,16 @@ fn is_creator_rebuy_live_test(token: &FilteredToken) -> bool {
         == Some(CREATOR_REBUY_LIVE_TEST_ENTRY_TIER)
 }
 
+fn is_narrative_cluster_live_canary(token: &FilteredToken) -> bool {
+    token
+        .event
+        .sniper_features
+        .as_ref()
+        .and_then(|features| features.get("entry_tier"))
+        .and_then(|entry_tier| entry_tier.as_str())
+        == Some(NARRATIVE_CLUSTER_LIVE_CANARY_ENTRY_TIER)
+}
+
 fn compute_buy_amount(cfg: &AppConfig, token: &FilteredToken) -> f64 {
     let dynamic_amount = compute_dynamic_buy_amount(cfg, token.event.initial_liquidity_sol);
 
@@ -77,6 +88,16 @@ fn compute_buy_amount(cfg: &AppConfig, token: &FilteredToken) -> f64 {
             .strategy
             .execution
             .creator_rebuy_live_test_buy_amount_sol;
+        if canary_amount > 0.0 {
+            return canary_amount.min(dynamic_amount);
+        }
+    }
+
+    if is_narrative_cluster_live_canary(token) {
+        let canary_amount = cfg
+            .strategy
+            .execution
+            .narrative_cluster_live_canary_buy_amount_sol;
         if canary_amount > 0.0 {
             return canary_amount.min(dynamic_amount);
         }
@@ -205,6 +226,32 @@ pub fn start(
                         open_count, cap
                     );
                     warn!(mint = %mint_str, reason = %reason, "⏭️ Skipping creator-rebuy canary — lane cap reached");
+                    timing.outcome = Some("rejected_precheck".to_string());
+                    timing.rejection_stage = Some("precheck".to_string());
+                    timing.rejection_reason = Some(reason);
+                    let timing_payload = timing.to_json(&mint_str);
+                    let supabase_bg = supabase.clone();
+                    tokio::spawn(async move {
+                        log_pipeline_latency(&supabase_bg, &timing_payload).await;
+                    });
+                    continue;
+                }
+            }
+
+            if is_narrative_cluster_live_canary(&token) {
+                let cap = cfg
+                    .strategy
+                    .filters
+                    .narrative_cluster_live_canary_max_open_positions;
+                let open_count = trading_state
+                    .narrative_cluster_live_canary_open_count()
+                    .await;
+                if cap > 0 && open_count >= cap as i64 {
+                    let reason = format!(
+                        "narrative_cluster_live_canary_open_cap_reached_{}/{}",
+                        open_count, cap
+                    );
+                    warn!(mint = %mint_str, reason = %reason, "⏭️ Skipping narrative-cluster canary — lane cap reached");
                     timing.outcome = Some("rejected_precheck".to_string());
                     timing.rejection_stage = Some("precheck".to_string());
                     timing.rejection_reason = Some(reason);
@@ -1382,7 +1429,12 @@ async fn execute_real_trade(
     // Step 7: Update in-memory state immediately, write Supabase in background
     // This means monitoring starts ASAP without waiting for DB.
     trading_state
-        .record_buy(&mint_str, buy_amount_sol, is_creator_rebuy_live_test(token))
+        .record_buy(
+            &mint_str,
+            buy_amount_sol,
+            is_creator_rebuy_live_test(token),
+            is_narrative_cluster_live_canary(token),
+        )
         .await;
 
     let pool_address = match token.event.pool_address {

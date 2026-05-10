@@ -88,6 +88,7 @@ pub async fn run(tx: mpsc::Sender<GraduatedToken>, api_key: Option<String>) {
                 } else {
                     result.buys as f64
                 },
+                narrative_cluster: None,
                 candidate_id: None,
                 sniper_features: None,
                 sniper_score: None,

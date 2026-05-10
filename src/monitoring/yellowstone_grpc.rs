@@ -780,6 +780,7 @@ async fn send_graduation_event(
         initial_liquidity_sol: 0.0,
         creator_rebuy: false,
         buy_sell_ratio: 0.0,
+        narrative_cluster: None,
         candidate_id: None,
         sniper_features: None,
         sniper_score: None,

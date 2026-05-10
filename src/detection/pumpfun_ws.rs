@@ -16,7 +16,7 @@ use tracing::{debug, error, info, warn};
 
 use super::types::{
     compute_bc_score, prune_bc_score_cache, BcScoreCache, BcScoreEntry, DetectionSource,
-    GraduatedToken, PipelineTiming, WatchlistEntry,
+    GraduatedToken, NarrativeClusterContext, PipelineTiming, WatchlistEntry,
 };
 use crate::config::AppConfig;
 use crate::logger::SupabaseClient;
@@ -840,6 +840,48 @@ fn compute_early_buyer_rebuy_metrics(
     })
 }
 
+fn build_narrative_cluster_context(
+    entry: &WatchlistEntry,
+    score: &NarrativeClusterScore,
+    bc_progress_pct: f64,
+) -> NarrativeClusterContext {
+    let buy_sell_ratio = compute_current_buy_sell_ratio(entry);
+    let creator_rebuy = compute_current_creator_rebuy(entry);
+    let creator_sold_during_bc = entry
+        .trade_log
+        .iter()
+        .any(|&(_, _, is_buy, wallet)| !is_buy && wallet == entry.creator_wallet);
+    let whale_buy_max_sol = entry
+        .trade_log
+        .iter()
+        .filter(|(_, _, is_buy, _)| *is_buy)
+        .map(|(_, sol, _, _)| *sol)
+        .fold(0.0_f64, f64::max);
+
+    NarrativeClusterContext {
+        normalized_label: entry.normalized_label.clone(),
+        cluster_rank: entry.prior_same_label_mints_6h + 1,
+        prior_same_label_mints_6h: entry.prior_same_label_mints_6h,
+        prior_same_label_creators_6h: entry.prior_same_label_creators_6h,
+        seconds_since_label_seen: entry.seconds_since_label_seen,
+        narrative_score: score.score,
+        score_reasons: score.reasons.clone(),
+        score_penalties: score.penalties.clone(),
+        score_breakdown: score.breakdown.clone(),
+        entry_volume_sol: entry.total_volume_sol,
+        entry_buy_count: entry.buy_count,
+        entry_sell_count: entry.sell_count,
+        entry_unique_buyers: entry.unique_buyers.len(),
+        entry_buy_sell_ratio: buy_sell_ratio,
+        entry_buy_pressure_pct: entry.buy_pressure_pct(),
+        creator_rebuy_bypassed: creator_rebuy,
+        creator_sold_during_bc,
+        whale_buy: whale_buy_max_sol >= 3.0,
+        whale_buy_max_sol,
+        bc_progress_pct,
+    }
+}
+
 fn maybe_fire_narrative_cluster_shadow(
     entry: &mut WatchlistEntry,
     mint_str: &str,
@@ -885,6 +927,11 @@ fn maybe_fire_narrative_cluster_shadow(
     }
 
     entry.narrative_cluster_shadow_recorded = true;
+    entry.narrative_cluster_context = Some(build_narrative_cluster_context(
+        entry,
+        &score,
+        bc_progress_pct,
+    ));
     let payload = build_narrative_cluster_shadow_payload(
         entry,
         mint_str,
@@ -1674,6 +1721,7 @@ async fn handle_new_token(
         launch_label_shadow_recorded: false,
         label_flow_shadow_recorded: false,
         narrative_cluster_shadow_recorded: false,
+        narrative_cluster_context: None,
         probe_add_probe_recorded: false,
         probe_add_add_recorded: false,
         probe_add_probe_buy_count: 0,
@@ -2532,6 +2580,7 @@ async fn handle_token_complete(
         _initial_buy_sol,
         creator_rebuy,
         buy_sell_ratio,
+        narrative_cluster,
     ) = match watchlist.remove(mint_str) {
         Some(entry) => {
             let elapsed_secs = (now_ms - entry.detected_at) as f64 / 1_000.0;
@@ -2564,6 +2613,7 @@ async fn handle_token_complete(
                 entry.initial_buy_sol,
                 cr,
                 bsr,
+                entry.narrative_cluster_context,
             )
         }
         None => {
@@ -2618,6 +2668,7 @@ async fn handle_token_complete(
                 0.0,
                 false,
                 fallback_bsr,
+                None,
             )
         }
     };
@@ -2708,6 +2759,7 @@ async fn handle_token_complete(
         initial_liquidity_sol,
         creator_rebuy,
         buy_sell_ratio,
+        narrative_cluster,
         candidate_id: None,
         sniper_features: None,
         sniper_score: None,

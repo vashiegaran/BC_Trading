@@ -392,6 +392,45 @@ pub struct FiltersConfig {
     /// Minimum BC progress for the strong-flow creator-rebuy profile.
     #[serde(default = "default_creator_rebuy_live_test_strong_flow_min_bc_progress_pct")]
     pub creator_rebuy_live_test_strong_flow_min_bc_progress_pct: f64,
+    /// Strict live canary for the best narrative-cluster shadow profile. This
+    /// bypasses the Standard-lane kill switch only after the armed shadow
+    /// snapshot matches the configured flow/liquidity gates and Fast-Track
+    /// safety passes. Broad creator-rebuy remains blocked by `reject_creator_rebuy`.
+    #[serde(default)]
+    pub narrative_cluster_live_canary_enabled: bool,
+    /// Minimum narrative-cluster score for the live canary.
+    #[serde(default = "default_narrative_cluster_live_canary_min_score")]
+    pub narrative_cluster_live_canary_min_score: f64,
+    /// Minimum buy pressure at the shadow-arm snapshot.
+    #[serde(default = "default_narrative_cluster_live_canary_min_buy_pressure_pct")]
+    pub narrative_cluster_live_canary_min_buy_pressure_pct: f64,
+    /// Minimum buy/sell ratio at the shadow-arm snapshot.
+    #[serde(default = "default_narrative_cluster_live_canary_min_buy_sell_ratio")]
+    pub narrative_cluster_live_canary_min_buy_sell_ratio: f64,
+    /// Maximum sell count at the shadow-arm snapshot.
+    #[serde(default = "default_narrative_cluster_live_canary_max_sell_count")]
+    pub narrative_cluster_live_canary_max_sell_count: u64,
+    /// Maximum seconds since the prior same-label mint.
+    #[serde(default = "default_narrative_cluster_live_canary_max_label_gap_seconds")]
+    pub narrative_cluster_live_canary_max_label_gap_seconds: u64,
+    /// Minimum SOL-side pool liquidity for the live canary.
+    /// 0 = disabled. Unknown/zero liquidity fails when this is > 0.
+    #[serde(default = "default_narrative_cluster_live_canary_min_initial_liquidity_sol")]
+    pub narrative_cluster_live_canary_min_initial_liquidity_sol: f64,
+    /// Maximum SOL-side pool liquidity for the live canary.
+    /// 0 = disabled.
+    #[serde(default = "default_narrative_cluster_live_canary_max_initial_liquidity_sol")]
+    pub narrative_cluster_live_canary_max_initial_liquidity_sol: f64,
+    /// Maximum concurrently open positions from this narrative canary.
+    /// 0 = no lane-specific cap.
+    #[serde(default = "default_narrative_cluster_live_canary_max_open_positions")]
+    pub narrative_cluster_live_canary_max_open_positions: u32,
+    /// Require non-empty token identity and a non-sentinel creator wallet.
+    #[serde(default = "default_true")]
+    pub narrative_cluster_live_canary_require_valid_identity: bool,
+    /// Require no creator sell during the bonding-curve snapshot.
+    #[serde(default = "default_true")]
+    pub narrative_cluster_live_canary_require_no_creator_sold: bool,
     /// Minimum buy/sell ratio on the bonding curve.
     /// Data: Q4 (>2.3) graduates at 10.9% vs Q1 (<1.1) at 3.2%.
     #[serde(default = "default_min_buy_sell_ratio")]
@@ -494,6 +533,30 @@ fn default_creator_rebuy_live_test_zero_sell_min_buy_sell_ratio() -> f64 {
 fn default_creator_rebuy_live_test_strong_flow_min_bc_progress_pct() -> f64 {
     20.0
 }
+fn default_narrative_cluster_live_canary_min_score() -> f64 {
+    80.0
+}
+fn default_narrative_cluster_live_canary_min_buy_pressure_pct() -> f64 {
+    80.0
+}
+fn default_narrative_cluster_live_canary_min_buy_sell_ratio() -> f64 {
+    4.0
+}
+fn default_narrative_cluster_live_canary_max_sell_count() -> u64 {
+    3
+}
+fn default_narrative_cluster_live_canary_max_label_gap_seconds() -> u64 {
+    60
+}
+fn default_narrative_cluster_live_canary_min_initial_liquidity_sol() -> f64 {
+    30.0
+}
+fn default_narrative_cluster_live_canary_max_initial_liquidity_sol() -> f64 {
+    80.0
+}
+fn default_narrative_cluster_live_canary_max_open_positions() -> u32 {
+    1
+}
 fn default_max_bc_sell_count() -> u64 {
     40
 }
@@ -582,6 +645,11 @@ pub struct ExecutionConfig {
     /// the normal dynamic size.
     #[serde(default)]
     pub creator_rebuy_live_test_buy_amount_sol: f64,
+    /// Optional fixed buy size for the narrative-cluster live canary. 0 = use
+    /// normal dynamic sizing. When set, execution uses the smaller of this and
+    /// the normal dynamic size.
+    #[serde(default)]
+    pub narrative_cluster_live_canary_buy_amount_sol: f64,
 }
 
 fn default_paper_slippage_bps() -> u64 {

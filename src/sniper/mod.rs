@@ -25,14 +25,113 @@ use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 use crate::config::{AppConfig, FiltersConfig};
-use crate::detection::types::{BcScoreCache, BcScoreEntry, GraduatedToken};
+use crate::detection::types::{
+    BcScoreCache, BcScoreEntry, GraduatedToken, NarrativeClusterContext,
+};
 use crate::execution::jupiter::{JupiterClient, SOL_MINT};
 use crate::logger::SupabaseClient;
 
 const SNIPER_CHANNEL_CAPACITY: usize = 100;
 const CREATOR_REBUY_SHADOW_ENTRY_TIER: &str = "creator_rebuy_shadow_fast_track";
 const CREATOR_REBUY_LIVE_TEST_ENTRY_TIER: &str = "creator_rebuy_live_test_fast_track";
+const NARRATIVE_CLUSTER_LIVE_CANARY_ENTRY_TIER: &str = "narrative_cluster_live_canary";
 const SYSTEM_PROGRAM_ID: &str = "11111111111111111111111111111111";
+
+fn narrative_cluster_live_canary_rejection_reason(
+    token: &GraduatedToken,
+    context: &NarrativeClusterContext,
+    filters_cfg: &FiltersConfig,
+    initial_liquidity_sol: f64,
+) -> Option<String> {
+    if !filters_cfg.narrative_cluster_live_canary_enabled {
+        return Some("narrative_cluster_live_canary_disabled".to_string());
+    }
+
+    if filters_cfg.narrative_cluster_live_canary_require_valid_identity {
+        if token.name.trim().is_empty() || token.symbol.trim().is_empty() {
+            return Some("narrative_cluster_live_missing_token_identity".to_string());
+        }
+        if token.creator_wallet.to_string() == SYSTEM_PROGRAM_ID {
+            return Some("narrative_cluster_live_creator_wallet_system_program".to_string());
+        }
+    }
+
+    if filters_cfg.reject_creator_rebuy && (token.creator_rebuy || context.creator_rebuy_bypassed) {
+        return Some("narrative_cluster_live_creator_rebuy_blocked".to_string());
+    }
+
+    if context.narrative_score < filters_cfg.narrative_cluster_live_canary_min_score {
+        return Some(format!(
+            "narrative_score_{:.1}_below_live_min_{:.1}",
+            context.narrative_score, filters_cfg.narrative_cluster_live_canary_min_score
+        ));
+    }
+
+    if context.entry_buy_pressure_pct
+        < filters_cfg.narrative_cluster_live_canary_min_buy_pressure_pct
+    {
+        return Some(format!(
+            "entry_buy_pressure_{:.1}_below_live_min_{:.1}",
+            context.entry_buy_pressure_pct,
+            filters_cfg.narrative_cluster_live_canary_min_buy_pressure_pct
+        ));
+    }
+
+    if context.entry_buy_sell_ratio < filters_cfg.narrative_cluster_live_canary_min_buy_sell_ratio {
+        return Some(format!(
+            "entry_buy_sell_ratio_{:.2}_below_live_min_{:.2}",
+            context.entry_buy_sell_ratio,
+            filters_cfg.narrative_cluster_live_canary_min_buy_sell_ratio
+        ));
+    }
+
+    if context.entry_sell_count > filters_cfg.narrative_cluster_live_canary_max_sell_count {
+        return Some(format!(
+            "entry_sell_count_{}_above_live_max_{}",
+            context.entry_sell_count, filters_cfg.narrative_cluster_live_canary_max_sell_count
+        ));
+    }
+
+    if filters_cfg.narrative_cluster_live_canary_require_no_creator_sold
+        && context.creator_sold_during_bc
+    {
+        return Some("creator_sold_during_bc".to_string());
+    }
+
+    let max_gap = filters_cfg.narrative_cluster_live_canary_max_label_gap_seconds;
+    if max_gap > 0 {
+        match context.seconds_since_label_seen {
+            Some(gap) if gap <= max_gap as i64 => {}
+            Some(gap) => {
+                return Some(format!("label_gap_{}_above_live_max_{}", gap, max_gap));
+            }
+            None => return Some("label_gap_unknown_for_live_canary".to_string()),
+        }
+    }
+
+    let min_liq = filters_cfg.narrative_cluster_live_canary_min_initial_liquidity_sol;
+    if min_liq > 0.0 {
+        if initial_liquidity_sol <= 0.0 {
+            return Some("initial_liquidity_sol_unknown_for_narrative_live".to_string());
+        }
+        if initial_liquidity_sol < min_liq {
+            return Some(format!(
+                "initial_liquidity_sol_{:.1}_below_narrative_live_min_{:.1}",
+                initial_liquidity_sol, min_liq
+            ));
+        }
+    }
+
+    let max_liq = filters_cfg.narrative_cluster_live_canary_max_initial_liquidity_sol;
+    if max_liq > 0.0 && initial_liquidity_sol > max_liq {
+        return Some(format!(
+            "initial_liquidity_sol_{:.1}_above_narrative_live_max_{:.1}",
+            initial_liquidity_sol, max_liq
+        ));
+    }
+
+    None
+}
 
 fn creator_rebuy_live_test_rejection_reason(
     token: &GraduatedToken,
@@ -590,6 +689,206 @@ pub fn start(
                 }
             }
 
+            // ── Narrative-cluster live canary ──
+            // Uses the exact shadow arm-time snapshot that produced the May 7-9
+            // strict profile. It bypasses the Standard-lane kill switch, but only
+            // after Fast-Track safety passes and broad creator-rebuy remains blocked.
+            if token.source == crate::detection::types::DetectionSource::PumpFun {
+                if let Some(narrative_context) = token.narrative_cluster.clone() {
+                    let narrative_rejection = narrative_cluster_live_canary_rejection_reason(
+                        &token,
+                        &narrative_context,
+                        &cfg.strategy.filters,
+                        initial_liquidity_sol,
+                    );
+
+                    if narrative_rejection.is_none() {
+                        info!(
+                            mint = %mint_str,
+                            label = %narrative_context.normalized_label,
+                            narrative_score = format!("{:.1}", narrative_context.narrative_score),
+                            buy_pressure = format!("{:.1}", narrative_context.entry_buy_pressure_pct),
+                            buy_sell_ratio = format!("{:.2}", narrative_context.entry_buy_sell_ratio),
+                            initial_liquidity_sol = format!("{:.1}", initial_liquidity_sol),
+                            "🚦 NARRATIVE-CLUSTER LIVE CANARY — strict profile matched, running Fast-Track safety"
+                        );
+
+                        let canary_start = std::time::Instant::now();
+                        let detection_to_sniper_ms = {
+                            let now_ms = chrono::Utc::now().timestamp_millis();
+                            now_ms - detected_at
+                        };
+                        token.pipeline_timing.detection_to_sniper_ms = Some(detection_to_sniper_ms);
+
+                        let canary_enrichment =
+                            enrichment::enrich_token_fast(&rpc, &mint_str).await;
+                        token.pipeline_timing.enrichment_total_ms =
+                            Some(canary_enrichment.enrichment_duration_ms);
+                        token.pipeline_timing.enrichment_per_source =
+                            canary_enrichment.per_source_ms.clone();
+
+                        let canary_filter = filters::apply_fast_track_filters(&canary_enrichment);
+                        let canary_elapsed = canary_start.elapsed();
+                        let bc_entry_for_features = bc_entry.clone();
+
+                        let canary_features = serde_json::json!({
+                            "entry_tier": NARRATIVE_CLUSTER_LIVE_CANARY_ENTRY_TIER,
+                            "narrative_cluster_live_canary_enabled": cfg.strategy.filters.narrative_cluster_live_canary_enabled,
+                            "narrative_cluster_live_forwarded": canary_filter.passed,
+                            "narrative_cluster_live_min_score": cfg.strategy.filters.narrative_cluster_live_canary_min_score,
+                            "narrative_cluster_live_min_buy_pressure_pct": cfg.strategy.filters.narrative_cluster_live_canary_min_buy_pressure_pct,
+                            "narrative_cluster_live_min_buy_sell_ratio": cfg.strategy.filters.narrative_cluster_live_canary_min_buy_sell_ratio,
+                            "narrative_cluster_live_max_sell_count": cfg.strategy.filters.narrative_cluster_live_canary_max_sell_count,
+                            "narrative_cluster_live_max_label_gap_seconds": cfg.strategy.filters.narrative_cluster_live_canary_max_label_gap_seconds,
+                            "narrative_cluster_live_min_initial_liquidity_sol": cfg.strategy.filters.narrative_cluster_live_canary_min_initial_liquidity_sol,
+                            "narrative_cluster_live_max_initial_liquidity_sol": cfg.strategy.filters.narrative_cluster_live_canary_max_initial_liquidity_sol,
+                            "narrative_cluster_live_require_valid_identity": cfg.strategy.filters.narrative_cluster_live_canary_require_valid_identity,
+                            "narrative_cluster_live_require_no_creator_sold": cfg.strategy.filters.narrative_cluster_live_canary_require_no_creator_sold,
+                            "narrative_cluster_live_buy_amount_sol": cfg.strategy.execution.narrative_cluster_live_canary_buy_amount_sol,
+                            "narrative_score": narrative_context.narrative_score,
+                            "normalized_label": narrative_context.normalized_label,
+                            "cluster_rank": narrative_context.cluster_rank,
+                            "prior_same_label_mints_6h": narrative_context.prior_same_label_mints_6h,
+                            "prior_same_label_creators_6h": narrative_context.prior_same_label_creators_6h,
+                            "seconds_since_label_seen": narrative_context.seconds_since_label_seen,
+                            "score_reasons": narrative_context.score_reasons,
+                            "score_penalties": narrative_context.score_penalties,
+                            "score_breakdown": narrative_context.score_breakdown,
+                            "entry_volume_sol": narrative_context.entry_volume_sol,
+                            "entry_buy_count": narrative_context.entry_buy_count,
+                            "entry_sell_count": narrative_context.entry_sell_count,
+                            "entry_unique_buyers": narrative_context.entry_unique_buyers,
+                            "entry_buy_sell_ratio": narrative_context.entry_buy_sell_ratio,
+                            "entry_buy_pressure_pct": narrative_context.entry_buy_pressure_pct,
+                            "creator_rebuy_bypassed": narrative_context.creator_rebuy_bypassed,
+                            "creator_sold_during_bc": narrative_context.creator_sold_during_bc,
+                            "whale_buy": narrative_context.whale_buy,
+                            "whale_buy_max_sol": narrative_context.whale_buy_max_sol,
+                            "bc_progress_pct_at_narrative_arm": narrative_context.bc_progress_pct,
+                            "bc_score": bc_entry_for_features.as_ref().map(|entry| entry.score),
+                            "bc_unique_buyers": bc_entry_for_features.as_ref().map(|entry| entry.unique_buyers),
+                            "bc_buy_sell_ratio": bc_entry_for_features.as_ref().map(|entry| entry.buy_sell_ratio),
+                            "bc_creator_rebuy": bc_entry_for_features.as_ref().map(|entry| entry.creator_rebuy),
+                            "bc_whale_buy": bc_entry_for_features.as_ref().map(|entry| entry.whale_buy),
+                            "bc_max_single_buy_sol": bc_entry_for_features.as_ref().map(|entry| entry.max_single_buy_sol),
+                            "bc_progress_pct_at_score": bc_entry_for_features.as_ref().map(|entry| entry.bc_progress_pct),
+                            "bc_buy_count": bc_entry_for_features.as_ref().map(|entry| entry.buy_count),
+                            "bc_sell_count": bc_entry_for_features.as_ref().map(|entry| entry.sell_count),
+                            "bc_total_volume_sol": bc_entry_for_features.as_ref().map(|entry| entry.total_volume_sol),
+                            "fast_track_safety_passed": canary_filter.passed,
+                            "fast_track_rejection_reason": canary_filter.rejection_reason.as_deref(),
+                            "fast_track_filter_name": canary_filter.filter_name.as_deref(),
+                            "fast_track_enrichment_ms": canary_enrichment.enrichment_duration_ms,
+                            "mint_authority_revoked": canary_enrichment.on_chain_mint.as_ref().map(|m| m.mint_authority_revoked),
+                            "freeze_authority_revoked": canary_enrichment.on_chain_mint.as_ref().map(|m| m.freeze_authority_revoked),
+                            "goplus_honeypot": canary_enrichment.goplus.as_ref().and_then(|g| g.is_honeypot.clone()),
+                            "initial_liquidity_sol": initial_liquidity_sol,
+                        });
+
+                        let candidate_id = log_sniper_candidate(
+                            &supabase,
+                            &mint_str,
+                            &token.name,
+                            &token.symbol,
+                            token
+                                .pool_address
+                                .as_ref()
+                                .map(|p| p.to_string())
+                                .as_deref(),
+                            &creator_str,
+                            initial_liquidity_sol,
+                            if canary_filter.passed {
+                                "narrative_cluster_live_canary_passed"
+                            } else {
+                                "rejected"
+                            },
+                            canary_filter.rejection_reason.as_deref(),
+                            if canary_filter.passed {
+                                Some("narrative_cluster_live_canary")
+                            } else {
+                                canary_filter.filter_name.as_deref()
+                            },
+                            narrative_context.narrative_score,
+                            &canary_features,
+                        )
+                        .await;
+
+                        if canary_filter.passed {
+                            info!(
+                                mint = %mint_str,
+                                narrative_score = format!("{:.1}", narrative_context.narrative_score),
+                                elapsed_ms = canary_elapsed.as_millis() as u64,
+                                "🚦 NARRATIVE-CLUSTER LIVE CANARY PASS — forwarding to filter engine"
+                            );
+
+                            token.candidate_id = candidate_id;
+                            token.sniper_features = Some(canary_features);
+                            token.sniper_score = Some(narrative_context.narrative_score);
+
+                            let live_supabase = Arc::clone(&supabase);
+                            let live_mint = mint_str.clone();
+                            tokio::spawn(async move {
+                                mark_narrative_cluster_would_trade_live(&live_supabase, &live_mint)
+                                    .await;
+                            });
+
+                            let deferred_supabase = Arc::clone(&supabase);
+                            let deferred_cfg = Arc::clone(&cfg);
+                            let deferred_mint = mint_str.clone();
+                            let deferred_creator = creator_str.clone();
+                            let deferred_liq = initial_liquidity_sol;
+                            let deferred_detected_at = detected_at;
+                            let deferred_candidate_id = candidate_id;
+                            tokio::spawn(async move {
+                                run_deferred_verification(
+                                    deferred_cfg,
+                                    deferred_supabase,
+                                    deferred_mint,
+                                    deferred_creator,
+                                    deferred_liq,
+                                    deferred_detected_at,
+                                    deferred_candidate_id,
+                                )
+                                .await;
+                            });
+
+                            if tx.send(token).await.is_err() {
+                                warn!("Sniper → filter channel closed");
+                                break;
+                            }
+                        } else {
+                            warn!(
+                                mint = %mint_str,
+                                reason = canary_filter.rejection_reason.as_deref().unwrap_or("unknown"),
+                                narrative_score = format!("{:.1}", narrative_context.narrative_score),
+                                "❌ NARRATIVE-CLUSTER LIVE CANARY REJECT — Fast-Track safety blocked"
+                            );
+                            token.pipeline_timing.outcome =
+                                Some("rejected_narrative_cluster_live_canary".to_string());
+                            token.pipeline_timing.rejection_stage =
+                                Some("narrative_cluster_live_canary".to_string());
+                            token.pipeline_timing.rejection_reason = canary_filter
+                                .rejection_reason
+                                .clone()
+                                .or_else(|| Some("fast_track_safety_unknown".to_string()));
+                            let timing_payload = token.pipeline_timing.to_json(&mint_str);
+                            let supabase_bg = Arc::clone(&supabase);
+                            tokio::spawn(async move {
+                                log_pipeline_latency(&supabase_bg, &timing_payload).await;
+                            });
+                            if let Some(cid) = candidate_id {
+                                tracker::spawn_rejected_tracker(
+                                    Arc::clone(&supabase),
+                                    cid,
+                                    mint_str.clone(),
+                                );
+                            }
+                        }
+                        continue;
+                    }
+                }
+            }
+
             // ── BC Fast-Track: check cache for pre-computed BC score ──
             if cfg.strategy.filters.bc_fast_track_enabled
                 && token.source == crate::detection::types::DetectionSource::PumpFun
@@ -1006,6 +1305,27 @@ async fn log_sniper_candidate(
         Err(e) => {
             error!(mint = %mint, "Sniper candidate log error: {}", e);
             None
+        }
+    }
+}
+
+async fn mark_narrative_cluster_would_trade_live(supabase: &SupabaseClient, mint: &str) {
+    let url = format!(
+        "{}/narrative_cluster_shadow?mint=eq.{}",
+        supabase.base_url, mint
+    );
+    let payload = serde_json::json!({
+        "would_trade_live": true,
+    });
+
+    match supabase.client.patch(&url).json(&payload).send().await {
+        Ok(resp) if resp.status().is_success() => {}
+        Ok(resp) => {
+            let body = resp.text().await.unwrap_or_default();
+            warn!(mint = %mint, "Failed to mark narrative_cluster_shadow live candidate: {}", body);
+        }
+        Err(e) => {
+            warn!(mint = %mint, "narrative_cluster_shadow live marker error: {}", e);
         }
     }
 }

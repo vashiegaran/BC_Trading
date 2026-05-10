@@ -198,6 +198,7 @@ async fn handle_log_message(text: &str, tx: &mpsc::Sender<GraduatedToken>) -> Re
         initial_liquidity_sol: 0.0, // Unknown for direct Raydium detection
         creator_rebuy: false,
         buy_sell_ratio: 0.0,
+        narrative_cluster: None,
         candidate_id: None,
         sniper_features: None,
         sniper_score: None,

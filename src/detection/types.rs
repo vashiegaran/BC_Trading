@@ -218,6 +218,33 @@ impl std::fmt::Display for DetectionSource {
     }
 }
 
+/// Snapshot of the narrative-cluster shadow decision captured at arm time.
+/// The live canary uses this exact same snapshot after graduation so the live
+/// gate matches the shadow backtest instead of re-scoring later flow.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NarrativeClusterContext {
+    pub normalized_label: String,
+    pub cluster_rank: usize,
+    pub prior_same_label_mints_6h: usize,
+    pub prior_same_label_creators_6h: usize,
+    pub seconds_since_label_seen: Option<i64>,
+    pub narrative_score: f64,
+    pub score_reasons: Vec<String>,
+    pub score_penalties: Vec<String>,
+    pub score_breakdown: serde_json::Value,
+    pub entry_volume_sol: f64,
+    pub entry_buy_count: u64,
+    pub entry_sell_count: u64,
+    pub entry_unique_buyers: usize,
+    pub entry_buy_sell_ratio: f64,
+    pub entry_buy_pressure_pct: f64,
+    pub creator_rebuy_bypassed: bool,
+    pub creator_sold_during_bc: bool,
+    pub whale_buy: bool,
+    pub whale_buy_max_sol: f64,
+    pub bc_progress_pct: f64,
+}
+
 /// In-memory watchlist entry for a token that has been created on pump.fun
 /// but has not yet graduated to Raydium.
 ///
@@ -286,6 +313,8 @@ pub struct WatchlistEntry {
     pub label_flow_shadow_recorded: bool,
     /// Whether the narrative-cluster armed-post-grad simulation row has been written.
     pub narrative_cluster_shadow_recorded: bool,
+    /// The narrative-cluster snapshot captured when the shadow row armed.
+    pub narrative_cluster_context: Option<NarrativeClusterContext>,
     /// Whether the probe stage of the probe-add shadow ladder has been written.
     pub probe_add_probe_recorded: bool,
     /// Whether the add stage of the probe-add shadow ladder has been written.
@@ -385,6 +414,10 @@ pub struct GraduatedToken {
 
     /// buy_count / sell_count ratio on the bonding curve.
     pub buy_sell_ratio: f64,
+
+    /// Narrative-cluster shadow context captured at the original arm snapshot.
+    #[serde(default)]
+    pub narrative_cluster: Option<NarrativeClusterContext>,
 
     /// sniper_candidates row ID (set after sniper enrichment logs to Supabase).
     #[serde(skip)]

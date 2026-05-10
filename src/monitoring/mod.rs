@@ -73,6 +73,8 @@ const EXIT_CHANNEL_CAPACITY: usize = 50;
 /// Channel capacity for exit → monitoring confirmation pipeline.
 const CONFIRM_CHANNEL_CAPACITY: usize = 50;
 
+const NARRATIVE_CLUSTER_LIVE_CANARY_ENTRY_TIER: &str = "narrative_cluster_live_canary";
+
 /// Status returned from a dev wallet balance check.
 #[derive(Debug, Clone, PartialEq)]
 enum DevWalletStatus {
@@ -388,8 +390,8 @@ async fn monitor_position(
     let mut entry_price_usd = position.entry_price_usd;
     let mut entry_price_corrected = entry_price_usd >= 0.000001;
     let mut consecutive_exit_failures: u32 = 0;
-    let is_creator_rebuy_quality = is_creator_rebuy_quality_entry(&position);
-    let mut creator_rebuy_protection_started_at: Option<Instant> = None;
+    let is_protected_runner = is_protected_runner_entry(&position);
+    let mut protected_runner_started_at: Option<Instant> = None;
     const MAX_EXIT_FAILURES: u32 = 5;
 
     // ── Narrative moonbag state ──────────────────────────
@@ -796,7 +798,7 @@ async fn monitor_position(
         //   Post-TP1: 2x base   (30min — gives the bag time to either run or trail out)
         //   Post-TP2: 4x base   (60min — proven runner, let trailing govern)
         let elapsed_seconds = started_at.elapsed().as_secs();
-        let creator_rebuy_initial_grace_active = is_creator_rebuy_quality
+        let protected_runner_initial_grace_active = is_protected_runner
             && cfg.strategy.monitoring.creator_rebuy_runner_grace_secs > 0
             && elapsed_seconds < cfg.strategy.monitoring.creator_rebuy_runner_grace_secs;
         let effective_max_hold_loop = if tp2_triggered {
@@ -1035,25 +1037,25 @@ async fn monitor_position(
             .monitoring
             .creator_rebuy_runner_protection_peak_multiplier;
         let protection_secs = cfg.strategy.monitoring.creator_rebuy_runner_protection_secs;
-        if is_creator_rebuy_quality
+        if is_protected_runner
             && protection_secs > 0
             && protection_trigger > 0.0
             && peak_multiplier >= protection_trigger
-            && creator_rebuy_protection_started_at.is_none()
+            && protected_runner_started_at.is_none()
         {
-            creator_rebuy_protection_started_at = Some(Instant::now());
+            protected_runner_started_at = Some(Instant::now());
             info!(
                 mint = %position.mint,
                 peak_multiplier = format!("{:.2}x", peak_multiplier),
                 protection_secs,
-                "🛡️ Creator-rebuy protected-runner state armed"
+                "🛡️ Protected-runner state armed"
             );
         }
-        let creator_rebuy_protected_runner_active = creator_rebuy_protection_started_at
+        let protected_runner_active = protected_runner_started_at
             .map(|armed_at| protection_secs > 0 && armed_at.elapsed().as_secs() < protection_secs)
             .unwrap_or(false);
-        let creator_rebuy_runner_soft_protection_active =
-            creator_rebuy_initial_grace_active || creator_rebuy_protected_runner_active;
+        let runner_soft_protection_active =
+            protected_runner_initial_grace_active || protected_runner_active;
 
         // ── Pattern #5: Round Number Rejection ──────────────────
         // If price hits a round multiplier (2x, 3x, 5x, 10x) and then
@@ -1672,7 +1674,7 @@ async fn monitor_position(
             elapsed_seconds,
             is_paper_trade: position.is_paper_trade,
             initial_liquidity_sol: position.initial_liquidity_sol,
-            runner_grace_active: creator_rebuy_runner_soft_protection_active,
+            runner_grace_active: runner_soft_protection_active,
         };
 
         // ── Tick stream momentum + dip state machine ──────────
@@ -1712,15 +1714,15 @@ async fn monitor_position(
         // Handle dip death signals (immediate exit)
         // Gate: skip dip_death if position is younger than min_hold_before_dip_death
         if let DipAction::ImmediateExit { reason: dip_reason } = &dip_action {
-            if creator_rebuy_runner_soft_protection_active && is_soft_dip_death_reason(dip_reason) {
+            if runner_soft_protection_active && is_soft_dip_death_reason(dip_reason) {
                 debug!(
                     mint = %position.mint,
                     reason = dip_reason,
                     age_secs = elapsed_seconds,
                     initial_grace_secs = cfg.strategy.monitoring.creator_rebuy_runner_grace_secs,
-                    protected_runner = creator_rebuy_protected_runner_active,
+                    protected_runner = protected_runner_active,
                     pnl_pct = format!("{:.2}", pnl_pct),
-                    "🛡️ Soft dip death suppressed — creator-rebuy runner protection active"
+                    "🛡️ Soft dip death suppressed — protected-runner guard active"
                 );
             } else if elapsed_seconds < cfg.strategy.monitoring.min_hold_before_dip_death {
                 debug!(
@@ -1785,7 +1787,7 @@ async fn monitor_position(
             .strategy
             .monitoring
             .creator_rebuy_runner_floor_multiplier;
-        if creator_rebuy_protected_runner_active
+        if protected_runner_active
             && protected_floor > 0.0
             && entry_price_usd > 0.000001
             && current_price / entry_price_usd <= protected_floor
@@ -1795,7 +1797,7 @@ async fn monitor_position(
                 current_multiplier = format!("{:.2}x", current_price / entry_price_usd),
                 floor = format!("{:.2}x", protected_floor),
                 peak_multiplier = format!("{:.2}x", peak_multiplier),
-                "🛡️ Protected creator-rebuy runner floor hit — taking profit before round-trip"
+                "🛡️ Protected runner floor hit — taking profit before round-trip"
             );
             let signal = ExitSignal {
                 position_id: position.position_id,
@@ -1807,12 +1809,12 @@ async fn monitor_position(
                 sol_spent: remaining_sol_spent,
                 token_amount: remaining_token_amount,
                 is_paper_trade: position.is_paper_trade,
-                sub_reason: Some("creator_rebuy_protected_runner_floor".to_string()),
+                sub_reason: Some("protected_runner_floor".to_string()),
             };
             if exit_tx.send(signal).await.is_err() {
                 warn!(mint = %position.mint, "Monitoring → exit channel closed");
             }
-            last_exit_reason = Some("creator_rebuy_protected_runner_floor".to_string());
+            last_exit_reason = Some("protected_runner_floor".to_string());
             break;
         }
 
@@ -2728,13 +2730,16 @@ fn compute_narrative_bonus(state: NarrativeState) -> f64 {
     }
 }
 
-fn is_creator_rebuy_quality_entry(position: &PositionOpened) -> bool {
+fn is_protected_runner_entry(position: &PositionOpened) -> bool {
     position
         .sniper_features
         .as_ref()
         .and_then(|features| features.get("entry_tier"))
         .and_then(|tier| tier.as_str())
-        .map(|tier| tier.starts_with("creator_rebuy_live_test"))
+        .map(|tier| {
+            tier.starts_with("creator_rebuy_live_test")
+                || tier == NARRATIVE_CLUSTER_LIVE_CANARY_ENTRY_TIER
+        })
         .unwrap_or(false)
 }
 

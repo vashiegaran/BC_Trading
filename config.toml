@@ -9,7 +9,7 @@
 #   filterable in analytics vs the broken v16.1 binary that was running
 #   from never-committed source. Detection: pumpfun_ws. Fast-track:
 #   2-source (on_chain_mint + goplus) so GoPlus runs PRE-buy.
-strategy_version = "v18.7.8-creator-rebuy-shadow-off"
+strategy_version = "v18.7.9-narrative-cluster-live-canary"
 
 # ============================================================
 # DETECTION
@@ -40,7 +40,7 @@ label_flow_shadow_max_gap_seconds = 1800
 
 # narrative_cluster_shadow: separate armed-post-grad simulation for repeated
 # narrative/name clusters. It can tolerate creator rebuy inside this shadow
-# lane only, but it never forwards live execution.
+# lane only. Strict non-creator-rebuy rows can feed the live canary below.
 narrative_cluster_shadow_enabled = true
 narrative_cluster_min_prior_mints = 1
 narrative_cluster_min_progress_pct = 20.0
@@ -193,6 +193,22 @@ creator_rebuy_live_test_zero_sell_min_buy_pressure_pct = 70.0
 creator_rebuy_live_test_zero_sell_min_buy_sell_ratio = 5.0
 creator_rebuy_live_test_strong_flow_min_bc_progress_pct = 20.0
 
+# Narrative cluster live canary: only the strict May 7-9 profile goes live.
+# Backtest: score>=80, buy_pressure>=80, BSR>=4, sells<=3, no creator sell,
+# label gap<=60s, liq 30-80 SOL → median 2.90x, 48% hit 3x, 20% hit 5x.
+# Broad narrative remains shadow-only; broad creator-rebuy remains blocked.
+narrative_cluster_live_canary_enabled = true
+narrative_cluster_live_canary_min_score = 80.0
+narrative_cluster_live_canary_min_buy_pressure_pct = 80.0
+narrative_cluster_live_canary_min_buy_sell_ratio = 4.0
+narrative_cluster_live_canary_max_sell_count = 3
+narrative_cluster_live_canary_max_label_gap_seconds = 60
+narrative_cluster_live_canary_min_initial_liquidity_sol = 30.0
+narrative_cluster_live_canary_max_initial_liquidity_sol = 80.0
+narrative_cluster_live_canary_max_open_positions = 1
+narrative_cluster_live_canary_require_valid_identity = true
+narrative_cluster_live_canary_require_no_creator_sold = true
+
 # Minimum buy/sell ratio on the bonding curve.
 # Data: ratio > 2.3 graduates at 10.9% vs < 1.1 at 3.2%. Using 1.2 to avoid over-filtering.
 min_buy_sell_ratio = 2.0
@@ -252,6 +268,9 @@ buy_amount_sol = 0.05
 # Creator-rebuy canary uses this fixed size. Execution uses the smaller of
 # this value and the normal dynamic size; 0.05 keeps it at normal size.
 creator_rebuy_live_test_buy_amount_sol = 0.05
+
+# Narrative-cluster live canary uses the same controlled 0.05 SOL size.
+narrative_cluster_live_canary_buy_amount_sol = 0.05
 
 # Dynamic position sizing: scale buy size based on pool liquidity.
 # Low-liq tokens get smaller positions to limit risk.

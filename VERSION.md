@@ -9,6 +9,26 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.7.9 — Narrative Cluster Live Canary (2026-05-10)
+
+**strategy_version**: `v18.7.9-narrative-cluster-live-canary`
+
+### Why
+Full `narrative_cluster_shadow` history showed the raw lane is too noisy, but the strict May 7-9 profile was strong enough for a controlled live canary: score ≥80, buy pressure ≥80%, buy/sell ratio ≥4, sells ≤3, no creator sell, label gap ≤60s, and 30-80 SOL liquidity produced a 2.90x median peak, 48% 3x hit-rate, and 20% 5x hit-rate on resolved rows.
+
+### Changes
+- Adds a strict `narrative_cluster_live_canary` entry tier.
+- Keeps broad narrative cluster shadow enabled, but only promotes rows that match the strict profile.
+- Keeps broad creator-rebuy blocked by `reject_creator_rebuy = true`; narrative canary does not bypass creator-rebuy.
+- Requires Fast-Track safety before forwarding to the filter engine.
+- Adds a lane-specific max-open cap of 1 and 0.05 SOL controlled sizing.
+- Treats narrative canary entries as protected runners for the existing soft-exit grace/protection logic.
+
+### Rollback
+Set `narrative_cluster_live_canary_enabled = false` in [config.toml](config.toml), then restart PM2. Shadow recording can remain enabled.
+
+---
+
 ## v18.7.8 — Creator-Rebuy Shadow Off (2026-05-10)
 
 **strategy_version**: `v18.7.8-creator-rebuy-shadow-off`

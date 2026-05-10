@@ -575,6 +575,7 @@ fn build_synthetic_filtered_token(
         initial_liquidity_sol: 1_000.0,
         creator_rebuy: false,
         buy_sell_ratio: 0.0,
+        narrative_cluster: None,
         candidate_id: None,
         sniper_features: Some(serde_json::Value::Object(sniper_features)),
         sniper_score: None,
