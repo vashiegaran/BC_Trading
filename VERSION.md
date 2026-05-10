@@ -9,6 +9,25 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.7.8 — Creator-Rebuy Shadow Off (2026-05-10)
+
+**strategy_version**: `v18.7.8-creator-rebuy-shadow-off`
+
+### Why
+May 9/10 analysis showed standalone `creator_rebuy_shadow_passed` rows were too noisy to promote directly. The promising signal is stricter narrative-cluster overlap, not raw creator-rebuy shadow.
+
+### Changes
+- Disables `creator_rebuy_shadow_enabled` in [config.toml](config.toml).
+- Keeps `reject_creator_rebuy = true`.
+- Keeps the narrow creator-rebuy live canary enabled.
+- Prevents failed live-test candidates from being logged/tracked as `creator_rebuy_shadow_passed` when standalone creator-rebuy shadow is disabled.
+- Leaves `narrative_cluster_shadow` enabled for the next narrowing pass.
+
+### Rollback
+Set `creator_rebuy_shadow_enabled = true` in [config.toml](config.toml), then restart PM2.
+
+---
+
 ## v18.7.7 — Moonbag Split + Protected Runner (2026-05-09)
 
 **strategy_version**: `v18.7.7-moonbag-split-runner-protection`

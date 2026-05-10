@@ -9,7 +9,7 @@
 #   filterable in analytics vs the broken v16.1 binary that was running
 #   from never-committed source. Detection: pumpfun_ws. Fast-track:
 #   2-source (on_chain_mint + goplus) so GoPlus runs PRE-buy.
-strategy_version = "v18.7.7-moonbag-split-runner-protection"
+strategy_version = "v18.7.8-creator-rebuy-shadow-off"
 
 # ============================================================
 # DETECTION
@@ -165,9 +165,10 @@ coordinated_buy_threshold = 10
 # Data: creator_rebuy tokens graduate at 1.1% vs 6.0% without — manipulation signal.
 reject_creator_rebuy = true
 
-# Shadow-only test: high-score creator_rebuy names still stay blocked from live
-# execution, but run Fast-Track safety checks and log counterfactual outcomes.
-creator_rebuy_shadow_enabled = true
+# Standalone creator_rebuy shadow is disabled: recent May 9/10 data showed it
+# is too noisy by itself. Keep creator_rebuy hard-blocked unless the narrow live
+# canary passes; evaluate narrative-cluster separately.
+creator_rebuy_shadow_enabled = false
 creator_rebuy_shadow_min_score = 60.0
 
 # Tiny live canary: keep the broad creator_rebuy hard gate, but allow only

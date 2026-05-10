@@ -247,8 +247,29 @@ pub fn start(
                                     >= cfg.strategy.filters.creator_rebuy_live_test_min_score
                             })
                             .unwrap_or(false);
+                    let creator_rebuy_live_test_profile_rejection_reason =
+                        if creator_rebuy_live_test_score_qualifies {
+                            bc_entry
+                                .as_ref()
+                                .map(|entry| {
+                                    creator_rebuy_live_test_rejection_reason(
+                                        &token,
+                                        entry,
+                                        &cfg.strategy.filters,
+                                        initial_liquidity_sol,
+                                    )
+                                })
+                                .unwrap_or_else(|| {
+                                    Some("creator_rebuy_live_test_missing_bc_entry".to_string())
+                                })
+                        } else {
+                            Some("creator_rebuy_live_test_score_below_min".to_string())
+                        };
+                    let creator_rebuy_live_test_profile_qualifies =
+                        creator_rebuy_live_test_score_qualifies
+                            && creator_rebuy_live_test_profile_rejection_reason.is_none();
 
-                    if creator_rebuy_shadow_qualifies || creator_rebuy_live_test_score_qualifies {
+                    if creator_rebuy_shadow_qualifies || creator_rebuy_live_test_profile_qualifies {
                         let bc_entry = bc_entry
                             .clone()
                             .expect("creator-rebuy experiment qualification requires BC entry");
@@ -277,12 +298,7 @@ pub fn start(
                         let shadow_filter = filters::apply_fast_track_filters(&shadow_enrichment);
                         let shadow_elapsed = shadow_start.elapsed();
                         let live_test_rejection_reason = if shadow_filter.passed {
-                            creator_rebuy_live_test_rejection_reason(
-                                &token,
-                                &bc_entry,
-                                &cfg.strategy.filters,
-                                initial_liquidity_sol,
-                            )
+                            creator_rebuy_live_test_profile_rejection_reason.clone()
                         } else {
                             Some(
                                 shadow_filter
@@ -296,34 +312,47 @@ pub fn start(
 
                         let shadow_action = if live_test_qualifies {
                             "creator_rebuy_live_test_passed"
-                        } else if shadow_filter.passed {
+                        } else if creator_rebuy_shadow_qualifies && shadow_filter.passed {
                             "creator_rebuy_shadow_passed"
-                        } else {
+                        } else if creator_rebuy_shadow_qualifies {
                             "creator_rebuy_shadow_rejected"
+                        } else {
+                            "rejected"
                         };
                         let shadow_rejection_reason = if live_test_qualifies {
                             None
-                        } else if shadow_filter.passed {
+                        } else if creator_rebuy_shadow_qualifies && shadow_filter.passed {
                             Some("creator_rebuy_detected_live_block")
+                        } else if creator_rebuy_shadow_qualifies {
+                            shadow_filter.rejection_reason.as_deref()
+                        } else if shadow_filter.passed {
+                            live_test_rejection_reason
+                                .as_deref()
+                                .or(Some("creator_rebuy_detected_live_block"))
                         } else {
                             shadow_filter.rejection_reason.as_deref()
                         };
                         let shadow_filter_name = if live_test_qualifies {
                             Some("creator_rebuy_live_test")
-                        } else if shadow_filter.passed {
+                        } else if creator_rebuy_shadow_qualifies && shadow_filter.passed {
                             Some("creator_rebuy_shadow")
+                        } else if !creator_rebuy_shadow_qualifies {
+                            Some("creator_rebuy_live_test")
                         } else {
                             shadow_filter.filter_name.as_deref()
                         };
                         let entry_tier = if live_test_qualifies {
                             CREATOR_REBUY_LIVE_TEST_ENTRY_TIER
-                        } else {
+                        } else if creator_rebuy_shadow_qualifies {
                             CREATOR_REBUY_SHADOW_ENTRY_TIER
+                        } else {
+                            "creator_rebuy_live_test_rejected"
                         };
 
                         let shadow_features = serde_json::json!({
                             "entry_tier": entry_tier,
-                            "shadow_mode": !live_test_qualifies,
+                            "creator_rebuy_shadow_enabled": cfg.strategy.filters.creator_rebuy_shadow_enabled,
+                            "shadow_mode": !live_test_qualifies && creator_rebuy_shadow_qualifies,
                             "live_forwarded": live_test_qualifies,
                             "blocked_live_reason": reason,
                             "shadow_min_score": cfg.strategy.filters.creator_rebuy_shadow_min_score,
@@ -427,7 +456,7 @@ pub fn start(
                                 break;
                             }
                             continue;
-                        } else if shadow_filter.passed {
+                        } else if creator_rebuy_shadow_qualifies && shadow_filter.passed {
                             info!(
                                 mint = %mint_str,
                                 bc_score = format!("{:.1}", bc_entry.score),
@@ -441,7 +470,7 @@ pub fn start(
                                 Some("creator_rebuy_shadow".to_string());
                             token.pipeline_timing.rejection_reason =
                                 Some("creator_rebuy_detected_live_block".to_string());
-                        } else {
+                        } else if creator_rebuy_shadow_qualifies {
                             warn!(
                                 mint = %mint_str,
                                 reason = shadow_filter.rejection_reason.as_deref().unwrap_or("unknown"),
@@ -456,6 +485,21 @@ pub fn start(
                                 .rejection_reason
                                 .clone()
                                 .or_else(|| Some("fast_track_safety_unknown".to_string()));
+                        } else {
+                            warn!(
+                                mint = %mint_str,
+                                live_test_rejection = live_test_rejection_reason.as_deref().unwrap_or("unknown"),
+                                bc_score = format!("{:.1}", bc_entry.score),
+                                "⛔ CREATOR-REBUY LIVE TEST REJECT — standalone shadow disabled"
+                            );
+                            token.pipeline_timing.outcome =
+                                Some("rejected_creator_rebuy_live_test".to_string());
+                            token.pipeline_timing.rejection_stage =
+                                Some("creator_rebuy_live_test".to_string());
+                            token.pipeline_timing.rejection_reason = live_test_rejection_reason
+                                .clone()
+                                .or_else(|| shadow_filter.rejection_reason.clone())
+                                .or_else(|| Some("creator_rebuy_detected".to_string()));
                         }
 
                         if !live_test_qualifies {
@@ -465,12 +509,14 @@ pub fn start(
                                 log_pipeline_latency(&supabase_bg, &timing_payload).await;
                             });
 
-                            if let Some(cid) = candidate_id {
-                                tracker::spawn_rejected_tracker(
-                                    Arc::clone(&supabase),
-                                    cid,
-                                    mint_str.clone(),
-                                );
+                            if creator_rebuy_shadow_qualifies {
+                                if let Some(cid) = candidate_id {
+                                    tracker::spawn_rejected_tracker(
+                                        Arc::clone(&supabase),
+                                        cid,
+                                        mint_str.clone(),
+                                    );
+                                }
                             }
                         }
 
