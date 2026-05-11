@@ -65,6 +65,120 @@ pub(super) struct RecentLabelObservation {
     seen_at: i64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CreatorBcMetrics {
+    total_buy_sol_bc: f64,
+    total_sell_sol_bc: f64,
+    creator_buy_count_bc: u64,
+    creator_buy_sol_total_bc: f64,
+    creator_buy_max_sol_bc: f64,
+    creator_first_buy_after_secs: Option<f64>,
+    creator_first_buy_progress_pct: Option<f64>,
+    creator_last_buy_after_secs: Option<f64>,
+    creator_last_buy_progress_pct: Option<f64>,
+    creator_sell_count_bc: u64,
+    creator_sell_sol_total_bc: f64,
+    creator_net_sol_bc: f64,
+    creator_buy_share_pct: Option<f64>,
+}
+
+const CREATOR_BC_TOP_LEVEL_COLUMNS: &[&str] = &[
+    "creator_buy_count_bc",
+    "creator_buy_sol_total_bc",
+    "creator_buy_max_sol_bc",
+    "creator_first_buy_after_secs",
+    "creator_first_buy_progress_pct",
+    "creator_last_buy_after_secs",
+    "creator_last_buy_progress_pct",
+    "creator_sell_count_bc",
+    "creator_sell_sol_total_bc",
+    "creator_net_sol_bc",
+    "creator_buy_share_pct",
+];
+
+fn secs_since_detection(timestamp_ms: Option<i64>, detected_at_ms: i64) -> Option<f64> {
+    timestamp_ms.map(|ts| ((ts - detected_at_ms).max(0) as f64) / 1_000.0)
+}
+
+fn compute_creator_bc_metrics(entry: &WatchlistEntry) -> CreatorBcMetrics {
+    let creator_net_sol_bc = entry.creator_buy_sol_total_bc - entry.creator_sell_sol_total_bc;
+    let creator_buy_share_pct = if entry.total_buy_sol_bc > 0.0 {
+        Some(((entry.creator_buy_sol_total_bc / entry.total_buy_sol_bc) * 100.0).clamp(0.0, 100.0))
+    } else {
+        None
+    };
+
+    CreatorBcMetrics {
+        total_buy_sol_bc: entry.total_buy_sol_bc,
+        total_sell_sol_bc: entry.total_sell_sol_bc,
+        creator_buy_count_bc: entry.creator_buy_count_bc,
+        creator_buy_sol_total_bc: entry.creator_buy_sol_total_bc,
+        creator_buy_max_sol_bc: entry.creator_buy_max_sol_bc,
+        creator_first_buy_after_secs: secs_since_detection(
+            entry.creator_first_buy_at_ms,
+            entry.detected_at,
+        ),
+        creator_first_buy_progress_pct: entry.creator_first_buy_progress_pct,
+        creator_last_buy_after_secs: secs_since_detection(
+            entry.creator_last_buy_at_ms,
+            entry.detected_at,
+        ),
+        creator_last_buy_progress_pct: entry.creator_last_buy_progress_pct,
+        creator_sell_count_bc: entry.creator_sell_count_bc,
+        creator_sell_sol_total_bc: entry.creator_sell_sol_total_bc,
+        creator_net_sol_bc,
+        creator_buy_share_pct,
+    }
+}
+
+fn payload_without_creator_bc_top_level_columns(
+    payload: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let mut map = payload.as_object()?.clone();
+    let mut removed_any = false;
+    for column in CREATOR_BC_TOP_LEVEL_COLUMNS {
+        removed_any |= map.remove(*column).is_some();
+    }
+    removed_any.then_some(serde_json::Value::Object(map))
+}
+
+async fn retry_insert_without_creator_bc_columns(
+    supabase: &SupabaseClient,
+    url: &str,
+    payload: &serde_json::Value,
+    table_name: &str,
+    mint: &str,
+) -> bool {
+    let Some(fallback_payload) = payload_without_creator_bc_top_level_columns(payload) else {
+        return false;
+    };
+
+    warn!(
+        mint = %mint,
+        table = table_name,
+        "retrying insert without top-level creator BC metric columns; JSON metrics remain preserved"
+    );
+
+    match supabase
+        .client
+        .post(url)
+        .json(&fallback_payload)
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => true,
+        Ok(resp) => {
+            let body = resp.text().await.unwrap_or_default();
+            warn!(mint = %mint, table = table_name, "fallback INSERT failed: {}", body);
+            false
+        }
+        Err(e) => {
+            warn!(mint = %mint, table = table_name, "fallback INSERT error: {}", e);
+            false
+        }
+    }
+}
+
 fn bc_price_usd_from_market_cap(market_cap_usd: f64) -> f64 {
     if market_cap_usd > 0.0 {
         market_cap_usd / PUMPFUN_TOTAL_SUPPLY_TOKENS
@@ -847,6 +961,7 @@ fn build_narrative_cluster_context(
 ) -> NarrativeClusterContext {
     let buy_sell_ratio = compute_current_buy_sell_ratio(entry);
     let creator_rebuy = compute_current_creator_rebuy(entry);
+    let creator_metrics = compute_creator_bc_metrics(entry);
     let creator_sold_during_bc = entry
         .trade_log
         .iter()
@@ -876,6 +991,17 @@ fn build_narrative_cluster_context(
         entry_buy_pressure_pct: entry.buy_pressure_pct(),
         creator_rebuy_bypassed: creator_rebuy,
         creator_sold_during_bc,
+        creator_buy_count_bc: creator_metrics.creator_buy_count_bc,
+        creator_buy_sol_total_bc: creator_metrics.creator_buy_sol_total_bc,
+        creator_buy_max_sol_bc: creator_metrics.creator_buy_max_sol_bc,
+        creator_first_buy_after_secs: creator_metrics.creator_first_buy_after_secs,
+        creator_first_buy_progress_pct: creator_metrics.creator_first_buy_progress_pct,
+        creator_last_buy_after_secs: creator_metrics.creator_last_buy_after_secs,
+        creator_last_buy_progress_pct: creator_metrics.creator_last_buy_progress_pct,
+        creator_sell_count_bc: creator_metrics.creator_sell_count_bc,
+        creator_sell_sol_total_bc: creator_metrics.creator_sell_sol_total_bc,
+        creator_net_sol_bc: creator_metrics.creator_net_sol_bc,
+        creator_buy_share_pct: creator_metrics.creator_buy_share_pct,
         whale_buy: whale_buy_max_sol >= 3.0,
         whale_buy_max_sol,
         bc_progress_pct,
@@ -965,6 +1091,7 @@ fn build_narrative_cluster_shadow_payload(
     let token_age_secs = (now - entry.detected_at) as f64 / 1_000.0;
     let buy_sell_ratio = compute_current_buy_sell_ratio(entry);
     let creator_rebuy = compute_current_creator_rebuy(entry);
+    let creator_metrics = compute_creator_bc_metrics(entry);
     let creator_sold_during_bc = entry
         .trade_log
         .iter()
@@ -1022,21 +1149,55 @@ fn build_narrative_cluster_shadow_payload(
     );
     entry_metrics.insert(
         "total_buy_sol".to_string(),
-        serde_json::json!(entry
-            .trade_log
-            .iter()
-            .filter(|(_, _, is_buy, _)| *is_buy)
-            .map(|(_, sol, _, _)| *sol)
-            .sum::<f64>()),
+        serde_json::json!(creator_metrics.total_buy_sol_bc),
     );
     entry_metrics.insert(
         "total_sell_sol".to_string(),
-        serde_json::json!(entry
-            .trade_log
-            .iter()
-            .filter(|(_, _, is_buy, _)| !*is_buy)
-            .map(|(_, sol, _, _)| *sol)
-            .sum::<f64>()),
+        serde_json::json!(creator_metrics.total_sell_sol_bc),
+    );
+    entry_metrics.insert(
+        "creator_buy_count_bc".to_string(),
+        serde_json::json!(creator_metrics.creator_buy_count_bc),
+    );
+    entry_metrics.insert(
+        "creator_buy_sol_total_bc".to_string(),
+        serde_json::json!(creator_metrics.creator_buy_sol_total_bc),
+    );
+    entry_metrics.insert(
+        "creator_buy_max_sol_bc".to_string(),
+        serde_json::json!(creator_metrics.creator_buy_max_sol_bc),
+    );
+    entry_metrics.insert(
+        "creator_first_buy_after_secs".to_string(),
+        serde_json::json!(creator_metrics.creator_first_buy_after_secs),
+    );
+    entry_metrics.insert(
+        "creator_first_buy_progress_pct".to_string(),
+        serde_json::json!(creator_metrics.creator_first_buy_progress_pct),
+    );
+    entry_metrics.insert(
+        "creator_last_buy_after_secs".to_string(),
+        serde_json::json!(creator_metrics.creator_last_buy_after_secs),
+    );
+    entry_metrics.insert(
+        "creator_last_buy_progress_pct".to_string(),
+        serde_json::json!(creator_metrics.creator_last_buy_progress_pct),
+    );
+    entry_metrics.insert(
+        "creator_sell_count_bc".to_string(),
+        serde_json::json!(creator_metrics.creator_sell_count_bc),
+    );
+    entry_metrics.insert(
+        "creator_sell_sol_total_bc".to_string(),
+        serde_json::json!(creator_metrics.creator_sell_sol_total_bc),
+    );
+    entry_metrics.insert(
+        "creator_net_sol_bc".to_string(),
+        serde_json::json!(creator_metrics.creator_net_sol_bc),
+    );
+    entry_metrics.insert(
+        "creator_buy_share_pct".to_string(),
+        serde_json::json!(creator_metrics.creator_buy_share_pct),
     );
     entry_metrics.insert(
         "max_single_trade_sol".to_string(),
@@ -1153,6 +1314,50 @@ fn build_narrative_cluster_shadow_payload(
         serde_json::json!(creator_sold_during_bc),
     );
     payload.insert(
+        "creator_buy_count_bc".to_string(),
+        serde_json::json!(creator_metrics.creator_buy_count_bc),
+    );
+    payload.insert(
+        "creator_buy_sol_total_bc".to_string(),
+        serde_json::json!(creator_metrics.creator_buy_sol_total_bc),
+    );
+    payload.insert(
+        "creator_buy_max_sol_bc".to_string(),
+        serde_json::json!(creator_metrics.creator_buy_max_sol_bc),
+    );
+    payload.insert(
+        "creator_first_buy_after_secs".to_string(),
+        serde_json::json!(creator_metrics.creator_first_buy_after_secs),
+    );
+    payload.insert(
+        "creator_first_buy_progress_pct".to_string(),
+        serde_json::json!(creator_metrics.creator_first_buy_progress_pct),
+    );
+    payload.insert(
+        "creator_last_buy_after_secs".to_string(),
+        serde_json::json!(creator_metrics.creator_last_buy_after_secs),
+    );
+    payload.insert(
+        "creator_last_buy_progress_pct".to_string(),
+        serde_json::json!(creator_metrics.creator_last_buy_progress_pct),
+    );
+    payload.insert(
+        "creator_sell_count_bc".to_string(),
+        serde_json::json!(creator_metrics.creator_sell_count_bc),
+    );
+    payload.insert(
+        "creator_sell_sol_total_bc".to_string(),
+        serde_json::json!(creator_metrics.creator_sell_sol_total_bc),
+    );
+    payload.insert(
+        "creator_net_sol_bc".to_string(),
+        serde_json::json!(creator_metrics.creator_net_sol_bc),
+    );
+    payload.insert(
+        "creator_buy_share_pct".to_string(),
+        serde_json::json!(creator_metrics.creator_buy_share_pct),
+    );
+    payload.insert(
         "whale_buy".to_string(),
         serde_json::json!(whale_buy_count > 0),
     );
@@ -1262,6 +1467,14 @@ async fn write_narrative_cluster_shadow(supabase: &SupabaseClient, payload: &ser
         Ok(resp) => {
             let body = resp.text().await.unwrap_or_default();
             warn!(mint = %mint, "narrative_cluster_shadow INSERT failed: {}", body);
+            retry_insert_without_creator_bc_columns(
+                supabase,
+                &url,
+                payload,
+                "narrative_cluster_shadow",
+                mint,
+            )
+            .await;
         }
         Err(e) => {
             warn!(mint = %mint, "narrative_cluster_shadow INSERT error: {}", e);
@@ -1707,8 +1920,19 @@ async fn handle_new_token(
         prior_same_label_creators_6h,
         seconds_since_label_seen,
         total_volume_sol: 0.0,
+        total_buy_sol_bc: 0.0,
+        total_sell_sol_bc: 0.0,
         buy_count: 0,
         sell_count: 0,
+        creator_buy_count_bc: 0,
+        creator_buy_sol_total_bc: 0.0,
+        creator_buy_max_sol_bc: 0.0,
+        creator_first_buy_at_ms: None,
+        creator_first_buy_progress_pct: None,
+        creator_last_buy_at_ms: None,
+        creator_last_buy_progress_pct: None,
+        creator_sell_count_bc: 0,
+        creator_sell_sol_total_bc: 0.0,
         unique_buyers: std::collections::HashSet::new(),
         trade_timestamps: vec![],
         trade_log: vec![],
@@ -1840,22 +2064,50 @@ async fn handle_token_trade(
     }
 
     let is_buy = tx_type == "buy";
+    let bc_progress_pct_at_trade = if entry.last_v_sol_reserves > 0.0 {
+        (((entry.last_v_sol_reserves - 30.0) / 85.0) * 100.0).clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
 
     match tx_type {
         "buy" => {
             entry.buy_count += 1;
+            entry.total_buy_sol_bc += sol_amount;
 
             // Track unique buyers and trade timestamps for wash-trade detection
             if let Some(trader_pubkey) = trader {
                 entry.unique_buyers.insert(trader_pubkey);
                 entry.trade_timestamps.push((now, trader_pubkey));
+
+                if trader_pubkey == entry.creator_wallet {
+                    entry.creator_buy_count_bc += 1;
+                    entry.creator_buy_sol_total_bc += sol_amount;
+                    entry.creator_buy_max_sol_bc = entry.creator_buy_max_sol_bc.max(sol_amount);
+                    if entry.creator_first_buy_at_ms.is_none() {
+                        entry.creator_first_buy_at_ms = Some(now);
+                        if bc_progress_pct_at_trade > 0.0 {
+                            entry.creator_first_buy_progress_pct = Some(bc_progress_pct_at_trade);
+                        }
+                    }
+                    entry.creator_last_buy_at_ms = Some(now);
+                    if bc_progress_pct_at_trade > 0.0 {
+                        entry.creator_last_buy_progress_pct = Some(bc_progress_pct_at_trade);
+                    }
+                }
             }
         }
         "sell" => {
             entry.sell_count += 1;
+            entry.total_sell_sol_bc += sol_amount;
 
             if let Some(trader_pubkey) = trader {
                 entry.trade_timestamps.push((now, trader_pubkey));
+
+                if trader_pubkey == entry.creator_wallet {
+                    entry.creator_sell_count_bc += 1;
+                    entry.creator_sell_sol_total_bc += sol_amount;
+                }
             }
         }
         other => {
@@ -1911,6 +2163,7 @@ async fn handle_token_trade(
         } else {
             0.0
         };
+        let creator_metrics = compute_creator_bc_metrics(entry);
         let bc_score = compute_bc_score(
             entry.unique_buyers.len(),
             bsr,
@@ -1932,6 +2185,17 @@ async fn handle_token_trade(
             buy_count: entry.buy_count,
             sell_count: entry.sell_count,
             total_volume_sol: entry.total_volume_sol,
+            creator_buy_count_bc: creator_metrics.creator_buy_count_bc,
+            creator_buy_sol_total_bc: creator_metrics.creator_buy_sol_total_bc,
+            creator_buy_max_sol_bc: creator_metrics.creator_buy_max_sol_bc,
+            creator_first_buy_after_secs: creator_metrics.creator_first_buy_after_secs,
+            creator_first_buy_progress_pct: creator_metrics.creator_first_buy_progress_pct,
+            creator_last_buy_after_secs: creator_metrics.creator_last_buy_after_secs,
+            creator_last_buy_progress_pct: creator_metrics.creator_last_buy_progress_pct,
+            creator_sell_count_bc: creator_metrics.creator_sell_count_bc,
+            creator_sell_sol_total_bc: creator_metrics.creator_sell_sol_total_bc,
+            creator_net_sol_bc: creator_metrics.creator_net_sol_bc,
+            creator_buy_share_pct: creator_metrics.creator_buy_share_pct,
             recorded_at: chrono::Utc::now().timestamp_millis(),
         };
 
@@ -3202,6 +3466,7 @@ fn build_signal_payload(entry: &WatchlistEntry, mint_str: &str) -> serde_json::V
             }
         }
     }
+    let creator_metrics = compute_creator_bc_metrics(entry);
 
     // Buy velocity: max buys in any 30-second window
     let buy_velocity_30s = compute_buy_velocity(&entry.trade_log, 30_000);
@@ -3243,6 +3508,19 @@ fn build_signal_payload(entry: &WatchlistEntry, mint_str: &str) -> serde_json::V
         "buy_sell_ratio": buy_sell_ratio,
         "total_buy_sol": total_buy_sol,
         "total_sell_sol": total_sell_sol,
+        "total_buy_sol_bc": creator_metrics.total_buy_sol_bc,
+        "total_sell_sol_bc": creator_metrics.total_sell_sol_bc,
+        "creator_buy_count_bc": creator_metrics.creator_buy_count_bc,
+        "creator_buy_sol_total_bc": creator_metrics.creator_buy_sol_total_bc,
+        "creator_buy_max_sol_bc": creator_metrics.creator_buy_max_sol_bc,
+        "creator_first_buy_after_secs": creator_metrics.creator_first_buy_after_secs,
+        "creator_first_buy_progress_pct": creator_metrics.creator_first_buy_progress_pct,
+        "creator_last_buy_after_secs": creator_metrics.creator_last_buy_after_secs,
+        "creator_last_buy_progress_pct": creator_metrics.creator_last_buy_progress_pct,
+        "creator_sell_count_bc": creator_metrics.creator_sell_count_bc,
+        "creator_sell_sol_total_bc": creator_metrics.creator_sell_sol_total_bc,
+        "creator_net_sol_bc": creator_metrics.creator_net_sol_bc,
+        "creator_buy_share_pct": creator_metrics.creator_buy_share_pct,
         "normalized_label": entry.normalized_label,
         "label_repeat_active": entry.prior_same_label_mints_6h > 0,
         "label_repeat_prior_mints_6h": entry.prior_same_label_mints_6h,
@@ -3316,6 +3594,18 @@ fn build_signal_payload(entry: &WatchlistEntry, mint_str: &str) -> serde_json::V
         // v14 feature columns (consumed by write_bc_paper_trade).
         "creator_sold_during_bc": creator_sold_during_bc,
         "buy_pressure_at_entry_pct": entry.buy_pressure_pct(),
+        // Shadow-only creator-rebuy quality metrics for later analysis.
+        "creator_buy_count_bc": creator_metrics.creator_buy_count_bc,
+        "creator_buy_sol_total_bc": creator_metrics.creator_buy_sol_total_bc,
+        "creator_buy_max_sol_bc": creator_metrics.creator_buy_max_sol_bc,
+        "creator_first_buy_after_secs": creator_metrics.creator_first_buy_after_secs,
+        "creator_first_buy_progress_pct": creator_metrics.creator_first_buy_progress_pct,
+        "creator_last_buy_after_secs": creator_metrics.creator_last_buy_after_secs,
+        "creator_last_buy_progress_pct": creator_metrics.creator_last_buy_progress_pct,
+        "creator_sell_count_bc": creator_metrics.creator_sell_count_bc,
+        "creator_sell_sol_total_bc": creator_metrics.creator_sell_sol_total_bc,
+        "creator_net_sol_bc": creator_metrics.creator_net_sol_bc,
+        "creator_buy_share_pct": creator_metrics.creator_buy_share_pct,
     })
 }
 
@@ -3332,6 +3622,7 @@ fn build_early_buyer_rebuy_shadow_payload(
     let token_age_secs = (now - entry.detected_at) as f64 / 1_000.0;
     let buy_sell_ratio = compute_current_buy_sell_ratio(entry);
     let creator_rebuy = compute_current_creator_rebuy(entry);
+    let creator_metrics = compute_creator_bc_metrics(entry);
     let creator_sold_during_bc = entry
         .trade_log
         .iter()
@@ -3382,6 +3673,17 @@ fn build_early_buyer_rebuy_shadow_payload(
         "label_repeat_prior_mints_6h": entry.prior_same_label_mints_6h,
         "label_repeat_prior_creators_6h": entry.prior_same_label_creators_6h,
         "label_repeat_seconds_since_last_seen": entry.seconds_since_label_seen,
+        "creator_buy_count_bc": creator_metrics.creator_buy_count_bc,
+        "creator_buy_sol_total_bc": creator_metrics.creator_buy_sol_total_bc,
+        "creator_buy_max_sol_bc": creator_metrics.creator_buy_max_sol_bc,
+        "creator_first_buy_after_secs": creator_metrics.creator_first_buy_after_secs,
+        "creator_first_buy_progress_pct": creator_metrics.creator_first_buy_progress_pct,
+        "creator_last_buy_after_secs": creator_metrics.creator_last_buy_after_secs,
+        "creator_last_buy_progress_pct": creator_metrics.creator_last_buy_progress_pct,
+        "creator_sell_count_bc": creator_metrics.creator_sell_count_bc,
+        "creator_sell_sol_total_bc": creator_metrics.creator_sell_sol_total_bc,
+        "creator_net_sol_bc": creator_metrics.creator_net_sol_bc,
+        "creator_buy_share_pct": creator_metrics.creator_buy_share_pct,
     });
 
     let mut payload = serde_json::Map::new();
@@ -3632,6 +3934,14 @@ async fn write_bonding_curve_signal(supabase: &SupabaseClient, payload: &serde_j
         Ok(resp) => {
             let body = resp.text().await.unwrap_or_default();
             warn!(mint = %mint, "bonding_curve_signals INSERT failed: {}", body);
+            retry_insert_without_creator_bc_columns(
+                supabase,
+                &url,
+                payload,
+                "bonding_curve_signals",
+                mint,
+            )
+            .await;
         }
         Err(e) => {
             warn!(mint = %mint, "bonding_curve_signals INSERT error: {}", e);

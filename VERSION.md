@@ -9,6 +9,29 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.9.1 — Creator-Rebuy BC Metrics Shadow (2026-05-11)
+
+**strategy_version**: unchanged (`v18.9-narrative-rebuy-exception`)
+
+### Why
+Creator rebuy as a boolean is too coarse. We need shadow-only data to test whether creator buy count, creator buy size, timing, creator sells, and creator buy share separate good narrative/flow runners from low-quality rebuy noise.
+
+### Changes
+- Adds data-only creator bonding-curve metrics via [migrations/034_creator_rebuy_bc_shadow_metrics.sql](migrations/034_creator_rebuy_bc_shadow_metrics.sql):
+  - creator buy count and total/max SOL.
+  - first/last creator buy timing and BC progress.
+  - creator sell count and total SOL.
+  - creator net SOL and creator buy share of all buy SOL.
+- Writes the metrics to `bonding_curve_signals.signals` and top-level `bonding_curve_signals` columns.
+- Writes the metrics to `narrative_cluster_shadow.entry_metrics` and top-level `narrative_cluster_shadow` columns.
+- Adds the same metrics into creator-rebuy/narrative sniper candidate feature JSON for later analysis.
+- Does **not** change any live entry filters, sizing, exits, or creator-rebuy blocking behavior.
+
+### Rollback
+No strategy rollback is required. To stop collecting the explicit columns, deploy the previous binary after removing the v18.9.1 payload fields. Existing data columns can remain.
+
+---
+
 ## v18.9 — Narrative Rebuy Exception + Phase 2 Shadow (2026-05-11)
 
 **strategy_version**: `v18.9-narrative-rebuy-exception`

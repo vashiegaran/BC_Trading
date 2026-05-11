@@ -26,6 +26,18 @@ pub struct BcScoreEntry {
     pub buy_count: u64,
     pub sell_count: u64,
     pub total_volume_sol: f64,
+    /// Creator buy/sell quality metrics observed at BC score time.
+    pub creator_buy_count_bc: u64,
+    pub creator_buy_sol_total_bc: f64,
+    pub creator_buy_max_sol_bc: f64,
+    pub creator_first_buy_after_secs: Option<f64>,
+    pub creator_first_buy_progress_pct: Option<f64>,
+    pub creator_last_buy_after_secs: Option<f64>,
+    pub creator_last_buy_progress_pct: Option<f64>,
+    pub creator_sell_count_bc: u64,
+    pub creator_sell_sol_total_bc: f64,
+    pub creator_net_sol_bc: f64,
+    pub creator_buy_share_pct: Option<f64>,
     /// When this entry was recorded (epoch ms).
     pub recorded_at: i64,
 }
@@ -240,6 +252,17 @@ pub struct NarrativeClusterContext {
     pub entry_buy_pressure_pct: f64,
     pub creator_rebuy_bypassed: bool,
     pub creator_sold_during_bc: bool,
+    pub creator_buy_count_bc: u64,
+    pub creator_buy_sol_total_bc: f64,
+    pub creator_buy_max_sol_bc: f64,
+    pub creator_first_buy_after_secs: Option<f64>,
+    pub creator_first_buy_progress_pct: Option<f64>,
+    pub creator_last_buy_after_secs: Option<f64>,
+    pub creator_last_buy_progress_pct: Option<f64>,
+    pub creator_sell_count_bc: u64,
+    pub creator_sell_sol_total_bc: f64,
+    pub creator_net_sol_bc: f64,
+    pub creator_buy_share_pct: Option<f64>,
     pub whale_buy: bool,
     pub whale_buy_max_sol: f64,
     pub bc_progress_pct: f64,
@@ -274,10 +297,32 @@ pub struct WatchlistEntry {
     pub seconds_since_label_seen: Option<i64>,
     /// Cumulative SOL volume traded on the bonding curve.
     pub total_volume_sol: f64,
+    /// Cumulative buy-side SOL flow observed on the bonding curve.
+    pub total_buy_sol_bc: f64,
+    /// Cumulative sell-side SOL flow observed on the bonding curve.
+    pub total_sell_sol_bc: f64,
     /// Number of buy transactions observed.
     pub buy_count: u64,
     /// Number of sell transactions observed.
     pub sell_count: u64,
+    /// Number of creator buy transactions observed after token creation.
+    pub creator_buy_count_bc: u64,
+    /// Creator buy-side SOL observed during bonding curve.
+    pub creator_buy_sol_total_bc: f64,
+    /// Largest single creator buy observed during bonding curve.
+    pub creator_buy_max_sol_bc: f64,
+    /// First creator buy timestamp observed during bonding curve.
+    pub creator_first_buy_at_ms: Option<i64>,
+    /// BC progress percent at first creator buy when reserves were available.
+    pub creator_first_buy_progress_pct: Option<f64>,
+    /// Most recent creator buy timestamp observed during bonding curve.
+    pub creator_last_buy_at_ms: Option<i64>,
+    /// BC progress percent at most recent creator buy when reserves were available.
+    pub creator_last_buy_progress_pct: Option<f64>,
+    /// Number of creator sell transactions observed during bonding curve.
+    pub creator_sell_count_bc: u64,
+    /// Creator sell-side SOL observed during bonding curve.
+    pub creator_sell_sol_total_bc: f64,
     /// Set of unique buyer wallet addresses seen during bonding curve.
     pub unique_buyers: HashSet<Pubkey>,
     /// Trade timestamps paired with buyer wallet — used for wash-trade detection.
