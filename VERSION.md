@@ -9,6 +9,62 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.9.3 — Creator-Rebuy Shadow Monitor Coverage (2026-05-11)
+
+**strategy_version**: unchanged (`v18.9-narrative-rebuy-exception`)
+
+### Why
+The live creator-rebuy reject is intentionally conservative, but it blocks a large research population. We want the shadow monitors to keep collecting those tokens while preserving the creator-rebuy score penalty for later analysis.
+
+### Changes
+- Removes the remaining hard creator-rebuy skip from the `probe_add_shadow` ladder.
+- Keeps the existing BC score intact; creator rebuy still lowers `compute_bc_score`, but no shadow row is rejected solely because creator rebuy happened.
+- Existing no-hard-reject shadow coverage remains active for:
+  - `bonding_curve_signals`.
+  - `label_flow_shadow` / `launch_label_shadow`.
+  - `narrative_cluster_shadow`.
+  - `early_buyer_rebuy_shadow`.
+  - `post_grad_flow_shadow`.
+  - gated `top_holder_flow_shadow`.
+- Does **not** change live entries, exits, sizing, or broad `reject_creator_rebuy = true` behavior.
+
+### Rate-limit note
+No new API calls were added. This only removes a local hard skip from an existing Supabase paper-lane write path; post-grad/top-holder monitors remain gated and capped by v18.9.2 controls.
+
+---
+
+## v18.9.2 — Flow-Quality Shadow Monitors (2026-05-11)
+
+**strategy_version**: unchanged (`v18.9-narrative-rebuy-exception`)
+
+### Why
+Creator action, first-minute continuation, proven-wallet overlap, and top-holder behavior are valuable, but they must not create broad API fan-out or interfere with live trading.
+
+### Changes
+- Adds shadow-only `post_grad_flow_shadow` via [migrations/035_flow_quality_shadow_monitors.sql](migrations/035_flow_quality_shadow_monitors.sql).
+- Tracks high-interest graduated tokens only; gates include BC score, narrative cluster arming, proven-wallet overlap, whale support, or creator net-buy/no-sell support.
+- Adds no-extra-call bonding-curve metrics:
+  - creator launch cadence/reputation within the current 6h process window.
+  - whale buy/sell/net flow.
+  - early-buyer buy/sell/net flow.
+  - active `proven_wallets` overlap from the existing tokenTrade stream.
+  - narrative sequence quality from same-label cadence/diversity.
+- Adds first-minute post-grad continuation/sell-absorption shadow tracking from guarded DexScreener samples at ~30s and ~60s after baseline.
+- Adds gated top-holder flow snapshots only for the strongest candidates, protected by RPC guard + max-active caps.
+- Routes DexScreener outcome polling through the shared API guard/circuit breaker.
+- Does **not** change live entries, exits, sizing, or filters.
+
+### Rate-limit controls
+- Post-grad flow trackers are capped by `post_grad_flow_shadow_max_active`.
+- Top-holder trackers are capped by `top_holder_flow_shadow_max_active` and require a high score/proven-wallet gate.
+- DexScreener and RPC calls use existing `SamplerGuards` spacing/circuit breakers.
+- All work runs in spawned best-effort tasks; failed/skipped shadow calls never block buy/exit paths.
+
+### Rollback
+Set `post_grad_flow_shadow_enabled = false` and/or `top_holder_flow_shadow_enabled = false` in [config.toml](config.toml), then restart. The table can remain for historical analysis.
+
+---
+
 ## v18.9.1 — Creator-Rebuy BC Metrics Shadow (2026-05-11)
 
 **strategy_version**: unchanged (`v18.9-narrative-rebuy-exception`)

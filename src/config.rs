@@ -208,6 +208,32 @@ pub struct DetectionConfig {
     /// before graduation.
     #[serde(default = "default_early_buyer_rebuy_max_progress_pct")]
     pub early_buyer_rebuy_max_progress_pct: f64,
+    /// Shadow-only post-graduation flow monitor. Tracks first-minute price
+    /// continuation/absorption for high-interest graduated tokens only.
+    #[serde(default = "default_true")]
+    pub post_grad_flow_shadow_enabled: bool,
+    /// Minimum BC score that qualifies a token for post-grad flow shadow
+    /// tracking when no stronger trigger (narrative/proven wallet/whale/creator
+    /// support) is present.
+    #[serde(default = "default_post_grad_flow_shadow_min_score")]
+    pub post_grad_flow_shadow_min_score: f64,
+    /// Global cap on concurrently active post-grad flow trackers.
+    #[serde(default = "default_post_grad_flow_shadow_max_active")]
+    pub post_grad_flow_shadow_max_active: usize,
+    /// Gated top-holder flow snapshots. Uses RPC only for high-interest tokens
+    /// and writes data to the same shadow table; never affects execution.
+    #[serde(default = "default_true")]
+    pub top_holder_flow_shadow_enabled: bool,
+    /// Minimum BC/narrative score for top-holder flow snapshots unless a proven
+    /// wallet was seen. Kept high to avoid broad RPC fan-out.
+    #[serde(default = "default_top_holder_flow_shadow_min_score")]
+    pub top_holder_flow_shadow_min_score: f64,
+    /// Global cap on concurrently active top-holder snapshot tasks.
+    #[serde(default = "default_top_holder_flow_shadow_max_active")]
+    pub top_holder_flow_shadow_max_active: usize,
+    /// Seconds between initial and follow-up top-holder snapshots.
+    #[serde(default = "default_top_holder_flow_shadow_delay_secs")]
+    pub top_holder_flow_shadow_delay_secs: u64,
 }
 
 fn default_true() -> bool {
@@ -275,6 +301,21 @@ fn default_early_buyer_rebuy_min_rebuy_wallets() -> usize {
 }
 fn default_early_buyer_rebuy_max_progress_pct() -> f64 {
     100.0
+}
+fn default_post_grad_flow_shadow_min_score() -> f64 {
+    55.0
+}
+fn default_post_grad_flow_shadow_max_active() -> usize {
+    20
+}
+fn default_top_holder_flow_shadow_min_score() -> f64 {
+    70.0
+}
+fn default_top_holder_flow_shadow_max_active() -> usize {
+    3
+}
+fn default_top_holder_flow_shadow_delay_secs() -> u64 {
+    300
 }
 fn default_max_liquidity_usd() -> u64 {
     0

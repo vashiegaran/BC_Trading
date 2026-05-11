@@ -9,7 +9,8 @@ use solana_transaction_status::UiTransactionEncoding;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
@@ -20,6 +21,7 @@ use super::types::{
 };
 use crate::config::AppConfig;
 use crate::logger::SupabaseClient;
+use crate::monitoring::api_limiter::SamplerGuards;
 
 /// PumpPortal WebSocket base endpoint.
 const PUMPFUN_WS_URL: &str = "wss://pumpportal.fun/api/data";
@@ -58,11 +60,112 @@ pub(super) const COMPLETE_DEDUP_WINDOW_MS: i64 = 5 * 60 * 1000;
 /// Hard cap on the dedup map before we drop the oldest half.
 pub(super) const COMPLETE_DEDUP_MAX_ENTRIES: usize = 5_000;
 
+static SHADOW_API_GUARDS: OnceLock<SamplerGuards> = OnceLock::new();
+static POST_GRAD_FLOW_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+static TOP_HOLDER_FLOW_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
+fn shadow_api_guards() -> &'static SamplerGuards {
+    SHADOW_API_GUARDS.get_or_init(SamplerGuards::new)
+}
+
+struct ActiveCounterGuard(&'static AtomicUsize);
+
+impl Drop for ActiveCounterGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+fn try_acquire_active_counter(
+    counter: &'static AtomicUsize,
+    max_active: usize,
+) -> Option<ActiveCounterGuard> {
+    if max_active == 0 {
+        return None;
+    }
+
+    let current = counter.fetch_add(1, Ordering::SeqCst);
+    if current >= max_active {
+        counter.fetch_sub(1, Ordering::SeqCst);
+        None
+    } else {
+        Some(ActiveCounterGuard(counter))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct RecentLabelObservation {
     mint: String,
     creator_wallet: Pubkey,
     seen_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct RecentCreatorObservation {
+    mint: String,
+    normalized_label: String,
+    seen_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ProvenWalletInfo {
+    label: Option<String>,
+    parent_score: Option<f64>,
+    win_rate: Option<f64>,
+    sample_size: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct FlowQualityMetrics {
+    whale_buy_count: u64,
+    whale_buy_sol_total: f64,
+    whale_buy_max_sol: f64,
+    whale_sell_count: u64,
+    whale_sell_sol_total: f64,
+    whale_sell_max_sol: f64,
+    whale_net_sol: f64,
+    whale_buy_share_pct: Option<f64>,
+    whale_sell_pressure_pct: Option<f64>,
+    early_buyer_buy_count: u64,
+    early_buyer_buy_sol_total: f64,
+    early_buyer_sell_count: u64,
+    early_buyer_sell_sol_total: f64,
+    early_buyer_net_sol: f64,
+    proven_wallet_buy_count: u64,
+    proven_wallet_buy_sol_total: f64,
+    proven_wallet_sell_count: u64,
+    proven_wallet_sell_sol_total: f64,
+    proven_wallet_net_sol: f64,
+    proven_wallet_unique_buyers: usize,
+    proven_wallet_unique_sellers: usize,
+}
+
+#[derive(Debug, Clone)]
+struct PostGradFlowSeed {
+    payload: serde_json::Map<String, serde_json::Value>,
+    top_holder_eligible: bool,
+}
+
+#[derive(Debug, Clone)]
+struct TopHolderOwnerSnapshot {
+    token_account: String,
+    owner: String,
+    amount: f64,
+    pct: f64,
+}
+
+#[derive(Debug, Clone)]
+struct TopHolderSnapshot {
+    status: String,
+    captured_at: String,
+    supply: Option<f64>,
+    top1_pct: Option<f64>,
+    top5_pct: Option<f64>,
+    top10_pct: Option<f64>,
+    owner_count: usize,
+    rpc_requests: u32,
+    error: Option<String>,
+    owners: Vec<TopHolderOwnerSnapshot>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -129,6 +232,185 @@ fn compute_creator_bc_metrics(entry: &WatchlistEntry) -> CreatorBcMetrics {
         creator_net_sol_bc,
         creator_buy_share_pct,
     }
+}
+
+fn value_as_f64(row: &serde_json::Value, key: &str) -> Option<f64> {
+    row.get(key)
+        .and_then(|v| v.as_f64().or_else(|| v.as_str()?.parse::<f64>().ok()))
+}
+
+fn value_as_i64(row: &serde_json::Value, key: &str) -> Option<i64> {
+    row.get(key)
+        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse::<i64>().ok()))
+}
+
+pub(super) async fn fetch_proven_wallet_roster(
+    supabase: &Arc<SupabaseClient>,
+) -> HashMap<Pubkey, ProvenWalletInfo> {
+    let url = format!(
+        "{}/proven_wallets?select=wallet,label,parent_score,win_rate,sample_size,status&status=eq.active&limit=1000",
+        supabase.base_url
+    );
+
+    let resp = match supabase
+        .client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+    {
+        Ok(resp) => resp,
+        Err(e) => {
+            debug!("proven_wallets roster fetch skipped: {}", e);
+            return HashMap::new();
+        }
+    };
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        debug!(
+            "proven_wallets roster unavailable: HTTP {} — {}",
+            status, body
+        );
+        return HashMap::new();
+    }
+
+    let rows: Vec<serde_json::Value> = match resp.json().await {
+        Ok(rows) => rows,
+        Err(e) => {
+            debug!("proven_wallets roster parse failed: {}", e);
+            return HashMap::new();
+        }
+    };
+
+    let mut roster = HashMap::new();
+    for row in rows {
+        let Some(wallet_str) = row.get("wallet").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Ok(wallet) = Pubkey::from_str(wallet_str) else {
+            continue;
+        };
+        roster.insert(
+            wallet,
+            ProvenWalletInfo {
+                label: row
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                parent_score: value_as_f64(&row, "parent_score"),
+                win_rate: value_as_f64(&row, "win_rate"),
+                sample_size: value_as_i64(&row, "sample_size"),
+            },
+        );
+    }
+
+    if !roster.is_empty() {
+        info!(
+            count = roster.len(),
+            "Loaded active proven-wallet roster for shadow overlap metrics"
+        );
+    }
+    roster
+}
+
+fn compute_flow_quality_metrics(entry: &WatchlistEntry, first_n: usize) -> FlowQualityMetrics {
+    let mut metrics = FlowQualityMetrics::default();
+
+    let mut first_buyers = Vec::new();
+    let mut seen_buyers = HashSet::new();
+    for &(_, _, is_buy, wallet) in &entry.trade_log {
+        if !is_buy || wallet == entry.creator_wallet {
+            continue;
+        }
+        if seen_buyers.insert(wallet) {
+            first_buyers.push(wallet);
+            if first_buyers.len() >= first_n.max(1) {
+                break;
+            }
+        }
+    }
+    let first_buyer_set: HashSet<Pubkey> = first_buyers.into_iter().collect();
+
+    for &(_, sol, is_buy, wallet) in &entry.trade_log {
+        if is_buy {
+            if sol >= 3.0 {
+                metrics.whale_buy_count += 1;
+                metrics.whale_buy_sol_total += sol;
+                metrics.whale_buy_max_sol = metrics.whale_buy_max_sol.max(sol);
+            }
+            if first_buyer_set.contains(&wallet) {
+                metrics.early_buyer_buy_count += 1;
+                metrics.early_buyer_buy_sol_total += sol;
+            }
+        } else {
+            if sol >= 3.0 {
+                metrics.whale_sell_count += 1;
+                metrics.whale_sell_sol_total += sol;
+                metrics.whale_sell_max_sol = metrics.whale_sell_max_sol.max(sol);
+            }
+            if first_buyer_set.contains(&wallet) {
+                metrics.early_buyer_sell_count += 1;
+                metrics.early_buyer_sell_sol_total += sol;
+            }
+        }
+    }
+
+    metrics.whale_net_sol = metrics.whale_buy_sol_total - metrics.whale_sell_sol_total;
+    metrics.whale_buy_share_pct = if entry.total_buy_sol_bc > 0.0 {
+        Some(((metrics.whale_buy_sol_total / entry.total_buy_sol_bc) * 100.0).clamp(0.0, 100.0))
+    } else {
+        None
+    };
+    metrics.whale_sell_pressure_pct = if entry.total_sell_sol_bc > 0.0 {
+        Some(((metrics.whale_sell_sol_total / entry.total_sell_sol_bc) * 100.0).clamp(0.0, 100.0))
+    } else {
+        None
+    };
+    metrics.early_buyer_net_sol =
+        metrics.early_buyer_buy_sol_total - metrics.early_buyer_sell_sol_total;
+    metrics.proven_wallet_buy_count = entry.proven_wallet_buy_count_bc;
+    metrics.proven_wallet_buy_sol_total = entry.proven_wallet_buy_sol_total_bc;
+    metrics.proven_wallet_sell_count = entry.proven_wallet_sell_count_bc;
+    metrics.proven_wallet_sell_sol_total = entry.proven_wallet_sell_sol_total_bc;
+    metrics.proven_wallet_net_sol =
+        entry.proven_wallet_buy_sol_total_bc - entry.proven_wallet_sell_sol_total_bc;
+    metrics.proven_wallet_unique_buyers = entry.proven_wallet_unique_buyers_bc.len();
+    metrics.proven_wallet_unique_sellers = entry.proven_wallet_unique_sellers_bc.len();
+
+    metrics
+}
+
+fn proven_wallet_overlap_json(
+    entry: &WatchlistEntry,
+    proven_wallet_roster: &HashMap<Pubkey, ProvenWalletInfo>,
+) -> serde_json::Value {
+    let mut wallets: Vec<Pubkey> = entry
+        .proven_wallet_unique_buyers_bc
+        .union(&entry.proven_wallet_unique_sellers_bc)
+        .copied()
+        .collect();
+    wallets.sort();
+    wallets.truncate(25);
+
+    serde_json::Value::Array(
+        wallets
+            .into_iter()
+            .map(|wallet| {
+                let info = proven_wallet_roster.get(&wallet);
+                serde_json::json!({
+                    "wallet": wallet.to_string(),
+                    "label": info.and_then(|i| i.label.clone()),
+                    "parent_score": info.and_then(|i| i.parent_score),
+                    "win_rate": info.and_then(|i| i.win_rate),
+                    "sample_size": info.and_then(|i| i.sample_size),
+                    "bought": entry.proven_wallet_unique_buyers_bc.contains(&wallet),
+                    "sold": entry.proven_wallet_unique_sellers_bc.contains(&wallet),
+                })
+            })
+            .collect(),
+    )
 }
 
 fn payload_without_creator_bc_top_level_columns(
@@ -310,6 +592,59 @@ fn compute_recent_label_signal(
     )
 }
 
+fn prune_recent_creator_cache(
+    recent_creators: &mut HashMap<Pubkey, Vec<RecentCreatorObservation>>,
+    now_ms: i64,
+) {
+    recent_creators.retain(|_, observations| {
+        observations.retain(|obs| now_ms - obs.seen_at <= RECENT_LABEL_WINDOW_MS);
+        !observations.is_empty()
+    });
+}
+
+fn compute_recent_creator_signal(
+    recent_creators: &mut HashMap<Pubkey, Vec<RecentCreatorObservation>>,
+    creator_wallet: Pubkey,
+    normalized_label: &str,
+    mint_str: &str,
+    now_ms: i64,
+) -> (usize, usize, Option<i64>) {
+    if creator_wallet == Pubkey::default() {
+        return (0, 0, None);
+    }
+
+    prune_recent_creator_cache(recent_creators, now_ms);
+
+    let bucket = recent_creators.entry(creator_wallet).or_default();
+    let prior_mints = bucket
+        .iter()
+        .filter(|obs| obs.mint != mint_str)
+        .map(|obs| obs.mint.clone())
+        .collect::<HashSet<_>>()
+        .len();
+    let prior_same_label_mints = bucket
+        .iter()
+        .filter(|obs| obs.mint != mint_str && obs.normalized_label == normalized_label)
+        .map(|obs| obs.mint.clone())
+        .collect::<HashSet<_>>()
+        .len();
+    let seconds_since_last = bucket
+        .iter()
+        .filter(|obs| obs.mint != mint_str)
+        .map(|obs| (now_ms - obs.seen_at) / 1_000)
+        .min();
+
+    if !bucket.iter().any(|obs| obs.mint == mint_str) {
+        bucket.push(RecentCreatorObservation {
+            mint: mint_str.to_string(),
+            normalized_label: normalized_label.to_string(),
+            seen_at: now_ms,
+        });
+    }
+
+    (prior_mints, prior_same_label_mints, seconds_since_last)
+}
+
 fn compute_current_buy_sell_ratio(entry: &WatchlistEntry) -> f64 {
     if entry.sell_count > 0 {
         entry.buy_count as f64 / entry.sell_count as f64
@@ -455,7 +790,9 @@ fn maybe_fire_probe_add_shadow(
         return;
     }
 
-    let creator_rebuy = compute_current_creator_rebuy(entry);
+    // v18.9.3: creator rebuy is intentionally NOT a hard reject for shadow
+    // monitoring. `compute_current_bc_score` still retains the creator-rebuy
+    // penalty, so we preserve scoring while collecting the blocked population.
     let bc_score = compute_current_bc_score(entry);
     let buy_pressure_pct = entry.buy_pressure_pct();
 
@@ -463,8 +800,7 @@ fn maybe_fire_probe_add_shadow(
         if bc_progress_pct < cfg.strategy.detection.probe_add_probe_progress_pct {
             return;
         }
-        if creator_rebuy
-            || buy_pressure_pct < cfg.strategy.filters.min_buy_pressure_pct
+        if buy_pressure_pct < cfg.strategy.filters.min_buy_pressure_pct
             || bc_score < cfg.strategy.filters.bc_fast_track_min_score
         {
             return;
@@ -493,8 +829,7 @@ fn maybe_fire_probe_add_shadow(
     if bc_progress_pct < cfg.strategy.detection.probe_add_add_progress_pct {
         return;
     }
-    if creator_rebuy
-        || buy_pressure_pct < cfg.strategy.filters.min_buy_pressure_pct
+    if buy_pressure_pct < cfg.strategy.filters.min_buy_pressure_pct
         || bc_score < cfg.strategy.filters.bc_fast_track_min_score
     {
         return;
@@ -1636,6 +1971,14 @@ async fn connect_and_listen(
     // Recent normalized-label activity for repeated same-label mint detection.
     let mut recent_labels: HashMap<String, Vec<RecentLabelObservation>> = HashMap::new();
 
+    // Recent creator launch activity for creator-reputation lifecycle metrics.
+    let mut recent_creators: HashMap<Pubkey, Vec<RecentCreatorObservation>> = HashMap::new();
+
+    // Active proven-wallet roster is loaded once per WS connection. This is a
+    // Supabase read only (not an external market/RPC call) and failures simply
+    // leave overlap metrics at zero.
+    let proven_wallet_roster = fetch_proven_wallet_roster(supabase).await;
+
     // Dedup table for tokenComplete events.
     //
     // pump.fun occasionally emits BOTH a "migrate" event AND a "complete" event
@@ -1668,6 +2011,7 @@ async fn connect_and_listen(
                     tx,
                     &mut watchlist,
                     &mut recent_labels,
+                    &mut recent_creators,
                     &mut emitted_complete,
                     COMPLETE_DEDUP_WINDOW_MS,
                     COMPLETE_DEDUP_MAX_ENTRIES,
@@ -1677,6 +2021,7 @@ async fn connect_and_listen(
                     rpc_url,
                     cfg,
                     bc_cache,
+                    &proven_wallet_roster,
                 )
                 .await
                 {
@@ -1739,6 +2084,7 @@ pub(super) async fn handle_text_message(
     tx: &mpsc::Sender<GraduatedToken>,
     watchlist: &mut HashMap<String, WatchlistEntry>,
     recent_labels: &mut HashMap<String, Vec<RecentLabelObservation>>,
+    recent_creators: &mut HashMap<Pubkey, Vec<RecentCreatorObservation>>,
     emitted_complete: &mut HashMap<String, i64>,
     complete_dedup_window_ms: i64,
     complete_dedup_max_entries: usize,
@@ -1748,6 +2094,7 @@ pub(super) async fn handle_text_message(
     rpc_url: &str,
     cfg: &Arc<AppConfig>,
     bc_cache: &BcScoreCache,
+    proven_wallet_roster: &HashMap<Pubkey, ProvenWalletInfo>,
 ) -> Result<()> {
     let v: serde_json::Value = serde_json::from_str(text).context("Message is not valid JSON")?;
 
@@ -1764,12 +2111,15 @@ pub(super) async fn handle_text_message(
                 &v,
                 watchlist,
                 recent_labels,
+                recent_creators,
                 ws_write_tx,
                 token_trade_subs_enabled,
             )
             .await?
         }
-        EventKind::TokenTrade => handle_token_trade(&v, watchlist, cfg, supabase, bc_cache).await?,
+        EventKind::TokenTrade => {
+            handle_token_trade(&v, watchlist, cfg, supabase, bc_cache, proven_wallet_roster).await?
+        }
         EventKind::TokenComplete => {
             // ── Dedup tokenComplete: pump.fun can emit migrate+complete for the
             // same mint. The first call consumes the watchlist entry; without
@@ -1811,7 +2161,16 @@ pub(super) async fn handle_text_message(
                 emitted_complete.insert(mint_str.clone(), now_ms);
             }
 
-            handle_token_complete(&v, tx, watchlist, supabase, rpc_url, cfg).await?
+            handle_token_complete(
+                &v,
+                tx,
+                watchlist,
+                supabase,
+                rpc_url,
+                cfg,
+                proven_wallet_roster,
+            )
+            .await?
         }
         EventKind::Unknown => {
             // Subscription acks/errors have no txType. Keep success acks quiet,
@@ -1848,6 +2207,7 @@ async fn handle_new_token(
     v: &serde_json::Value,
     watchlist: &mut HashMap<String, WatchlistEntry>,
     recent_labels: &mut HashMap<String, Vec<RecentLabelObservation>>,
+    recent_creators: &mut HashMap<Pubkey, Vec<RecentCreatorObservation>>,
     ws_write_tx: &mpsc::Sender<Message>,
     token_trade_subs_enabled: bool,
 ) -> Result<()> {
@@ -1886,6 +2246,17 @@ async fn handle_new_token(
         prior_same_label_creators_6h,
         seconds_since_label_seen,
     ) = compute_recent_label_signal(recent_labels, &name, &symbol, mint_str, creator_wallet, now);
+    let (
+        creator_prior_mints_6h,
+        creator_same_label_prior_mints_6h,
+        creator_seconds_since_last_mint,
+    ) = compute_recent_creator_signal(
+        recent_creators,
+        creator_wallet,
+        &normalized_label,
+        mint_str,
+        now,
+    );
 
     // Prune watchlist if it's getting too large (simple eviction: clear oldest half).
     if watchlist.len() >= MAX_WATCHLIST_SIZE {
@@ -1919,6 +2290,9 @@ async fn handle_new_token(
         prior_same_label_mints_6h,
         prior_same_label_creators_6h,
         seconds_since_label_seen,
+        creator_prior_mints_6h,
+        creator_same_label_prior_mints_6h,
+        creator_seconds_since_last_mint,
         total_volume_sol: 0.0,
         total_buy_sol_bc: 0.0,
         total_sell_sol_bc: 0.0,
@@ -1933,6 +2307,12 @@ async fn handle_new_token(
         creator_last_buy_progress_pct: None,
         creator_sell_count_bc: 0,
         creator_sell_sol_total_bc: 0.0,
+        proven_wallet_buy_count_bc: 0,
+        proven_wallet_buy_sol_total_bc: 0.0,
+        proven_wallet_sell_count_bc: 0,
+        proven_wallet_sell_sol_total_bc: 0.0,
+        proven_wallet_unique_buyers_bc: std::collections::HashSet::new(),
+        proven_wallet_unique_sellers_bc: std::collections::HashSet::new(),
         unique_buyers: std::collections::HashSet::new(),
         trade_timestamps: vec![],
         trade_log: vec![],
@@ -2001,6 +2381,7 @@ async fn handle_token_trade(
     cfg: &Arc<AppConfig>,
     supabase: &Arc<SupabaseClient>,
     bc_cache: &BcScoreCache,
+    proven_wallet_roster: &HashMap<Pubkey, ProvenWalletInfo>,
 ) -> Result<()> {
     let mint_str = v
         .get("mint")
@@ -2095,6 +2476,12 @@ async fn handle_token_trade(
                         entry.creator_last_buy_progress_pct = Some(bc_progress_pct_at_trade);
                     }
                 }
+
+                if proven_wallet_roster.contains_key(&trader_pubkey) {
+                    entry.proven_wallet_buy_count_bc += 1;
+                    entry.proven_wallet_buy_sol_total_bc += sol_amount;
+                    entry.proven_wallet_unique_buyers_bc.insert(trader_pubkey);
+                }
             }
         }
         "sell" => {
@@ -2107,6 +2494,12 @@ async fn handle_token_trade(
                 if trader_pubkey == entry.creator_wallet {
                     entry.creator_sell_count_bc += 1;
                     entry.creator_sell_sol_total_bc += sol_amount;
+                }
+
+                if proven_wallet_roster.contains_key(&trader_pubkey) {
+                    entry.proven_wallet_sell_count_bc += 1;
+                    entry.proven_wallet_sell_sol_total_bc += sol_amount;
+                    entry.proven_wallet_unique_sellers_bc.insert(trader_pubkey);
                 }
             }
         }
@@ -2511,6 +2904,7 @@ async fn handle_token_complete(
     supabase: &Arc<SupabaseClient>,
     rpc_url: &str,
     cfg: &Arc<AppConfig>,
+    proven_wallet_roster: &HashMap<Pubkey, ProvenWalletInfo>,
 ) -> Result<()> {
     let mint_str = v
         .get("mint")
@@ -2845,9 +3239,12 @@ async fn handle_token_complete(
         creator_rebuy,
         buy_sell_ratio,
         narrative_cluster,
+        post_grad_flow_seed,
     ) = match watchlist.remove(mint_str) {
         Some(entry) => {
             let elapsed_secs = (now_ms - entry.detected_at) as f64 / 1_000.0;
+            let post_grad_flow_seed =
+                build_post_grad_flow_seed(&entry, mint_str, cfg, proven_wallet_roster);
             // Compute creator_rebuy from trade_log
             let cr = entry
                 .trade_log
@@ -2878,6 +3275,7 @@ async fn handle_token_complete(
                 cr,
                 bsr,
                 entry.narrative_cluster_context,
+                post_grad_flow_seed,
             )
         }
         None => {
@@ -2932,6 +3330,7 @@ async fn handle_token_complete(
                 0.0,
                 false,
                 fallback_bsr,
+                None,
                 None,
             )
         }
@@ -3076,8 +3475,11 @@ async fn handle_token_complete(
     // ── Mark graduated in bonding_curve_signals + bc_paper_trades ──
     {
         let supabase_grad = Arc::clone(supabase);
+        let cfg_grad = Arc::clone(cfg);
         let mint_for_grad = mint_str.to_string();
         let grad_liquidity = initial_liquidity_sol;
+        let rpc_url_for_shadow = rpc_url.to_string();
+        let flow_seed_for_grad = post_grad_flow_seed;
         tokio::spawn(async move {
             let now_rfc = chrono::Utc::now().to_rfc3339();
 
@@ -3195,7 +3597,14 @@ async fn handle_token_complete(
 
             // Schedule post-graduation price tracking (separate spawn so it
             // doesn't block the graduation handler for 1+ hour)
-            tokio::spawn(spawn_bc_price_tracker(supabase_grad, mint_for_grad));
+            tokio::spawn(spawn_bc_price_tracker(
+                supabase_grad,
+                cfg_grad,
+                mint_for_grad,
+                grad_liquidity,
+                rpc_url_for_shadow,
+                flow_seed_for_grad,
+            ));
         });
     }
 
@@ -3467,6 +3876,7 @@ fn build_signal_payload(entry: &WatchlistEntry, mint_str: &str) -> serde_json::V
         }
     }
     let creator_metrics = compute_creator_bc_metrics(entry);
+    let flow_metrics = compute_flow_quality_metrics(entry, 5);
 
     // Buy velocity: max buys in any 30-second window
     let buy_velocity_30s = compute_buy_velocity(&entry.trade_log, 30_000);
@@ -3498,6 +3908,25 @@ fn build_signal_payload(entry: &WatchlistEntry, mint_str: &str) -> serde_json::V
         "whale_buy": whale_buy_count > 0,
         "whale_buy_max_sol": whale_buy_max_sol,
         "whale_buy_count": whale_buy_count,
+        "whale_buy_sol_total": flow_metrics.whale_buy_sol_total,
+        "whale_sell_count": flow_metrics.whale_sell_count,
+        "whale_sell_sol_total": flow_metrics.whale_sell_sol_total,
+        "whale_sell_max_sol": flow_metrics.whale_sell_max_sol,
+        "whale_net_sol": flow_metrics.whale_net_sol,
+        "whale_buy_share_pct": flow_metrics.whale_buy_share_pct,
+        "whale_sell_pressure_pct": flow_metrics.whale_sell_pressure_pct,
+        "early_buyer_buy_count": flow_metrics.early_buyer_buy_count,
+        "early_buyer_buy_sol_total": flow_metrics.early_buyer_buy_sol_total,
+        "early_buyer_sell_count": flow_metrics.early_buyer_sell_count,
+        "early_buyer_sell_sol_total": flow_metrics.early_buyer_sell_sol_total,
+        "early_buyer_net_sol": flow_metrics.early_buyer_net_sol,
+        "proven_wallet_buy_count_bc": flow_metrics.proven_wallet_buy_count,
+        "proven_wallet_buy_sol_total_bc": flow_metrics.proven_wallet_buy_sol_total,
+        "proven_wallet_sell_count_bc": flow_metrics.proven_wallet_sell_count,
+        "proven_wallet_sell_sol_total_bc": flow_metrics.proven_wallet_sell_sol_total,
+        "proven_wallet_net_sol_bc": flow_metrics.proven_wallet_net_sol,
+        "proven_wallet_unique_buyers_bc": flow_metrics.proven_wallet_unique_buyers,
+        "proven_wallet_unique_sellers_bc": flow_metrics.proven_wallet_unique_sellers,
         "buy_velocity_30s": buy_velocity_30s,
         "zero_sells": zero_sells,
         "creator_rebuy": creator_rebuy,
@@ -3526,6 +3955,9 @@ fn build_signal_payload(entry: &WatchlistEntry, mint_str: &str) -> serde_json::V
         "label_repeat_prior_mints_6h": entry.prior_same_label_mints_6h,
         "label_repeat_prior_creators_6h": entry.prior_same_label_creators_6h,
         "label_repeat_seconds_since_last_seen": entry.seconds_since_label_seen,
+        "creator_prior_mints_6h": entry.creator_prior_mints_6h,
+        "creator_same_label_prior_mints_6h": entry.creator_same_label_prior_mints_6h,
+        "creator_seconds_since_last_mint": entry.creator_seconds_since_last_mint,
         "probe_add_probe_buy_count": if entry.probe_add_probe_recorded { Some(entry.probe_add_probe_buy_count) } else { None },
         "probe_add_probe_unique_buyers": if entry.probe_add_probe_recorded { Some(entry.probe_add_probe_unique_buyers) } else { None },
         "probe_add_probe_volume_sol": if entry.probe_add_probe_recorded { Some(entry.probe_add_probe_volume_sol) } else { None },
@@ -3606,6 +4038,350 @@ fn build_signal_payload(entry: &WatchlistEntry, mint_str: &str) -> serde_json::V
         "creator_sell_sol_total_bc": creator_metrics.creator_sell_sol_total_bc,
         "creator_net_sol_bc": creator_metrics.creator_net_sol_bc,
         "creator_buy_share_pct": creator_metrics.creator_buy_share_pct,
+        "proven_wallet_buy_count_bc": flow_metrics.proven_wallet_buy_count,
+        "proven_wallet_buy_sol_total_bc": flow_metrics.proven_wallet_buy_sol_total,
+        "proven_wallet_sell_count_bc": flow_metrics.proven_wallet_sell_count,
+        "proven_wallet_sell_sol_total_bc": flow_metrics.proven_wallet_sell_sol_total,
+        "proven_wallet_net_sol_bc": flow_metrics.proven_wallet_net_sol,
+        "creator_prior_mints_6h": entry.creator_prior_mints_6h,
+        "creator_same_label_prior_mints_6h": entry.creator_same_label_prior_mints_6h,
+        "creator_seconds_since_last_mint": entry.creator_seconds_since_last_mint,
+    })
+}
+
+fn compute_narrative_sequence_score(entry: &WatchlistEntry) -> f64 {
+    let mut score = 0.0_f64;
+    if entry.prior_same_label_mints_6h > 0 {
+        score += 20.0;
+    }
+    if entry.prior_same_label_creators_6h >= 2 {
+        score += 20.0;
+    } else if entry.prior_same_label_creators_6h == 1 {
+        score += 10.0;
+    }
+    if matches!(entry.seconds_since_label_seen, Some(gap) if gap <= 60) {
+        score += 25.0;
+    } else if matches!(entry.seconds_since_label_seen, Some(gap) if gap <= 300) {
+        score += 15.0;
+    }
+    let cluster_rank = entry.prior_same_label_mints_6h + 1;
+    if cluster_rank <= 4 {
+        score += 15.0;
+    } else if cluster_rank > 10 {
+        score -= 15.0;
+    }
+    if entry.creator_same_label_prior_mints_6h == 0 {
+        score += 10.0;
+    }
+    score.clamp(0.0, 100.0)
+}
+
+fn build_post_grad_flow_seed(
+    entry: &WatchlistEntry,
+    mint_str: &str,
+    cfg: &Arc<AppConfig>,
+    proven_wallet_roster: &HashMap<Pubkey, ProvenWalletInfo>,
+) -> Option<PostGradFlowSeed> {
+    let detection_cfg = &cfg.strategy.detection;
+    if !detection_cfg.post_grad_flow_shadow_enabled {
+        return None;
+    }
+
+    let creator_rebuy = compute_current_creator_rebuy(entry);
+    let creator_metrics = compute_creator_bc_metrics(entry);
+    let flow_metrics = compute_flow_quality_metrics(entry, detection_cfg.early_buyer_rebuy_first_n);
+    let whale_buy = flow_metrics.whale_buy_count > 0;
+    let buy_sell_ratio = compute_current_buy_sell_ratio(entry);
+    let bc_progress_pct = if entry.last_v_sol_reserves > 0.0 {
+        (((entry.last_v_sol_reserves - 30.0) / 85.0) * 100.0).clamp(0.0, 100.0)
+    } else {
+        100.0
+    };
+    let bc_score = compute_bc_score(
+        entry.unique_buyers.len(),
+        buy_sell_ratio,
+        creator_rebuy,
+        whale_buy,
+        entry.buy_count,
+        entry.sell_count,
+        entry.total_volume_sol,
+    );
+    let narrative_score = entry
+        .narrative_cluster_context
+        .as_ref()
+        .map(|ctx| ctx.narrative_score);
+    let narrative_sequence_score = compute_narrative_sequence_score(entry);
+
+    let mut gate_reasons = Vec::new();
+    if bc_score >= detection_cfg.post_grad_flow_shadow_min_score {
+        gate_reasons.push(format!("bc_score_{:.1}", bc_score));
+    }
+    if narrative_score.is_some() {
+        gate_reasons.push("narrative_cluster_armed".to_string());
+    }
+    if flow_metrics.proven_wallet_buy_count > 0 {
+        gate_reasons.push("proven_wallet_overlap".to_string());
+    }
+    if flow_metrics.whale_net_sol >= 3.0 || flow_metrics.whale_buy_sol_total >= 5.0 {
+        gate_reasons.push("whale_net_support".to_string());
+    }
+    if creator_metrics.creator_net_sol_bc >= 1.0 && creator_metrics.creator_sell_count_bc == 0 {
+        gate_reasons.push("creator_net_buy_no_sell".to_string());
+    }
+    if gate_reasons.is_empty() {
+        return None;
+    }
+
+    let top_holder_eligible = detection_cfg.top_holder_flow_shadow_enabled
+        && (bc_score >= detection_cfg.top_holder_flow_shadow_min_score
+            || narrative_score
+                .map(|score| score >= detection_cfg.top_holder_flow_shadow_min_score)
+                .unwrap_or(false)
+            || flow_metrics.proven_wallet_buy_count > 0);
+
+    let creator_sold_during_bc = entry
+        .trade_log
+        .iter()
+        .any(|&(_, _, is_buy, wallet)| !is_buy && wallet == entry.creator_wallet);
+    let bc_price_sol_per_token = if entry.last_v_token_reserves > 0.0 {
+        entry.last_v_sol_reserves / entry.last_v_token_reserves
+    } else {
+        0.0
+    };
+    let entry_price_usd = bc_price_usd_from_sol(bc_price_sol_per_token, DEFAULT_SOL_USD);
+    let token_age_secs =
+        (chrono::Utc::now().timestamp_millis() - entry.detected_at) as f64 / 1_000.0;
+
+    let mut payload = serde_json::Map::new();
+    payload.insert("mint".to_string(), serde_json::json!(mint_str));
+    payload.insert(
+        "symbol".to_string(),
+        serde_json::json!(entry.symbol.clone()),
+    );
+    payload.insert("name".to_string(), serde_json::json!(entry.name.clone()));
+    payload.insert(
+        "creator_wallet".to_string(),
+        serde_json::json!(entry.creator_wallet.to_string()),
+    );
+    payload.insert(
+        "token_created_at_ms".to_string(),
+        serde_json::json!(entry.detected_at),
+    );
+    payload.insert("gate_reasons".to_string(), serde_json::json!(gate_reasons));
+    payload.insert("bc_score".to_string(), serde_json::json!(bc_score));
+    payload.insert(
+        "narrative_score".to_string(),
+        serde_json::json!(narrative_score),
+    );
+    payload.insert(
+        "narrative_sequence_score".to_string(),
+        serde_json::json!(narrative_sequence_score),
+    );
+    payload.insert(
+        "normalized_label".to_string(),
+        serde_json::json!(entry.normalized_label.clone()),
+    );
+    payload.insert(
+        "cluster_rank".to_string(),
+        serde_json::json!(entry.prior_same_label_mints_6h + 1),
+    );
+    payload.insert(
+        "prior_same_label_mints_6h".to_string(),
+        serde_json::json!(entry.prior_same_label_mints_6h),
+    );
+    payload.insert(
+        "prior_same_label_creators_6h".to_string(),
+        serde_json::json!(entry.prior_same_label_creators_6h),
+    );
+    payload.insert(
+        "seconds_since_label_seen".to_string(),
+        serde_json::json!(entry.seconds_since_label_seen),
+    );
+    payload.insert(
+        "creator_prior_mints_6h".to_string(),
+        serde_json::json!(entry.creator_prior_mints_6h),
+    );
+    payload.insert(
+        "creator_same_label_prior_mints_6h".to_string(),
+        serde_json::json!(entry.creator_same_label_prior_mints_6h),
+    );
+    payload.insert(
+        "creator_seconds_since_last_mint".to_string(),
+        serde_json::json!(entry.creator_seconds_since_last_mint),
+    );
+    payload.insert(
+        "entry_token_age_secs".to_string(),
+        serde_json::json!(token_age_secs),
+    );
+    payload.insert(
+        "entry_volume_sol".to_string(),
+        serde_json::json!(entry.total_volume_sol),
+    );
+    payload.insert(
+        "entry_buy_count".to_string(),
+        serde_json::json!(entry.buy_count),
+    );
+    payload.insert(
+        "entry_sell_count".to_string(),
+        serde_json::json!(entry.sell_count),
+    );
+    payload.insert(
+        "entry_unique_buyers".to_string(),
+        serde_json::json!(entry.unique_buyers.len()),
+    );
+    payload.insert(
+        "entry_buy_pressure_pct".to_string(),
+        serde_json::json!(entry.buy_pressure_pct()),
+    );
+    payload.insert(
+        "entry_buy_sell_ratio".to_string(),
+        serde_json::json!(buy_sell_ratio),
+    );
+    payload.insert(
+        "entry_creator_rebuy".to_string(),
+        serde_json::json!(creator_rebuy),
+    );
+    payload.insert(
+        "creator_sold_during_bc".to_string(),
+        serde_json::json!(creator_sold_during_bc),
+    );
+    payload.insert(
+        "creator_buy_count_bc".to_string(),
+        serde_json::json!(creator_metrics.creator_buy_count_bc),
+    );
+    payload.insert(
+        "creator_buy_sol_total_bc".to_string(),
+        serde_json::json!(creator_metrics.creator_buy_sol_total_bc),
+    );
+    payload.insert(
+        "creator_buy_max_sol_bc".to_string(),
+        serde_json::json!(creator_metrics.creator_buy_max_sol_bc),
+    );
+    payload.insert(
+        "creator_sell_count_bc".to_string(),
+        serde_json::json!(creator_metrics.creator_sell_count_bc),
+    );
+    payload.insert(
+        "creator_sell_sol_total_bc".to_string(),
+        serde_json::json!(creator_metrics.creator_sell_sol_total_bc),
+    );
+    payload.insert(
+        "creator_net_sol_bc".to_string(),
+        serde_json::json!(creator_metrics.creator_net_sol_bc),
+    );
+    payload.insert(
+        "creator_buy_share_pct".to_string(),
+        serde_json::json!(creator_metrics.creator_buy_share_pct),
+    );
+    payload.insert(
+        "whale_buy_count".to_string(),
+        serde_json::json!(flow_metrics.whale_buy_count),
+    );
+    payload.insert(
+        "whale_buy_sol_total".to_string(),
+        serde_json::json!(flow_metrics.whale_buy_sol_total),
+    );
+    payload.insert(
+        "whale_buy_max_sol".to_string(),
+        serde_json::json!(flow_metrics.whale_buy_max_sol),
+    );
+    payload.insert(
+        "whale_sell_count".to_string(),
+        serde_json::json!(flow_metrics.whale_sell_count),
+    );
+    payload.insert(
+        "whale_sell_sol_total".to_string(),
+        serde_json::json!(flow_metrics.whale_sell_sol_total),
+    );
+    payload.insert(
+        "whale_sell_max_sol".to_string(),
+        serde_json::json!(flow_metrics.whale_sell_max_sol),
+    );
+    payload.insert(
+        "whale_net_sol".to_string(),
+        serde_json::json!(flow_metrics.whale_net_sol),
+    );
+    payload.insert(
+        "early_buyer_buy_count".to_string(),
+        serde_json::json!(flow_metrics.early_buyer_buy_count),
+    );
+    payload.insert(
+        "early_buyer_buy_sol_total".to_string(),
+        serde_json::json!(flow_metrics.early_buyer_buy_sol_total),
+    );
+    payload.insert(
+        "early_buyer_sell_count".to_string(),
+        serde_json::json!(flow_metrics.early_buyer_sell_count),
+    );
+    payload.insert(
+        "early_buyer_sell_sol_total".to_string(),
+        serde_json::json!(flow_metrics.early_buyer_sell_sol_total),
+    );
+    payload.insert(
+        "early_buyer_net_sol".to_string(),
+        serde_json::json!(flow_metrics.early_buyer_net_sol),
+    );
+    payload.insert(
+        "proven_wallet_buy_count_bc".to_string(),
+        serde_json::json!(flow_metrics.proven_wallet_buy_count),
+    );
+    payload.insert(
+        "proven_wallet_buy_sol_total_bc".to_string(),
+        serde_json::json!(flow_metrics.proven_wallet_buy_sol_total),
+    );
+    payload.insert(
+        "proven_wallet_sell_count_bc".to_string(),
+        serde_json::json!(flow_metrics.proven_wallet_sell_count),
+    );
+    payload.insert(
+        "proven_wallet_sell_sol_total_bc".to_string(),
+        serde_json::json!(flow_metrics.proven_wallet_sell_sol_total),
+    );
+    payload.insert(
+        "proven_wallet_net_sol_bc".to_string(),
+        serde_json::json!(flow_metrics.proven_wallet_net_sol),
+    );
+    payload.insert(
+        "proven_wallet_unique_buyers_bc".to_string(),
+        serde_json::json!(flow_metrics.proven_wallet_unique_buyers),
+    );
+    payload.insert(
+        "proven_wallet_unique_sellers_bc".to_string(),
+        serde_json::json!(flow_metrics.proven_wallet_unique_sellers),
+    );
+    payload.insert(
+        "proven_wallets_seen".to_string(),
+        proven_wallet_overlap_json(entry, proven_wallet_roster),
+    );
+    payload.insert(
+        "bc_progress_pct".to_string(),
+        serde_json::json!(bc_progress_pct),
+    );
+    payload.insert(
+        "bc_virtual_sol_reserves".to_string(),
+        serde_json::json!(if entry.last_v_sol_reserves > 0.0 {
+            Some(entry.last_v_sol_reserves)
+        } else {
+            None
+        }),
+    );
+    payload.insert(
+        "entry_price_usd".to_string(),
+        serde_json::json!(if entry_price_usd > 0.0 {
+            Some(entry_price_usd)
+        } else {
+            None
+        }),
+    );
+    payload.insert(
+        "top_holder_eligible".to_string(),
+        serde_json::json!(top_holder_eligible),
+    );
+    payload.insert("status".to_string(), serde_json::json!("armed"));
+
+    Some(PostGradFlowSeed {
+        payload,
+        top_holder_eligible,
     })
 }
 
@@ -4216,7 +4992,14 @@ async fn fetch_pumpfun_coin(mint: &str) -> Option<serde_json::Value> {
 
 /// Post-graduation price tracker: records price at T+1m, 5m, 15m, 1h
 /// and updates the bonding_curve_signals row with multipliers.
-async fn spawn_bc_price_tracker(supabase: Arc<SupabaseClient>, mint: String) {
+async fn spawn_bc_price_tracker(
+    supabase: Arc<SupabaseClient>,
+    cfg: Arc<AppConfig>,
+    mint: String,
+    initial_liquidity_sol: f64,
+    rpc_url: String,
+    flow_seed: Option<PostGradFlowSeed>,
+) {
     let intervals: &[(u64, &str)] = &[
         (60, "price_1m_multiplier"),
         (300, "price_5m_multiplier"),
@@ -4292,6 +5075,25 @@ async fn spawn_bc_price_tracker(supabase: Arc<SupabaseClient>, mint: String) {
     }
 
     let mut peak_price: f64 = baseline;
+
+    if let Some(seed) = flow_seed {
+        let supabase_flow = Arc::clone(&supabase);
+        let cfg_flow = Arc::clone(&cfg);
+        let mint_flow = mint.clone();
+        let rpc_url_flow = rpc_url.clone();
+        tokio::spawn(async move {
+            spawn_post_grad_flow_shadow_tracker(
+                supabase_flow,
+                cfg_flow,
+                mint_flow,
+                seed,
+                baseline,
+                initial_liquidity_sol,
+                rpc_url_flow,
+            )
+            .await;
+        });
+    }
 
     // Map signal column names to bc_paper_trades column names
     let pt_columns: &[&str] = &["price_1m", "price_5m", "price_15m", "price_1h"];
@@ -4424,24 +5226,556 @@ async fn spawn_bc_price_tracker(supabase: Arc<SupabaseClient>, mint: String) {
         .await;
 }
 
+async fn insert_post_grad_flow_shadow(
+    supabase: &SupabaseClient,
+    payload: &serde_json::Value,
+    mint: &str,
+) {
+    let url = format!("{}/post_grad_flow_shadow", supabase.base_url);
+    match supabase.client.post(&url).json(payload).send().await {
+        Ok(resp) if resp.status().is_success() => {}
+        Ok(resp) => {
+            let body = resp.text().await.unwrap_or_default();
+            warn!(mint = %mint, "post_grad_flow_shadow INSERT failed: {}", body);
+        }
+        Err(e) => warn!(mint = %mint, "post_grad_flow_shadow INSERT error: {}", e),
+    }
+}
+
+async fn patch_post_grad_flow_shadow(
+    supabase: &SupabaseClient,
+    mint: &str,
+    payload: serde_json::Value,
+) {
+    let url = format!(
+        "{}/post_grad_flow_shadow?mint=eq.{}",
+        supabase.base_url, mint
+    );
+    match supabase.client.patch(&url).json(&payload).send().await {
+        Ok(resp) if resp.status().is_success() => {}
+        Ok(resp) => {
+            let body = resp.text().await.unwrap_or_default();
+            debug!(mint = %mint, "post_grad_flow_shadow PATCH failed: {}", body);
+        }
+        Err(e) => debug!(mint = %mint, "post_grad_flow_shadow PATCH error: {}", e),
+    }
+}
+
+async fn spawn_post_grad_flow_shadow_tracker(
+    supabase: Arc<SupabaseClient>,
+    cfg: Arc<AppConfig>,
+    mint: String,
+    seed: PostGradFlowSeed,
+    baseline_price: f64,
+    initial_liquidity_sol: f64,
+    rpc_url: String,
+) {
+    let Some(_active) = try_acquire_active_counter(
+        &POST_GRAD_FLOW_ACTIVE,
+        cfg.strategy.detection.post_grad_flow_shadow_max_active,
+    ) else {
+        debug!(mint = %mint, "post-grad flow shadow skipped — active cap reached");
+        return;
+    };
+
+    let now_rfc = chrono::Utc::now().to_rfc3339();
+    let mut initial_payload = seed.payload.clone();
+    initial_payload.insert("graduated_at".to_string(), serde_json::json!(&now_rfc));
+    initial_payload.insert(
+        "initial_liquidity_sol".to_string(),
+        serde_json::json!(initial_liquidity_sol),
+    );
+    initial_payload.insert(
+        "baseline_price".to_string(),
+        serde_json::json!(baseline_price),
+    );
+    initial_payload.insert("status".to_string(), serde_json::json!("tracking"));
+    initial_payload.insert(
+        "shadow_version".to_string(),
+        serde_json::json!("v18.9.2-flow-quality-shadow"),
+    );
+    insert_post_grad_flow_shadow(
+        &supabase,
+        &serde_json::Value::Object(initial_payload),
+        &mint,
+    )
+    .await;
+
+    if seed.top_holder_eligible {
+        let supabase_holders = Arc::clone(&supabase);
+        let cfg_holders = Arc::clone(&cfg);
+        let mint_holders = mint.clone();
+        let rpc_holders = rpc_url.clone();
+        tokio::spawn(async move {
+            spawn_top_holder_flow_shadow_tracker(
+                supabase_holders,
+                cfg_holders,
+                mint_holders,
+                rpc_holders,
+            )
+            .await;
+        });
+    }
+
+    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    let price_30s = fetch_bc_price(&mint).await;
+    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    let price_60s = fetch_bc_price(&mint).await;
+
+    let mut samples = vec![baseline_price];
+    if let Some(p) = price_30s.filter(|p| *p > 0.0) {
+        samples.push(p);
+    }
+    if let Some(p) = price_60s.filter(|p| *p > 0.0) {
+        samples.push(p);
+    }
+    let first_minute_peak = samples.iter().copied().fold(baseline_price, f64::max);
+    let first_minute_low = samples.iter().copied().fold(baseline_price, f64::min);
+    let close_price = price_60s.or(price_30s).unwrap_or(baseline_price);
+    let close_multiplier = if baseline_price > 0.0 {
+        close_price / baseline_price
+    } else {
+        0.0
+    };
+    let first_minute_peak_multiplier = if baseline_price > 0.0 {
+        first_minute_peak / baseline_price
+    } else {
+        0.0
+    };
+    let first_minute_drawdown_pct = if first_minute_peak > 0.0 {
+        ((first_minute_peak - first_minute_low) / first_minute_peak * 100.0).max(0.0)
+    } else {
+        0.0
+    };
+    let first_minute_recovery_pct = if first_minute_peak > first_minute_low {
+        ((close_price - first_minute_low) / (first_minute_peak - first_minute_low) * 100.0)
+            .clamp(0.0, 100.0)
+    } else {
+        100.0
+    };
+    let absorption_status = if close_multiplier >= 1.20 {
+        "continued"
+    } else if first_minute_drawdown_pct <= 15.0 && close_multiplier >= 0.95 {
+        "absorbed"
+    } else if close_multiplier <= 0.75 {
+        "dumped"
+    } else {
+        "neutral"
+    };
+
+    let patch = serde_json::json!({
+        "price_30s": price_30s,
+        "price_60s": price_60s,
+        "multiplier_30s": price_30s.map(|p| p / baseline_price),
+        "multiplier_60s": price_60s.map(|p| p / baseline_price),
+        "first_minute_peak_price": first_minute_peak,
+        "first_minute_low_price": first_minute_low,
+        "first_minute_peak_multiplier": first_minute_peak_multiplier,
+        "first_minute_close_multiplier": close_multiplier,
+        "first_minute_drawdown_pct": first_minute_drawdown_pct,
+        "first_minute_recovery_pct": first_minute_recovery_pct,
+        "absorption_status": absorption_status,
+        "status": "first_minute_completed",
+        "updated_at": chrono::Utc::now().to_rfc3339(),
+    });
+    patch_post_grad_flow_shadow(&supabase, &mint, patch).await;
+}
+
+fn top_holder_snapshot_json(snapshot: &TopHolderSnapshot) -> serde_json::Value {
+    serde_json::json!({
+        "status": snapshot.status,
+        "captured_at": snapshot.captured_at,
+        "supply": snapshot.supply,
+        "top1_pct": snapshot.top1_pct,
+        "top5_pct": snapshot.top5_pct,
+        "top10_pct": snapshot.top10_pct,
+        "owner_count": snapshot.owner_count,
+        "rpc_requests": snapshot.rpc_requests,
+        "error": snapshot.error,
+        "owners": snapshot.owners.iter().map(|owner| serde_json::json!({
+            "token_account": owner.token_account,
+            "owner": owner.owner,
+            "amount": owner.amount,
+            "pct": owner.pct,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn compute_top_holder_flow_json(
+    initial: &TopHolderSnapshot,
+    final_snapshot: &TopHolderSnapshot,
+) -> serde_json::Value {
+    if initial.status != "ok" || final_snapshot.status != "ok" {
+        return serde_json::json!({
+            "status": "incomplete",
+            "initial_status": initial.status,
+            "final_status": final_snapshot.status,
+        });
+    }
+
+    let initial_by_owner: HashMap<&str, f64> = initial
+        .owners
+        .iter()
+        .map(|owner| (owner.owner.as_str(), owner.amount))
+        .collect();
+    let final_by_owner: HashMap<&str, f64> = final_snapshot
+        .owners
+        .iter()
+        .map(|owner| (owner.owner.as_str(), owner.amount))
+        .collect();
+    let mut retained_owner_count = 0_usize;
+    let mut shared_initial_amount = 0.0_f64;
+    let mut shared_final_amount = 0.0_f64;
+    for (owner, initial_amount) in &initial_by_owner {
+        if let Some(final_amount) = final_by_owner.get(owner) {
+            retained_owner_count += 1;
+            shared_initial_amount += *initial_amount;
+            shared_final_amount += *final_amount;
+        }
+    }
+
+    let supply = final_snapshot.supply.or(initial.supply).unwrap_or(0.0);
+    let shared_amount_delta_pct = if supply > 0.0 {
+        (shared_final_amount - shared_initial_amount) / supply * 100.0
+    } else {
+        0.0
+    };
+    let top10_delta_pct =
+        final_snapshot.top10_pct.unwrap_or(0.0) - initial.top10_pct.unwrap_or(0.0);
+    let top1_delta_pct = final_snapshot.top1_pct.unwrap_or(0.0) - initial.top1_pct.unwrap_or(0.0);
+
+    serde_json::json!({
+        "status": "ok",
+        "retained_top10_owner_count": retained_owner_count,
+        "shared_initial_amount": shared_initial_amount,
+        "shared_final_amount": shared_final_amount,
+        "shared_amount_delta_pct": shared_amount_delta_pct,
+        "top10_delta_pct": top10_delta_pct,
+        "top1_delta_pct": top1_delta_pct,
+        "concentration_increased": top10_delta_pct > 2.0,
+        "top_owner_dumped": top1_delta_pct < -2.0,
+    })
+}
+
+async fn spawn_top_holder_flow_shadow_tracker(
+    supabase: Arc<SupabaseClient>,
+    cfg: Arc<AppConfig>,
+    mint: String,
+    rpc_url: String,
+) {
+    let Some(_active) = try_acquire_active_counter(
+        &TOP_HOLDER_FLOW_ACTIVE,
+        cfg.strategy.detection.top_holder_flow_shadow_max_active,
+    ) else {
+        patch_post_grad_flow_shadow(
+            &supabase,
+            &mint,
+            serde_json::json!({
+                "top_holder_status": "skipped_active_cap",
+                "updated_at": chrono::Utc::now().to_rfc3339(),
+            }),
+        )
+        .await;
+        return;
+    };
+
+    let snapshot_rpc_url = cfg.env.helius_rpc_url.clone().unwrap_or(rpc_url);
+    let initial = fetch_top_holder_snapshot(&snapshot_rpc_url, &mint).await;
+    patch_post_grad_flow_shadow(
+        &supabase,
+        &mint,
+        serde_json::json!({
+            "top_holder_status": initial.status,
+            "top_holder_initial": top_holder_snapshot_json(&initial),
+            "top_holder_top10_initial_pct": initial.top10_pct,
+            "top_holder_top1_initial_pct": initial.top1_pct,
+            "updated_at": chrono::Utc::now().to_rfc3339(),
+        }),
+    )
+    .await;
+
+    tokio::time::sleep(std::time::Duration::from_secs(
+        cfg.strategy.detection.top_holder_flow_shadow_delay_secs,
+    ))
+    .await;
+
+    let final_snapshot = fetch_top_holder_snapshot(&snapshot_rpc_url, &mint).await;
+    let flow = compute_top_holder_flow_json(&initial, &final_snapshot);
+    patch_post_grad_flow_shadow(
+        &supabase,
+        &mint,
+        serde_json::json!({
+            "top_holder_status": final_snapshot.status,
+            "top_holder_final": top_holder_snapshot_json(&final_snapshot),
+            "top_holder_flow": flow,
+            "top_holder_top10_final_pct": final_snapshot.top10_pct,
+            "top_holder_top1_final_pct": final_snapshot.top1_pct,
+            "top_holder_completed_at": chrono::Utc::now().to_rfc3339(),
+            "updated_at": chrono::Utc::now().to_rfc3339(),
+        }),
+    )
+    .await;
+}
+
+fn ui_amount_from_raw(amount: &str, decimals: u8, ui_amount: Option<f64>) -> f64 {
+    ui_amount.unwrap_or_else(|| {
+        amount
+            .parse::<f64>()
+            .map(|raw| raw / 10_f64.powi(decimals as i32))
+            .unwrap_or(0.0)
+    })
+}
+
+async fn fetch_top_holder_snapshot(rpc_url: &str, mint: &str) -> TopHolderSnapshot {
+    let captured_at = chrono::Utc::now().to_rfc3339();
+    let mint_pubkey = match Pubkey::from_str(mint) {
+        Ok(pk) => pk,
+        Err(e) => {
+            return TopHolderSnapshot {
+                status: "invalid_mint".to_string(),
+                captured_at,
+                supply: None,
+                top1_pct: None,
+                top5_pct: None,
+                top10_pct: None,
+                owner_count: 0,
+                rpc_requests: 0,
+                error: Some(e.to_string()),
+                owners: Vec::new(),
+            }
+        }
+    };
+    let rpc = RpcClient::new_with_timeout(rpc_url.to_string(), std::time::Duration::from_secs(5));
+    let mut rpc_requests = 0_u32;
+    let guard = Arc::clone(&shadow_api_guards().helius_rpc);
+
+    let supply = {
+        let Some(_permit) = guard.acquire().await else {
+            return TopHolderSnapshot {
+                status: "skipped_rate_limit_supply".to_string(),
+                captured_at,
+                supply: None,
+                top1_pct: None,
+                top5_pct: None,
+                top10_pct: None,
+                owner_count: 0,
+                rpc_requests,
+                error: None,
+                owners: Vec::new(),
+            };
+        };
+        rpc_requests += 1;
+        match rpc.get_token_supply(&mint_pubkey).await {
+            Ok(supply) => {
+                guard.record_success();
+                ui_amount_from_raw(&supply.amount, supply.decimals, supply.ui_amount)
+            }
+            Err(e) => {
+                guard.record_failure("top_holder_supply");
+                return TopHolderSnapshot {
+                    status: "supply_error".to_string(),
+                    captured_at,
+                    supply: None,
+                    top1_pct: None,
+                    top5_pct: None,
+                    top10_pct: None,
+                    owner_count: 0,
+                    rpc_requests,
+                    error: Some(e.to_string()),
+                    owners: Vec::new(),
+                };
+            }
+        }
+    };
+
+    let largest = {
+        let Some(_permit) = guard.acquire().await else {
+            return TopHolderSnapshot {
+                status: "skipped_rate_limit_largest".to_string(),
+                captured_at,
+                supply: Some(supply),
+                top1_pct: None,
+                top5_pct: None,
+                top10_pct: None,
+                owner_count: 0,
+                rpc_requests,
+                error: None,
+                owners: Vec::new(),
+            };
+        };
+        rpc_requests += 1;
+        match rpc.get_token_largest_accounts(&mint_pubkey).await {
+            Ok(accounts) => {
+                guard.record_success();
+                accounts
+            }
+            Err(e) => {
+                guard.record_failure("top_holder_largest_accounts");
+                return TopHolderSnapshot {
+                    status: "largest_accounts_error".to_string(),
+                    captured_at,
+                    supply: Some(supply),
+                    top1_pct: None,
+                    top5_pct: None,
+                    top10_pct: None,
+                    owner_count: 0,
+                    rpc_requests,
+                    error: Some(e.to_string()),
+                    owners: Vec::new(),
+                };
+            }
+        }
+    };
+
+    let ata_pubkeys: Vec<Pubkey> = largest
+        .iter()
+        .take(10)
+        .filter_map(|acct| Pubkey::from_str(&acct.address).ok())
+        .collect();
+    let accounts = if ata_pubkeys.is_empty() {
+        Vec::new()
+    } else {
+        let Some(_permit) = guard.acquire().await else {
+            return TopHolderSnapshot {
+                status: "skipped_rate_limit_accounts".to_string(),
+                captured_at,
+                supply: Some(supply),
+                top1_pct: None,
+                top5_pct: None,
+                top10_pct: None,
+                owner_count: 0,
+                rpc_requests,
+                error: None,
+                owners: Vec::new(),
+            };
+        };
+        rpc_requests += 1;
+        match rpc.get_multiple_accounts(&ata_pubkeys).await {
+            Ok(accounts) => {
+                guard.record_success();
+                accounts
+            }
+            Err(e) => {
+                guard.record_failure("top_holder_get_multiple_accounts");
+                return TopHolderSnapshot {
+                    status: "accounts_error".to_string(),
+                    captured_at,
+                    supply: Some(supply),
+                    top1_pct: None,
+                    top5_pct: None,
+                    top10_pct: None,
+                    owner_count: 0,
+                    rpc_requests,
+                    error: Some(e.to_string()),
+                    owners: Vec::new(),
+                };
+            }
+        }
+    };
+
+    let token_program = Pubkey::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").ok();
+    let token_2022_program = Pubkey::from_str("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb").ok();
+    let mut owners = Vec::new();
+    for (idx, acct) in largest.iter().take(10).enumerate() {
+        let amount = ui_amount_from_raw(
+            &acct.amount.amount,
+            acct.amount.decimals,
+            acct.amount.ui_amount,
+        );
+        let pct = if supply > 0.0 {
+            amount / supply * 100.0
+        } else {
+            0.0
+        };
+        let owner = accounts
+            .get(idx)
+            .and_then(|account_opt| account_opt.as_ref())
+            .and_then(|account| {
+                if account.data.len() < 64 {
+                    return None;
+                }
+                if Some(account.owner) != token_program && Some(account.owner) != token_2022_program
+                {
+                    return None;
+                }
+                Pubkey::try_from(&account.data[32..64]).ok()
+            })
+            .map(|owner| owner.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        owners.push(TopHolderOwnerSnapshot {
+            token_account: acct.address.clone(),
+            owner,
+            amount,
+            pct,
+        });
+    }
+
+    let top1_pct = owners.first().map(|owner| owner.pct);
+    let top5_pct = Some(owners.iter().take(5).map(|owner| owner.pct).sum::<f64>());
+    let top10_pct = Some(owners.iter().take(10).map(|owner| owner.pct).sum::<f64>());
+    TopHolderSnapshot {
+        status: "ok".to_string(),
+        captured_at,
+        supply: Some(supply),
+        top1_pct,
+        top5_pct,
+        top10_pct,
+        owner_count: owners
+            .iter()
+            .filter(|owner| owner.owner != "unknown")
+            .map(|owner| owner.owner.clone())
+            .collect::<HashSet<_>>()
+            .len(),
+        rpc_requests,
+        error: None,
+        owners,
+    }
+}
+
 /// Simple DexScreener price fetch for bonding curve signal tracking.
 async fn fetch_bc_price(mint: &str) -> Option<f64> {
+    let guard = Arc::clone(&shadow_api_guards().dexscreener);
+    let Some(_permit) = guard.acquire().await else {
+        debug!(mint = %mint, "DexScreener fetch skipped — rate guard unavailable");
+        return None;
+    };
+
     let url = format!("https://api.dexscreener.com/latest/dex/tokens/{}", mint);
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .ok()?;
 
-    let resp = client.get(&url).send().await.ok()?;
+    let resp = match client.get(&url).send().await {
+        Ok(resp) => resp,
+        Err(e) => {
+            guard.record_failure("dexscreener_request");
+            debug!(mint = %mint, "DexScreener request failed: {}", e);
+            return None;
+        }
+    };
     if !resp.status().is_success() {
+        guard.record_failure("dexscreener_status");
         return None;
     }
 
-    let json: serde_json::Value = resp.json().await.ok()?;
-    json.get("pairs")
+    let json: serde_json::Value = match resp.json().await {
+        Ok(json) => json,
+        Err(e) => {
+            guard.record_failure("dexscreener_json");
+            debug!(mint = %mint, "DexScreener JSON parse failed: {}", e);
+            return None;
+        }
+    };
+    let price = json
+        .get("pairs")
         .and_then(|p| p.as_array())
         .and_then(|arr| arr.first())
         .and_then(|pair| pair.get("priceUsd"))
         .and_then(|v| v.as_str())
-        .and_then(|s| s.parse::<f64>().ok())
+        .and_then(|s| s.parse::<f64>().ok());
+    if price.is_some() {
+        guard.record_success();
+    }
+    price
 }

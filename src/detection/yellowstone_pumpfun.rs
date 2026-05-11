@@ -31,6 +31,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use base64::Engine as _;
 use futures_util::{SinkExt, StreamExt};
+use solana_sdk::pubkey::Pubkey;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tokio_tungstenite::tungstenite::Message;
@@ -43,7 +44,8 @@ use yellowstone_grpc_proto::geyser::{
 };
 
 use super::pumpfun_ws::{
-    self, RecentLabelObservation, COMPLETE_DEDUP_MAX_ENTRIES, COMPLETE_DEDUP_WINDOW_MS,
+    self, ProvenWalletInfo, RecentCreatorObservation, RecentLabelObservation,
+    COMPLETE_DEDUP_MAX_ENTRIES, COMPLETE_DEDUP_WINDOW_MS,
 };
 use super::types::{BcScoreCache, GraduatedToken, WatchlistEntry};
 use crate::config::AppConfig;
@@ -412,7 +414,10 @@ async fn connect_and_listen(
     // State owned by this task — same shape as pumpfun_ws::connect_and_listen.
     let mut watchlist: HashMap<String, WatchlistEntry> = HashMap::new();
     let mut recent_labels: HashMap<String, Vec<RecentLabelObservation>> = HashMap::new();
+    let mut recent_creators: HashMap<Pubkey, Vec<RecentCreatorObservation>> = HashMap::new();
     let mut emitted_complete: HashMap<String, i64> = HashMap::new();
+    let proven_wallet_roster: HashMap<Pubkey, ProvenWalletInfo> =
+        pumpfun_ws::fetch_proven_wallet_roster(supabase).await;
 
     let mut events_processed: u64 = 0;
     let mut last_log = std::time::Instant::now();
@@ -471,6 +476,7 @@ async fn connect_and_listen(
                 tx,
                 &mut watchlist,
                 &mut recent_labels,
+                &mut recent_creators,
                 &mut emitted_complete,
                 COMPLETE_DEDUP_WINDOW_MS,
                 COMPLETE_DEDUP_MAX_ENTRIES,
@@ -480,6 +486,7 @@ async fn connect_and_listen(
                 rpc_url,
                 cfg,
                 bc_cache,
+                &proven_wallet_roster,
             )
             .await
             {

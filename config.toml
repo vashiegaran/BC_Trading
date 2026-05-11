@@ -66,6 +66,21 @@ early_buyer_rebuy_min_rebuy_wallets = 1
 early_buyer_rebuy_min_rebuy_sol = 0.0
 early_buyer_rebuy_max_progress_pct = 100.0
 
+# post_grad_flow_shadow: observe-only continuation/absorption monitor. It only
+# tracks high-interest graduates (score/proven-wallet/narrative/whale/creator
+# support) and caps concurrent trackers so DexScreener calls stay bounded.
+post_grad_flow_shadow_enabled = true
+post_grad_flow_shadow_min_score = 55.0
+post_grad_flow_shadow_max_active = 20
+
+# top_holder_flow_shadow: observe-only holder-flow snapshots for the strongest
+# high-interest graduates only. Uses RPC guard + max-active cap; never blocks
+# buys/exits and never runs for every token.
+top_holder_flow_shadow_enabled = true
+top_holder_flow_shadow_min_score = 70.0
+top_holder_flow_shadow_max_active = 3
+top_holder_flow_shadow_delay_secs = 300
+
 
 # ============================================================
 # FILTERS

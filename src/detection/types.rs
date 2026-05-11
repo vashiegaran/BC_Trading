@@ -295,6 +295,12 @@ pub struct WatchlistEntry {
     pub prior_same_label_creators_6h: usize,
     /// Seconds since the most recent prior mint with the same normalized label.
     pub seconds_since_label_seen: Option<i64>,
+    /// Number of prior launches from this creator observed in the recent window.
+    pub creator_prior_mints_6h: usize,
+    /// Number of prior launches from this creator with the same normalized label.
+    pub creator_same_label_prior_mints_6h: usize,
+    /// Seconds since this creator's previous observed launch.
+    pub creator_seconds_since_last_mint: Option<i64>,
     /// Cumulative SOL volume traded on the bonding curve.
     pub total_volume_sol: f64,
     /// Cumulative buy-side SOL flow observed on the bonding curve.
@@ -323,6 +329,18 @@ pub struct WatchlistEntry {
     pub creator_sell_count_bc: u64,
     /// Creator sell-side SOL observed during bonding curve.
     pub creator_sell_sol_total_bc: f64,
+    /// Number of active proven-wallet buy transactions observed during bonding curve.
+    pub proven_wallet_buy_count_bc: u64,
+    /// Active proven-wallet buy-side SOL observed during bonding curve.
+    pub proven_wallet_buy_sol_total_bc: f64,
+    /// Number of active proven-wallet sell transactions observed during bonding curve.
+    pub proven_wallet_sell_count_bc: u64,
+    /// Active proven-wallet sell-side SOL observed during bonding curve.
+    pub proven_wallet_sell_sol_total_bc: f64,
+    /// Distinct active proven wallets that bought during bonding curve.
+    pub proven_wallet_unique_buyers_bc: HashSet<Pubkey>,
+    /// Distinct active proven wallets that sold during bonding curve.
+    pub proven_wallet_unique_sellers_bc: HashSet<Pubkey>,
     /// Set of unique buyer wallet addresses seen during bonding curve.
     pub unique_buyers: HashSet<Pubkey>,
     /// Trade timestamps paired with buyer wallet — used for wash-trade detection.
