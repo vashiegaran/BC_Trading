@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tracing::{info, warn};
+use tracing::warn;
 
 use crate::execution::jupiter::{JupiterClient, SOL_MINT};
 use crate::monitoring::helius_price_ws::HeliusPriceCache;
@@ -193,6 +193,36 @@ impl PriceFetcher {
                     );
                     last_known
                 }
+            }
+        }
+    }
+
+    /// Fetch a fresh DexScreener price only, used as a confirmation layer for
+    /// soft full-exit decisions. Returns `None` if DexScreener is unavailable
+    /// or the returned price fails sanity validation.
+    pub async fn get_dexscreener_price(&self, mint: &str) -> Option<f64> {
+        let last_known = self.get_last_known(mint);
+        match self.jupiter.get_price(mint).await {
+            Ok(price) => {
+                let validated = self.validate_price(price, last_known, mint);
+                if validated > 0.0 && (validated - price).abs() < f64::EPSILON {
+                    self.cache_price(mint, validated);
+                    self.reset_failure_count(mint);
+                    Some(validated)
+                } else {
+                    warn!(
+                        mint = mint,
+                        price, validated, "DexScreener confirmation price failed validation"
+                    );
+                    None
+                }
+            }
+            Err(e) => {
+                warn!(
+                    mint = mint,
+                    "DexScreener confirmation price fetch failed: {}", e
+                );
+                None
             }
         }
     }

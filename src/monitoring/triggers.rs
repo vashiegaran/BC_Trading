@@ -21,6 +21,9 @@ pub struct PositionState {
     /// Temporary runner-protection grace for high-conviction entries. Soft
     /// MomentumKill is disabled while this is true; hard stops still fire.
     pub runner_grace_active: bool,
+    /// True for creator-rebuy/narrative canary entries that deserve extra
+    /// protection from profit-erasing soft exits even after the initial grace.
+    pub is_protected_runner: bool,
 }
 
 /// Evaluate all exit triggers for a position.
@@ -173,9 +176,13 @@ pub fn check_triggers(
     const MOMENTUM_KILL_MIN_SECS: u64 = 60;
     const MOMENTUM_KILL_PEAK_GUARD: f64 = 1.5;
     let momentum_gate_secs = exit_cfg.momentum_kill_secs.max(MOMENTUM_KILL_MIN_SECS);
+    let protected_runner_still_profitable = pos.is_protected_runner
+        && price_multiplier >= 1.0
+        && price_multiplier < exit_cfg.momentum_kill_min_multiplier;
     if exit_cfg.momentum_kill_secs > 0
         && pos.elapsed_seconds >= momentum_gate_secs
         && !pos.runner_grace_active
+        && !protected_runner_still_profitable
         && !pos.tp1_triggered
         && peak_multiplier < MOMENTUM_KILL_PEAK_GUARD
         && price_multiplier < exit_cfg.momentum_kill_min_multiplier
@@ -376,7 +383,49 @@ mod tests {
             is_paper_trade: true,
             initial_liquidity_sol: 80.0,
             runner_grace_active: false,
+            is_protected_runner: false,
         }
+    }
+
+    #[test]
+    fn test_momentum_kill_suppressed_for_profitable_protected_runner() {
+        let mut cfg = default_exit_config();
+        cfg.momentum_kill_secs = 90;
+        cfg.momentum_kill_min_multiplier = 1.3;
+
+        let mut pos = base_position();
+        pos.elapsed_seconds = 120;
+        pos.current_price = 0.0011; // 1.10x: profitable but below momentum gate
+        pos.peak_price = 0.00116; // below 1.5x peak guard
+        pos.is_protected_runner = true;
+
+        let signal = check_triggers(&pos, &cfg, false);
+        assert!(
+            signal.is_none(),
+            "Profitable protected runner should not be killed by momentum_kill"
+        );
+    }
+
+    #[test]
+    fn test_momentum_kill_still_fires_for_losing_protected_runner() {
+        let mut cfg = default_exit_config();
+        cfg.momentum_kill_secs = 90;
+        cfg.momentum_kill_min_multiplier = 1.3;
+
+        let mut pos = base_position();
+        pos.elapsed_seconds = 120;
+        pos.current_price = 0.0009; // losing and still below momentum gate
+        pos.peak_price = 0.00116;
+        pos.is_protected_runner = true;
+
+        let signal = check_triggers(&pos, &cfg, false);
+        assert!(
+            signal.is_some(),
+            "Losing protected runner can still momentum_kill"
+        );
+        let sig = signal.unwrap();
+        assert_eq!(sig.reason, ExitReason::MomentumKill);
+        assert_eq!(sig.pct_to_sell, 100);
     }
 
     #[test]

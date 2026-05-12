@@ -1039,6 +1039,13 @@ struct TradeResult {
     sol_spent: f64,
 }
 
+enum BuySettlement {
+    Confirmed,
+    BalanceObserved(f64),
+    Failed(String),
+    TimedOut,
+}
+
 async fn execute_real_trade(
     cfg: &AppConfig,
     jupiter: &JupiterClient,
@@ -1252,6 +1259,7 @@ async fn execute_real_trade(
         error!(mint = %mint_str, "Transaction signature is default — aborting");
         return Ok(None);
     }
+    let expected_tx_sig = signed_tx.signatures[0];
     let sign_ms = step3_start.elapsed().as_millis() as i64;
     info!(
         mint = %mint_str,
@@ -1262,7 +1270,7 @@ async fn execute_real_trade(
 
     // Step 4: Submit transaction (Chainstack Warp, Jito bundle, or regular RPC)
     let step4_start = Instant::now();
-    let (tx_sig, jito_tip_sol) = if cfg.env.use_helius_sender {
+    let (tx_sig, jito_tip_sol, submit_was_uncertain) = if cfg.env.use_helius_sender {
         let hs = helius_sender
             .ok_or_else(|| anyhow::anyhow!("Warp TX sender enabled but client not initialized"))?;
 
@@ -1286,59 +1294,120 @@ async fn execute_real_trade(
             }
         });
 
-        let sig = hs.send_transaction(&signed_tx).await?;
-        info!(mint = %mint_str, sig = %sig, "📤 Buy tx submitted via Chainstack Warp (+ backup)");
-        (sig, 0.0)
+        match hs.send_transaction(&signed_tx).await {
+            Ok(sig) => {
+                info!(mint = %mint_str, sig = %sig, "📤 Buy tx submitted via Chainstack Warp (+ backup)");
+                (sig, 0.0, false)
+            }
+            Err(e) => {
+                // A sender HTTP/RPC timeout is not proof the signed transaction failed.
+                // The request can land after the client gives up, and the backup dual-submit
+                // can also land the exact same signature. Continue into confirmation/balance
+                // recovery instead of returning early and creating an untracked wallet position.
+                warn!(
+                    mint = %mint_str,
+                    sig = %expected_tx_sig,
+                    error = %e,
+                    "⚠️ Buy submit returned error after broadcast attempt — checking chain before declaring failure"
+                );
+                log_system_event(
+                    supabase,
+                    "buy_submit_uncertain_checking_chain",
+                    &format!(
+                        "Mint: {} | sig={} | submit error: {}",
+                        mint_str, expected_tx_sig, e
+                    ),
+                )
+                .await;
+                (expected_tx_sig, 0.0, true)
+            }
+        }
     } else if cfg.env.use_jito {
-        submit_via_jito(&cfg, &wallet, signed_tx, &mint_str, supabase, jito_client).await?
+        let (sig, tip) =
+            submit_via_jito(&cfg, &wallet, signed_tx, &mint_str, supabase, jito_client).await?;
+        (sig, tip, false)
     } else {
-        let tx_sig = submit_via_rpc(rpc, backup_rpc, &signed_tx, &mint_str, supabase).await?;
-        (tx_sig, 0.0)
+        match submit_via_rpc(rpc, backup_rpc, &signed_tx, &mint_str, supabase).await {
+            Ok(tx_sig) => (tx_sig, 0.0, false),
+            Err(e) => {
+                warn!(
+                    mint = %mint_str,
+                    sig = %expected_tx_sig,
+                    error = %e,
+                    "⚠️ RPC buy submit returned error — checking chain before declaring failure"
+                );
+                log_system_event(
+                    supabase,
+                    "buy_submit_uncertain_checking_chain",
+                    &format!(
+                        "Mint: {} | sig={} | RPC submit error: {}",
+                        mint_str, expected_tx_sig, e
+                    ),
+                )
+                .await;
+                (expected_tx_sig, 0.0, true)
+            }
+        }
     };
 
     // When using Jito, send_bundle_and_wait already confirms the bundle.
     // Helius Sender and regular RPC need polling for confirmation.
+    let mut recovered_token_balance: Option<f64> = None;
     if !cfg.env.use_jito || cfg.env.use_helius_sender {
-        let confirm_start = Instant::now();
-        let mut confirmed = false;
         let tx_confirm_timeout =
             std::time::Duration::from_secs(cfg.strategy.execution.tx_confirm_timeout_secs);
         let tx_confirm_poll =
             std::time::Duration::from_millis(cfg.strategy.execution.tx_confirm_poll_ms);
-
-        while confirm_start.elapsed() < tx_confirm_timeout {
-            match rpc.get_signature_statuses(&[tx_sig]).await {
-                Ok(statuses) => {
-                    if let Some(Some(status)) = statuses.value.first() {
-                        if status.err.is_none() {
-                            confirmed = true;
-                            break;
-                        } else {
-                            error!(
-                                mint = %mint_str,
-                                sig = %tx_sig,
-                                "Transaction confirmed with error: {:?}",
-                                status.err
-                            );
-                            return Ok(None);
-                        }
-                    }
-                }
-                Err(e) => {
-                    debug!("Confirmation poll error: {}", e);
-                }
+        match wait_for_buy_settlement_or_balance(
+            rpc,
+            &wallet.pubkey(),
+            &mint_str,
+            tx_sig,
+            tx_confirm_timeout,
+            tx_confirm_poll,
+            out_amount,
+        )
+        .await
+        {
+            BuySettlement::Confirmed => {}
+            BuySettlement::BalanceObserved(balance) => {
+                recovered_token_balance = Some(balance);
+                warn!(
+                    mint = %mint_str,
+                    sig = %tx_sig,
+                    on_chain_balance = balance,
+                    submit_was_uncertain,
+                    "🚨 Buy tokens detected before tx status confirmed — tracking position to prevent orphan"
+                );
+                log_system_event(
+                    supabase,
+                    "buy_landed_after_uncertain_confirmation",
+                    &format!(
+                        "Mint: {} | sig={} | on-chain token balance={} | submit_uncertain={}",
+                        mint_str, tx_sig, balance, submit_was_uncertain
+                    ),
+                )
+                .await;
             }
-            tokio::time::sleep(tx_confirm_poll).await;
-        }
-
-        if !confirmed {
-            error!(
-                mint = %mint_str,
-                sig = %tx_sig,
-                "⏰ Transaction confirmation timed out after {}s",
-                cfg.strategy.execution.tx_confirm_timeout_secs
-            );
-            return Ok(None);
+            BuySettlement::Failed(err) => {
+                error!(
+                    mint = %mint_str,
+                    sig = %tx_sig,
+                    "Transaction confirmed with error: {}",
+                    err
+                );
+                return Ok(None);
+            }
+            BuySettlement::TimedOut => {
+                error!(
+                    mint = %mint_str,
+                    sig = %tx_sig,
+                    submit_was_uncertain,
+                    "⏰ Transaction confirmation timed out after {}s and no token balance was detected",
+                    cfg.strategy.execution.tx_confirm_timeout_secs
+                );
+                return Ok(None);
+            }
         }
     }
     let submit_confirm_ms = step4_start.elapsed().as_millis() as i64;
@@ -1400,7 +1469,9 @@ async fn execute_real_trade(
 
     // Step 6: Use quote out_amount as token amount (instant — no RPC calls).
     // Verification against on-chain balance happens in background.
-    let token_amount = if out_amount > 0.0 {
+    let token_amount = if let Some(balance) = recovered_token_balance {
+        balance
+    } else if out_amount > 0.0 {
         out_amount
     } else {
         // Last resort: try one RPC balance check (no retries)
@@ -1798,6 +1869,73 @@ async fn submit_via_rpc(
 }
 
 // ─── Token balance helper ─────────────────────────────────────
+
+async fn wait_for_buy_settlement_or_balance(
+    rpc: &RpcClient,
+    wallet: &Pubkey,
+    mint_str: &str,
+    tx_sig: solana_sdk::signature::Signature,
+    timeout: std::time::Duration,
+    poll: std::time::Duration,
+    expected_token_amount: f64,
+) -> BuySettlement {
+    let confirm_start = Instant::now();
+    let mut next_balance_check = std::time::Duration::from_secs(0);
+    let balance_check_interval = std::time::Duration::from_secs(2);
+    let min_expected_balance = if expected_token_amount > 0.0 {
+        (expected_token_amount * 0.50).max(1.0)
+    } else {
+        1.0
+    };
+
+    while confirm_start.elapsed() < timeout {
+        match rpc.get_signature_statuses(&[tx_sig]).await {
+            Ok(statuses) => {
+                if let Some(Some(status)) = statuses.value.first() {
+                    if status.err.is_none() {
+                        return BuySettlement::Confirmed;
+                    }
+                    return BuySettlement::Failed(format!("{:?}", status.err));
+                }
+            }
+            Err(e) => {
+                debug!(sig = %tx_sig, "Confirmation poll error: {}", e);
+            }
+        }
+
+        if confirm_start.elapsed() >= next_balance_check {
+            match fetch_token_balance(rpc, wallet, mint_str).await {
+                Some(balance) if balance >= min_expected_balance => {
+                    return BuySettlement::BalanceObserved(balance);
+                }
+                Some(balance) => {
+                    debug!(
+                        mint = %mint_str,
+                        sig = %tx_sig,
+                        balance,
+                        min_expected_balance,
+                        "Ignoring small pre-confirm token balance while waiting for buy settlement"
+                    );
+                }
+                None => {}
+            }
+            next_balance_check = next_balance_check + balance_check_interval;
+        }
+
+        tokio::time::sleep(poll).await;
+    }
+
+    // One final delayed balance check catches sender/RPC responses that time out
+    // just before the transaction lands in the wallet.
+    tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+    if let Some(balance) = fetch_token_balance(rpc, wallet, mint_str).await {
+        if balance >= min_expected_balance {
+            return BuySettlement::BalanceObserved(balance);
+        }
+    }
+
+    BuySettlement::TimedOut
+}
 
 /// Fetch the actual SPL token balance (as human-readable units) for a
 /// wallet+mint from the chain after a confirmed buy.

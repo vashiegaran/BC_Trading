@@ -9,6 +9,72 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.9.7 — Profit-Lock Shadow Signal (2026-05-12)
+
+**strategy_version**: unchanged (`v18.9.6-protected-runner-soft-exit-guard`)
+
+### Why
+May 12 floor-vs-runner research found a narrow profit-lock candidate that would have preserved profit on Agu-like collapses: first-minute post-grad close already profitable, plus creator/whale/early-buyer distribution and a violent first-minute drawdown. The sample is promising but too small for live enforcement, so the correct next step is fresh shadow collection only.
+
+### Changes
+- Adds [migrations/037_profit_lock_shadow_signal.sql](migrations/037_profit_lock_shadow_signal.sql) with observe-only profit-lock annotation columns on `post_grad_flow_shadow`.
+- Adds config controls in [config.toml](config.toml):
+  - `profit_lock_shadow_enabled = true`.
+  - `profit_lock_shadow_min_close_multiplier = 1.20`.
+  - `profit_lock_shadow_min_drawdown_pct = 35.0`.
+  - `profit_lock_shadow_agu_min_drawdown_pct = 45.0`.
+- Adds a post-first-minute evaluator in [src/detection/pumpfun_ws.rs](src/detection/pumpfun_ws.rs) that tags:
+  - `strict_toxic_profit_lock` when close ≥ configured profit threshold, creator sold, creator net < 0, whale net < 0, early-buyer net < 0, and first-minute drawdown ≥ configured drawdown threshold.
+  - `agu_like_toxic` when the same rule also clears the higher Agu-like drawdown threshold.
+- Writes `profit_lock_would_sell_pct = 100` only as a hypothetical analysis field.
+- Keeps the first-minute flow patch separate from the profit-lock patch so missing migration columns cannot block existing `post_grad_flow_shadow` metrics.
+- Does **not** change live entries, exits, sizing, position management, or v18.9.6 protected-runner behavior.
+
+### Rollback
+Set `profit_lock_shadow_enabled = false` in [config.toml](config.toml), then restart. The migration can remain for historical analysis.
+
+---
+
+## v18.9.6 — Protected Runner Soft-Exit Guard (2026-05-12)
+
+**strategy_version**: `v18.9.6-protected-runner-soft-exit-guard`
+
+### Why
+Recent protected-runner postmortems showed creator-rebuy / narrative canary entries could remain profitable but still get fully closed by soft exits immediately after the initial runner grace expired. `TROLLOPOOP` (`AFaycnPrFsLbHNQKRpXdUzUcsKFENWwkzvSSSToCpump`) was the clearest case: it was still above entry after the 180s grace, then sold via `momentum_kill` before later continuation.
+
+### Changes
+- Raises `creator_rebuy_runner_grace_secs` in [config.toml](config.toml) from `180` to `300` seconds.
+- Adds profit-aware `momentum_kill` suppression in [src/monitoring/triggers.rs](src/monitoring/triggers.rs): protected-runner entries that are still above entry price are no longer treated as dead solely because they have not reached the normal `1.3x` momentum gate.
+- Adds optional DexScreener confirmation in [src/monitoring/mod.rs](src/monitoring/mod.rs) before sending soft 100% exits (`momentum_kill` / `trailing_stop`). If DexScreener is unavailable, the check fails open so hard rugs are not trapped.
+- Preserves hard protections: stop loss, dev dump, LP drain, post-fill sanity, post-buy verification, and whale/sell-acceleration dip deaths.
+
+### Rollback
+Set `strategy_version = "v18.9-narrative-rebuy-exception"`, `creator_rebuy_runner_grace_secs = 180`, and `confirm_soft_full_exits_with_dexscreener = false` in [config.toml](config.toml), then restart. To fully revert behavior, remove the protected-runner `momentum_kill` guard from [src/monitoring/triggers.rs](src/monitoring/triggers.rs).
+
+---
+
+## v18.9.5 — Buy Timeout Orphan-Position Guard (2026-05-12)
+
+**strategy_version**: unchanged (`v18.9-narrative-rebuy-exception`)
+
+### Why
+`Agu` (`TkEfcu8CJkLKgErG4uevaoKjDGVf8LWw1HqX6kjpump`) exposed a critical execution-accounting gap: the buy transaction timed out at the sender/RPC layer and was logged as `execution_failed`, but the signed transaction still landed on-chain. Because no `positions` / `trade_costs` row was created, the wallet held a real token position that the bot could not monitor as a normal open trade.
+
+### Changes
+- Adds a post-submit settlement guard in [src/execution/mod.rs](src/execution/mod.rs): after a sender/RPC timeout or uncertain submit result, the bot now continues checking the deterministic signed transaction signature and the wallet's on-chain token balance before declaring execution failure.
+- If signature status is delayed but the wallet token balance appears, the bot creates and monitors the position instead of orphaning the buy.
+- Uses the actual on-chain token balance when recovery detects landed tokens before normal confirmation.
+- Adds system-event logging for uncertain submits and balance-observed recovery paths.
+- Does **not** change entry filters, live strategy thresholds, sizing, exit rules, or shadow-lane behavior.
+
+### Safety note
+This only prevents false negatives after a transaction has already been broadcast. It does not retry a second buy and does not increase exposure; it tracks the landed token that is already in the wallet.
+
+### Rollback
+Revert [src/execution/mod.rs](src/execution/mod.rs) to the previous confirmation-only flow. No schema rollback is required.
+
+---
+
 ## v18.9.4 — Reduced Static-Gate Shadow Lane (2026-05-12)
 
 **strategy_version**: unchanged (`v18.9-narrative-rebuy-exception`)

@@ -220,6 +220,21 @@ pub struct DetectionConfig {
     /// Global cap on concurrently active post-grad flow trackers.
     #[serde(default = "default_post_grad_flow_shadow_max_active")]
     pub post_grad_flow_shadow_max_active: usize,
+    /// Shadow-only profit-lock marker. Evaluates strict toxic-flow conditions
+    /// after the first post-grad minute and annotates post_grad_flow_shadow;
+    /// never calls live sell logic.
+    #[serde(default = "default_true")]
+    pub profit_lock_shadow_enabled: bool,
+    /// Minimum first-minute close multiplier before a hypothetical profit-lock
+    /// can be tagged.
+    #[serde(default = "default_profit_lock_shadow_min_close_multiplier")]
+    pub profit_lock_shadow_min_close_multiplier: f64,
+    /// Minimum first-minute peak-to-low drawdown for the strict toxic-flow tag.
+    #[serde(default = "default_profit_lock_shadow_min_drawdown_pct")]
+    pub profit_lock_shadow_min_drawdown_pct: f64,
+    /// Higher drawdown threshold for the narrower Agu-like toxic-flow tag.
+    #[serde(default = "default_profit_lock_shadow_agu_min_drawdown_pct")]
+    pub profit_lock_shadow_agu_min_drawdown_pct: f64,
     /// Gated top-holder flow snapshots. Uses RPC only for high-interest tokens
     /// and writes data to the same shadow table; never affects execution.
     #[serde(default = "default_true")]
@@ -307,6 +322,15 @@ fn default_post_grad_flow_shadow_min_score() -> f64 {
 }
 fn default_post_grad_flow_shadow_max_active() -> usize {
     20
+}
+fn default_profit_lock_shadow_min_close_multiplier() -> f64 {
+    1.20
+}
+fn default_profit_lock_shadow_min_drawdown_pct() -> f64 {
+    35.0
+}
+fn default_profit_lock_shadow_agu_min_drawdown_pct() -> f64 {
+    45.0
 }
 fn default_top_holder_flow_shadow_min_score() -> f64 {
     70.0
@@ -989,6 +1013,10 @@ pub struct MonitoringConfig {
     /// Profit floor for protected creator-rebuy runners. 0 = disabled.
     #[serde(default = "default_creator_rebuy_runner_floor_multiplier")]
     pub creator_rebuy_runner_floor_multiplier: f64,
+    /// Re-fetch DexScreener before sending soft 100% exits such as
+    /// MomentumKill/TrailingStop. If DexScreener is unavailable, exits fail open.
+    #[serde(default)]
+    pub confirm_soft_full_exits_with_dexscreener: bool,
     /// How long (seconds) to continue shadow-logging price after a position
     /// is closed. 0 = disabled.  Data is written to the `shadow_log` table.
     #[serde(default)]

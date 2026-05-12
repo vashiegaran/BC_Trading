@@ -9,7 +9,7 @@
 #   filterable in analytics vs the broken v16.1 binary that was running
 #   from never-committed source. Detection: pumpfun_ws. Fast-track:
 #   2-source (on_chain_mint + goplus) so GoPlus runs PRE-buy.
-strategy_version = "v18.9-narrative-rebuy-exception"
+strategy_version = "v18.9.6-protected-runner-soft-exit-guard"
 
 # ============================================================
 # DETECTION
@@ -72,6 +72,15 @@ early_buyer_rebuy_max_progress_pct = 100.0
 post_grad_flow_shadow_enabled = true
 post_grad_flow_shadow_min_score = 55.0
 post_grad_flow_shadow_max_active = 20
+
+# profit_lock_shadow: observe-only sell-all predictor from May 12 research.
+# It only annotates post_grad_flow_shadow after the first post-grad minute when
+# profitable close + toxic distribution conditions are present. It never sends
+# a sell order and never changes live exits/sizing/entries.
+profit_lock_shadow_enabled = true
+profit_lock_shadow_min_close_multiplier = 1.20
+profit_lock_shadow_min_drawdown_pct = 35.0
+profit_lock_shadow_agu_min_drawdown_pct = 45.0
 
 # top_holder_flow_shadow: observe-only holder-flow snapshots for the strongest
 # high-interest graduates only. Uses RPC guard + max-active cap; never blocks
@@ -535,11 +544,11 @@ dip_whale_sell_multiplier = 3.0
 # Minimum position age (seconds) before dip_death can fire — sniper: 30s
 min_hold_before_dip_death = 30
 
-# v18.7.6: strict creator-rebuy runners often dip/chop for 60-120s before
+# v18.9.6: strict creator-rebuy/narrative runners often chop for 3-5m before
 # ripping. During this grace, suppress only SOFT exits (dip_grace_expired,
 # no_trades, momentum_kill). Hard protections still fire: stop_loss, dev dump,
 # LP drain, whale/sell-acceleration dip death.
-creator_rebuy_runner_grace_secs = 180
+creator_rebuy_runner_grace_secs = 300
 
 # v18.7.7: once a strict creator-rebuy canary proves it can reach 1.5x,
 # protect it as a real runner for 10m from the trigger. This suppresses only
@@ -547,6 +556,10 @@ creator_rebuy_runner_grace_secs = 180
 creator_rebuy_runner_protection_peak_multiplier = 1.5
 creator_rebuy_runner_protection_secs = 600
 creator_rebuy_runner_floor_multiplier = 1.15
+
+# v18.9.6: before soft 100% exits (momentum_kill / trailing_stop), re-check
+# DexScreener once. If DexScreener is unavailable, fail open so rugs are not trapped.
+confirm_soft_full_exits_with_dexscreener = true
 
 # No trades for this many seconds during a dip = token dead — sniper: 30s
 dip_no_trades_timeout_secs = 30.0

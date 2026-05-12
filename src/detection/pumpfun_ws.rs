@@ -5645,6 +5645,130 @@ async fn patch_post_grad_flow_shadow(
     }
 }
 
+fn flow_payload_f64(payload: &serde_json::Map<String, serde_json::Value>, key: &str) -> f64 {
+    payload.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0)
+}
+
+fn flow_payload_bool(payload: &serde_json::Map<String, serde_json::Value>, key: &str) -> bool {
+    payload.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+fn profit_lock_shadow_reason(label: &str, passed: bool, metric: String) -> String {
+    format!(
+        "{}:{}:{}",
+        label,
+        if passed { "pass" } else { "fail" },
+        metric
+    )
+}
+
+fn build_profit_lock_shadow_patch(
+    cfg: &AppConfig,
+    seed_payload: &serde_json::Map<String, serde_json::Value>,
+    close_price: f64,
+    close_multiplier: f64,
+    first_minute_drawdown_pct: f64,
+) -> serde_json::Value {
+    let detection_cfg = &cfg.strategy.detection;
+    let min_close_multiplier = detection_cfg.profit_lock_shadow_min_close_multiplier;
+    let min_drawdown_pct = detection_cfg.profit_lock_shadow_min_drawdown_pct;
+    let agu_min_drawdown_pct = detection_cfg
+        .profit_lock_shadow_agu_min_drawdown_pct
+        .max(min_drawdown_pct);
+
+    let creator_sold = flow_payload_bool(seed_payload, "creator_sold_during_bc");
+    let creator_net_sol = flow_payload_f64(seed_payload, "creator_net_sol_bc");
+    let whale_net_sol = flow_payload_f64(seed_payload, "whale_net_sol");
+    let early_buyer_net_sol = flow_payload_f64(seed_payload, "early_buyer_net_sol");
+
+    let close_ok = close_multiplier >= min_close_multiplier;
+    let creator_sold_ok = creator_sold;
+    let creator_net_ok = creator_net_sol < 0.0;
+    let whale_net_ok = whale_net_sol < 0.0;
+    let early_net_ok = early_buyer_net_sol < 0.0;
+    let drawdown_ok = first_minute_drawdown_pct >= min_drawdown_pct;
+
+    let strict_triggered = close_ok
+        && creator_sold_ok
+        && creator_net_ok
+        && whale_net_ok
+        && early_net_ok
+        && drawdown_ok;
+    let agu_like_triggered = strict_triggered && first_minute_drawdown_pct >= agu_min_drawdown_pct;
+
+    let mut matched_rules = Vec::new();
+    if strict_triggered {
+        matched_rules.push("strict_toxic_profit_lock");
+    }
+    if agu_like_triggered {
+        matched_rules.push("agu_like_toxic");
+    }
+    let primary_rule = if agu_like_triggered {
+        Some("agu_like_toxic")
+    } else if strict_triggered {
+        Some("strict_toxic_profit_lock")
+    } else {
+        None
+    };
+
+    let reasons = vec![
+        profit_lock_shadow_reason(
+            "first_minute_close_multiplier",
+            close_ok,
+            format!("{:.2}x>= {:.2}x", close_multiplier, min_close_multiplier),
+        ),
+        profit_lock_shadow_reason(
+            "creator_sold_during_bc",
+            creator_sold_ok,
+            creator_sold.to_string(),
+        ),
+        profit_lock_shadow_reason(
+            "creator_net_sol_bc",
+            creator_net_ok,
+            format!("{:.3}<0", creator_net_sol),
+        ),
+        profit_lock_shadow_reason(
+            "whale_net_sol",
+            whale_net_ok,
+            format!("{:.3}<0", whale_net_sol),
+        ),
+        profit_lock_shadow_reason(
+            "early_buyer_net_sol",
+            early_net_ok,
+            format!("{:.3}<0", early_buyer_net_sol),
+        ),
+        profit_lock_shadow_reason(
+            "first_minute_drawdown_pct",
+            drawdown_ok,
+            format!(
+                "{:.1}%>= {:.1}%",
+                first_minute_drawdown_pct, min_drawdown_pct
+            ),
+        ),
+    ];
+
+    serde_json::json!({
+        "profit_lock_shadow_triggered": strict_triggered,
+        "profit_lock_shadow_rule": primary_rule,
+        "profit_lock_shadow_rules": matched_rules,
+        "profit_lock_shadow_reasons": reasons,
+        "profit_lock_shadow_thresholds": {
+            "min_close_multiplier": min_close_multiplier,
+            "min_drawdown_pct": min_drawdown_pct,
+            "agu_like_min_drawdown_pct": agu_min_drawdown_pct,
+            "requires_creator_sold_during_bc": true,
+            "requires_creator_net_sol_lt": 0.0,
+            "requires_whale_net_sol_lt": 0.0,
+            "requires_early_buyer_net_sol_lt": 0.0,
+        },
+        "profit_lock_would_sell_pct": if strict_triggered { Some(100.0) } else { None },
+        "profit_lock_eval_price": close_price,
+        "profit_lock_eval_multiplier": close_multiplier,
+        "profit_lock_eval_at": chrono::Utc::now().to_rfc3339(),
+        "profit_lock_shadow_version": "v18.9.7-profit-lock-shadow",
+    })
+}
+
 async fn spawn_post_grad_flow_shadow_tracker(
     supabase: Arc<SupabaseClient>,
     cfg: Arc<AppConfig>,
@@ -5763,6 +5887,36 @@ async fn spawn_post_grad_flow_shadow_tracker(
         "updated_at": chrono::Utc::now().to_rfc3339(),
     });
     patch_post_grad_flow_shadow(&supabase, &mint, patch).await;
+
+    if cfg.strategy.detection.profit_lock_shadow_enabled {
+        let profit_lock_patch = build_profit_lock_shadow_patch(
+            &cfg,
+            &seed.payload,
+            close_price,
+            close_multiplier,
+            first_minute_drawdown_pct,
+        );
+        let profit_lock_triggered = profit_lock_patch
+            .get("profit_lock_shadow_triggered")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let profit_lock_rule = profit_lock_patch
+            .get("profit_lock_shadow_rule")
+            .and_then(|v| v.as_str())
+            .unwrap_or("none")
+            .to_string();
+        patch_post_grad_flow_shadow(&supabase, &mint, profit_lock_patch).await;
+
+        if profit_lock_triggered {
+            info!(
+                mint = %mint,
+                rule = %profit_lock_rule,
+                close_multiplier = format!("{:.2}x", close_multiplier),
+                drawdown_pct = format!("{:.1}%", first_minute_drawdown_pct),
+                "🧪 Profit-lock shadow signal tagged (observe-only; no sell sent)"
+            );
+        }
+    }
 }
 
 fn top_holder_snapshot_json(snapshot: &TopHolderSnapshot) -> serde_json::Value {

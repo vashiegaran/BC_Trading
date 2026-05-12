@@ -1689,6 +1689,7 @@ async fn monitor_position(
             is_paper_trade: position.is_paper_trade,
             initial_liquidity_sol: position.initial_liquidity_sol,
             runner_grace_active: runner_soft_protection_active,
+            is_protected_runner,
         };
 
         // ── Tick stream momentum + dip state machine ──────────
@@ -1958,6 +1959,27 @@ async fn monitor_position(
 
         // Check exit triggers (trailing stop may be suppressed by dip state)
         if let Some(signal) = check_triggers(&pos_state, exit_cfg, suppress_trailing) {
+            let signal = if cfg
+                .strategy
+                .monitoring
+                .confirm_soft_full_exits_with_dexscreener
+            {
+                match confirm_soft_full_exit_with_dexscreener(
+                    &price_fetcher,
+                    &pos_state,
+                    exit_cfg,
+                    suppress_trailing,
+                    signal,
+                )
+                .await
+                {
+                    Some(confirmed) => confirmed,
+                    None => continue,
+                }
+            } else {
+                signal
+            };
+
             info!(
                 mint = %position.mint,
                 reason = %signal.reason,
@@ -2199,13 +2221,13 @@ async fn monitor_position(
                 position_id: signal.position_id,
                 mint: signal.mint.clone(),
                 pct_to_sell: signal.pct_to_sell,
-                reason: signal.reason,
+                reason: signal.reason.clone(),
                 current_price: signal.current_price,
                 entry_price_usd: signal.entry_price_usd,
                 sol_spent: signal.sol_spent,
                 token_amount: tokens_for_signal, // ← actual tokens, not 0
                 is_paper_trade: signal.is_paper_trade,
-                sub_reason: None,
+                sub_reason: signal.sub_reason.clone(),
             };
 
             if exit_tx.send(exit_signal).await.is_err() {
@@ -2755,6 +2777,98 @@ fn is_protected_runner_entry(position: &PositionOpened) -> bool {
                 || tier == NARRATIVE_CLUSTER_LIVE_CANARY_ENTRY_TIER
         })
         .unwrap_or(false)
+}
+
+fn is_soft_full_exit_signal(signal: &ExitSignal) -> bool {
+    signal.pct_to_sell == 100
+        && matches!(
+            signal.reason,
+            types::ExitReason::MomentumKill | types::ExitReason::TrailingStop
+        )
+}
+
+async fn confirm_soft_full_exit_with_dexscreener(
+    price_fetcher: &PriceFetcher,
+    pos_state: &PositionState,
+    exit_cfg: &crate::config::ExitConfig,
+    suppress_trailing: bool,
+    signal: ExitSignal,
+) -> Option<ExitSignal> {
+    if !is_soft_full_exit_signal(&signal) {
+        return Some(signal);
+    }
+
+    let original_reason = signal.reason.clone();
+    let original_price = signal.current_price;
+    let dex_price = match price_fetcher.get_dexscreener_price(&signal.mint).await {
+        Some(price) if price > 0.0 => price,
+        _ => {
+            warn!(
+                mint = %signal.mint,
+                reason = %original_reason,
+                "DexScreener soft-exit confirmation unavailable — fail-open, allowing exit"
+            );
+            return Some(signal);
+        }
+    };
+
+    let mut confirmed_state = pos_state.clone();
+    confirmed_state.current_price = dex_price;
+    confirmed_state.peak_price = confirmed_state.peak_price.max(dex_price);
+
+    let original_multiplier = if pos_state.entry_price_usd > 0.0 {
+        original_price / pos_state.entry_price_usd
+    } else {
+        0.0
+    };
+    let dex_multiplier = if pos_state.entry_price_usd > 0.0 {
+        dex_price / pos_state.entry_price_usd
+    } else {
+        0.0
+    };
+
+    match check_triggers(&confirmed_state, exit_cfg, suppress_trailing) {
+        Some(confirmed) if confirmed.pct_to_sell == 100 && confirmed.reason == original_reason => {
+            info!(
+                mint = %signal.mint,
+                reason = %original_reason,
+                original_multiplier = format!("{:.2}x", original_multiplier),
+                dex_multiplier = format!("{:.2}x", dex_multiplier),
+                "DexScreener confirmed soft full-exit"
+            );
+            Some(confirmed)
+        }
+        Some(confirmed) if confirmed.reason == types::ExitReason::StopLoss => {
+            warn!(
+                mint = %signal.mint,
+                original_reason = %original_reason,
+                dex_multiplier = format!("{:.2}x", dex_multiplier),
+                "DexScreener confirmed harder stop-loss while checking soft exit"
+            );
+            Some(confirmed)
+        }
+        Some(confirmed) => {
+            info!(
+                mint = %signal.mint,
+                original_reason = %original_reason,
+                confirmed_reason = %confirmed.reason,
+                original_multiplier = format!("{:.2}x", original_multiplier),
+                dex_multiplier = format!("{:.2}x", dex_multiplier),
+                "DexScreener did not confirm the same soft full-exit — suppressing this tick"
+            );
+            None
+        }
+        None => {
+            info!(
+                mint = %signal.mint,
+                reason = %original_reason,
+                original_multiplier = format!("{:.2}x", original_multiplier),
+                dex_multiplier = format!("{:.2}x", dex_multiplier),
+                "DexScreener invalidated soft full-exit — suppressing this tick"
+            );
+            None
+        }
+    }
 }
 
 fn is_soft_dip_death_reason(reason: &str) -> bool {
