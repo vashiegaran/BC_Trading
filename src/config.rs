@@ -550,6 +550,32 @@ pub struct FiltersConfig {
     /// Disabled by default to save Helius/GoPlus API calls.
     #[serde(default = "default_graduation_goplus_enabled")]
     pub graduation_goplus_enabled: bool,
+    /// Shadow-only reduced static-gate lane. Records a simulated graduation
+    /// entry to `bc_paper_trades` when relaxed gates pass; never forwards to
+    /// live/paper execution. Used to validate filter overfit safely.
+    #[serde(default)]
+    pub reduced_static_gate_shadow_enabled: bool,
+    /// Minimum BC score for the reduced static-gate shadow lane.
+    #[serde(default = "default_reduced_static_gate_shadow_min_score")]
+    pub reduced_static_gate_shadow_min_score: f64,
+    /// Minimum buy pressure for the reduced static-gate shadow lane.
+    #[serde(default = "default_reduced_static_gate_shadow_min_buy_pressure_pct")]
+    pub reduced_static_gate_shadow_min_buy_pressure_pct: f64,
+    /// Minimum distinct buyers for the reduced static-gate shadow lane.
+    #[serde(default = "default_reduced_static_gate_shadow_min_unique_buyers")]
+    pub reduced_static_gate_shadow_min_unique_buyers: usize,
+    /// Maximum SOL-side pool liquidity for the reduced static-gate shadow lane.
+    /// 0 = disabled.
+    #[serde(default = "default_reduced_static_gate_shadow_max_initial_liquidity_sol")]
+    pub reduced_static_gate_shadow_max_initial_liquidity_sol: f64,
+    /// Minimum narrative score that can qualify a creator-rebuy token inside
+    /// this shadow lane. Creator-rebuy remains blocked live elsewhere.
+    #[serde(default = "default_reduced_static_gate_shadow_creator_rebuy_min_narrative_score")]
+    pub reduced_static_gate_shadow_creator_rebuy_min_narrative_score: f64,
+    /// Minimum whale/proven/creator net support SOL that can qualify a
+    /// creator-rebuy token inside this shadow lane.
+    #[serde(default = "default_reduced_static_gate_shadow_creator_rebuy_min_support_sol")]
+    pub reduced_static_gate_shadow_creator_rebuy_min_support_sol: f64,
 }
 
 fn default_max_single_holder_pct() -> f64 {
@@ -668,6 +694,24 @@ fn default_standard_lane_enabled() -> bool {
 }
 fn default_graduation_goplus_enabled() -> bool {
     true
+}
+fn default_reduced_static_gate_shadow_min_score() -> f64 {
+    45.0
+}
+fn default_reduced_static_gate_shadow_min_buy_pressure_pct() -> f64 {
+    55.0
+}
+fn default_reduced_static_gate_shadow_min_unique_buyers() -> usize {
+    10
+}
+fn default_reduced_static_gate_shadow_max_initial_liquidity_sol() -> f64 {
+    85.0
+}
+fn default_reduced_static_gate_shadow_creator_rebuy_min_narrative_score() -> f64 {
+    70.0
+}
+fn default_reduced_static_gate_shadow_creator_rebuy_min_support_sol() -> f64 {
+    3.0
 }
 
 #[derive(Debug, Deserialize)]

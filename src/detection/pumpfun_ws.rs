@@ -147,6 +147,19 @@ struct PostGradFlowSeed {
 }
 
 #[derive(Debug, Clone)]
+struct ReducedStaticGateShadowSeed {
+    payload: serde_json::Map<String, serde_json::Value>,
+    bc_score: f64,
+    buy_pressure_pct: f64,
+    unique_buyers: usize,
+    buy_sell_ratio: f64,
+    sell_count: u64,
+    creator_rebuy: bool,
+    creator_rebuy_quality_reasons: Vec<String>,
+    pre_liquidity_fail_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 struct TopHolderOwnerSnapshot {
     token_account: String,
     owner: String,
@@ -3240,11 +3253,14 @@ async fn handle_token_complete(
         buy_sell_ratio,
         narrative_cluster,
         post_grad_flow_seed,
+        reduced_static_gate_seed,
     ) = match watchlist.remove(mint_str) {
         Some(entry) => {
             let elapsed_secs = (now_ms - entry.detected_at) as f64 / 1_000.0;
             let post_grad_flow_seed =
                 build_post_grad_flow_seed(&entry, mint_str, cfg, proven_wallet_roster);
+            let reduced_static_gate_seed =
+                build_reduced_static_gate_shadow_seed(&entry, mint_str, cfg);
             // Compute creator_rebuy from trade_log
             let cr = entry
                 .trade_log
@@ -3276,6 +3292,7 @@ async fn handle_token_complete(
                 bsr,
                 entry.narrative_cluster_context,
                 post_grad_flow_seed,
+                reduced_static_gate_seed,
             )
         }
         None => {
@@ -3330,6 +3347,7 @@ async fn handle_token_complete(
                 0.0,
                 false,
                 fallback_bsr,
+                None,
                 None,
                 None,
             )
@@ -3480,6 +3498,8 @@ async fn handle_token_complete(
         let grad_liquidity = initial_liquidity_sol;
         let rpc_url_for_shadow = rpc_url.to_string();
         let flow_seed_for_grad = post_grad_flow_seed;
+        let reduced_seed_for_grad = reduced_static_gate_seed;
+        let time_to_grad_for_shadow = graduated.time_to_graduate_seconds;
         tokio::spawn(async move {
             let now_rfc = chrono::Utc::now().to_rfc3339();
 
@@ -3593,6 +3613,19 @@ async fn handle_token_complete(
                 Err(e) => {
                     debug!(mint = %mint_for_grad, "narrative_cluster_shadow graduation update failed: {}", e);
                 }
+            }
+
+            if let Some(seed) = reduced_seed_for_grad {
+                maybe_insert_reduced_static_gate_shadow(
+                    &supabase_grad,
+                    &cfg_grad,
+                    &mint_for_grad,
+                    seed,
+                    grad_liquidity,
+                    &now_rfc,
+                    time_to_grad_for_shadow,
+                )
+                .await;
             }
 
             // Schedule post-graduation price tracking (separate spawn so it
@@ -4074,6 +4107,357 @@ fn compute_narrative_sequence_score(entry: &WatchlistEntry) -> f64 {
         score += 10.0;
     }
     score.clamp(0.0, 100.0)
+}
+
+fn build_reduced_static_gate_shadow_seed(
+    entry: &WatchlistEntry,
+    mint_str: &str,
+    cfg: &Arc<AppConfig>,
+) -> Option<ReducedStaticGateShadowSeed> {
+    let filters_cfg = &cfg.strategy.filters;
+    if !filters_cfg.reduced_static_gate_shadow_enabled {
+        return None;
+    }
+
+    let buy_sell_ratio = compute_current_buy_sell_ratio(entry);
+    let creator_rebuy = compute_current_creator_rebuy(entry);
+    let creator_sold_during_bc = entry
+        .trade_log
+        .iter()
+        .any(|&(_, _, is_buy, wallet)| !is_buy && wallet == entry.creator_wallet);
+    let creator_metrics = compute_creator_bc_metrics(entry);
+    let flow_metrics =
+        compute_flow_quality_metrics(entry, cfg.strategy.detection.early_buyer_rebuy_first_n);
+    let whale_buy = flow_metrics.whale_buy_count > 0;
+    let bc_score = compute_bc_score(
+        entry.unique_buyers.len(),
+        buy_sell_ratio,
+        creator_rebuy,
+        whale_buy,
+        entry.buy_count,
+        entry.sell_count,
+        entry.total_volume_sol,
+    );
+    let narrative_score = entry
+        .narrative_cluster_context
+        .as_ref()
+        .map(|ctx| ctx.narrative_score);
+    let narrative_sequence_score = compute_narrative_sequence_score(entry);
+    let bc_progress_pct = if entry.last_v_sol_reserves > 0.0 {
+        (((entry.last_v_sol_reserves - 30.0) / 85.0) * 100.0).clamp(0.0, 100.0)
+    } else {
+        100.0
+    };
+    let bc_price_sol_per_token = if entry.last_v_token_reserves > 0.0 {
+        entry.last_v_sol_reserves / entry.last_v_token_reserves
+    } else {
+        0.0
+    };
+    let bc_price_usd = bc_price_usd_from_sol(bc_price_sol_per_token, DEFAULT_SOL_USD);
+    let bc_market_cap_usd = if entry.last_market_cap_sol > 0.0 {
+        entry.last_market_cap_sol * DEFAULT_SOL_USD
+    } else {
+        0.0
+    };
+    let token_age_secs =
+        (chrono::Utc::now().timestamp_millis() - entry.detected_at) as f64 / 1_000.0;
+
+    let mut creator_rebuy_quality_reasons = Vec::new();
+    if !creator_rebuy {
+        creator_rebuy_quality_reasons.push("not_creator_rebuy".to_string());
+    } else {
+        if narrative_score
+            .map(|score| {
+                score >= filters_cfg.reduced_static_gate_shadow_creator_rebuy_min_narrative_score
+            })
+            .unwrap_or(false)
+        {
+            creator_rebuy_quality_reasons.push("narrative_score_support".to_string());
+        }
+        if flow_metrics.proven_wallet_net_sol
+            >= filters_cfg.reduced_static_gate_shadow_creator_rebuy_min_support_sol
+            || (flow_metrics.proven_wallet_buy_count > 0
+                && flow_metrics.proven_wallet_net_sol >= 0.0)
+        {
+            creator_rebuy_quality_reasons.push("proven_wallet_support".to_string());
+        }
+        if flow_metrics.whale_net_sol
+            >= filters_cfg.reduced_static_gate_shadow_creator_rebuy_min_support_sol
+            || flow_metrics.whale_buy_sol_total
+                >= filters_cfg.reduced_static_gate_shadow_creator_rebuy_min_support_sol * 2.0
+        {
+            creator_rebuy_quality_reasons.push("whale_support".to_string());
+        }
+        if creator_metrics.creator_net_sol_bc
+            >= filters_cfg.reduced_static_gate_shadow_creator_rebuy_min_support_sol
+            && creator_metrics.creator_sell_count_bc == 0
+        {
+            creator_rebuy_quality_reasons.push("creator_net_buy_no_sell".to_string());
+        }
+    }
+
+    let mut fail_reasons = Vec::new();
+    if bc_score < filters_cfg.reduced_static_gate_shadow_min_score {
+        fail_reasons.push(format!(
+            "score_{:.1}_below_{:.1}",
+            bc_score, filters_cfg.reduced_static_gate_shadow_min_score
+        ));
+    }
+    let buy_pressure_pct = entry.buy_pressure_pct();
+    if buy_pressure_pct < filters_cfg.reduced_static_gate_shadow_min_buy_pressure_pct {
+        fail_reasons.push(format!(
+            "buy_pressure_{:.1}_below_{:.1}",
+            buy_pressure_pct, filters_cfg.reduced_static_gate_shadow_min_buy_pressure_pct
+        ));
+    }
+    if entry.unique_buyers.len() < filters_cfg.reduced_static_gate_shadow_min_unique_buyers {
+        fail_reasons.push(format!(
+            "unique_buyers_{}_below_{}",
+            entry.unique_buyers.len(),
+            filters_cfg.reduced_static_gate_shadow_min_unique_buyers
+        ));
+    }
+    if filters_cfg.max_bc_sell_count > 0 && entry.sell_count > filters_cfg.max_bc_sell_count {
+        fail_reasons.push(format!(
+            "sell_count_{}_above_{}",
+            entry.sell_count, filters_cfg.max_bc_sell_count
+        ));
+    }
+    if creator_rebuy && creator_sold_during_bc {
+        fail_reasons.push("creator_rebuy_with_creator_sold".to_string());
+    }
+    if creator_rebuy && creator_rebuy_quality_reasons.is_empty() {
+        fail_reasons.push("creator_rebuy_without_quality_support".to_string());
+    }
+
+    let entry_signals = serde_json::json!({
+        "shadow_lane": "reduced_static_gate_shadow",
+        "shadow_version": "v18.9.4-reduced-static-gate-shadow",
+        "thresholds": {
+            "min_score": filters_cfg.reduced_static_gate_shadow_min_score,
+            "min_buy_pressure_pct": filters_cfg.reduced_static_gate_shadow_min_buy_pressure_pct,
+            "min_unique_buyers": filters_cfg.reduced_static_gate_shadow_min_unique_buyers,
+            "max_initial_liquidity_sol": filters_cfg.reduced_static_gate_shadow_max_initial_liquidity_sol,
+            "max_sell_count": filters_cfg.max_bc_sell_count,
+            "creator_rebuy_min_narrative_score": filters_cfg.reduced_static_gate_shadow_creator_rebuy_min_narrative_score,
+            "creator_rebuy_min_support_sol": filters_cfg.reduced_static_gate_shadow_creator_rebuy_min_support_sol,
+        },
+        "pre_liquidity_fail_reasons": fail_reasons,
+        "creator_rebuy_quality_reasons": creator_rebuy_quality_reasons,
+        "risk_proxies": {
+            "creator_sold_during_bc": creator_sold_during_bc,
+            "creator_net_sol_bc": creator_metrics.creator_net_sol_bc,
+            "creator_sell_count_bc": creator_metrics.creator_sell_count_bc,
+            "whale_net_sol": flow_metrics.whale_net_sol,
+            "whale_buy_sol_total": flow_metrics.whale_buy_sol_total,
+            "whale_sell_sol_total": flow_metrics.whale_sell_sol_total,
+            "early_buyer_net_sol": flow_metrics.early_buyer_net_sol,
+            "early_buyer_sell_sol_total": flow_metrics.early_buyer_sell_sol_total,
+            "proven_wallet_net_sol_bc": flow_metrics.proven_wallet_net_sol,
+            "proven_wallet_buy_count_bc": flow_metrics.proven_wallet_buy_count,
+            "narrative_score": narrative_score,
+            "narrative_sequence_score": narrative_sequence_score,
+        }
+    });
+
+    let mut payload = serde_json::Map::new();
+    payload.insert("mint".to_string(), serde_json::json!(mint_str));
+    payload.insert(
+        "symbol".to_string(),
+        serde_json::json!(entry.symbol.clone()),
+    );
+    payload.insert("name".to_string(), serde_json::json!(entry.name.clone()));
+    payload.insert(
+        "creator_wallet".to_string(),
+        serde_json::json!(entry.creator_wallet.to_string()),
+    );
+    payload.insert(
+        "entry_volume_sol".to_string(),
+        serde_json::json!(entry.total_volume_sol),
+    );
+    payload.insert(
+        "entry_buy_count".to_string(),
+        serde_json::json!(entry.buy_count),
+    );
+    payload.insert(
+        "entry_sell_count".to_string(),
+        serde_json::json!(entry.sell_count),
+    );
+    payload.insert(
+        "entry_unique_buyers".to_string(),
+        serde_json::json!(entry.unique_buyers.len()),
+    );
+    payload.insert(
+        "entry_buy_sell_ratio".to_string(),
+        serde_json::json!(buy_sell_ratio),
+    );
+    payload.insert(
+        "entry_creator_rebuy".to_string(),
+        serde_json::json!(creator_rebuy),
+    );
+    payload.insert(
+        "entry_token_age_secs".to_string(),
+        serde_json::json!(token_age_secs),
+    );
+    payload.insert("entry_signals".to_string(), entry_signals);
+    payload.insert("sim_buy_sol".to_string(), serde_json::json!(0.05));
+    payload.insert(
+        "entry_trigger".to_string(),
+        serde_json::json!("reduced_static_gate_shadow"),
+    );
+    payload.insert("entry_score".to_string(), serde_json::json!(bc_score));
+    payload.insert(
+        "bc_progress_pct".to_string(),
+        serde_json::json!(if bc_progress_pct > 0.0 {
+            Some(bc_progress_pct)
+        } else {
+            None
+        }),
+    );
+    payload.insert(
+        "bc_virtual_sol_reserves".to_string(),
+        serde_json::json!(if entry.last_v_sol_reserves > 0.0 {
+            Some(entry.last_v_sol_reserves)
+        } else {
+            None
+        }),
+    );
+    payload.insert(
+        "bc_virtual_token_reserves".to_string(),
+        serde_json::json!(if entry.last_v_token_reserves > 0.0 {
+            Some(entry.last_v_token_reserves)
+        } else {
+            None
+        }),
+    );
+    payload.insert(
+        "bc_price_usd".to_string(),
+        serde_json::json!(if bc_price_usd > 0.0 {
+            Some(bc_price_usd)
+        } else {
+            None
+        }),
+    );
+    payload.insert(
+        "bc_market_cap_usd".to_string(),
+        serde_json::json!(if bc_market_cap_usd > 0.0 {
+            Some(bc_market_cap_usd)
+        } else {
+            None
+        }),
+    );
+    payload.insert(
+        "creator_sold_during_bc".to_string(),
+        serde_json::json!(creator_sold_during_bc),
+    );
+    payload.insert(
+        "buy_pressure_at_entry_pct".to_string(),
+        serde_json::json!(buy_pressure_pct),
+    );
+
+    Some(ReducedStaticGateShadowSeed {
+        payload,
+        bc_score,
+        buy_pressure_pct,
+        unique_buyers: entry.unique_buyers.len(),
+        buy_sell_ratio,
+        sell_count: entry.sell_count,
+        creator_rebuy,
+        creator_rebuy_quality_reasons,
+        pre_liquidity_fail_reasons: fail_reasons,
+    })
+}
+
+async fn maybe_insert_reduced_static_gate_shadow(
+    supabase: &SupabaseClient,
+    cfg: &Arc<AppConfig>,
+    mint: &str,
+    seed: ReducedStaticGateShadowSeed,
+    initial_liquidity_sol: f64,
+    graduated_at: &str,
+    time_to_graduate_secs: f64,
+) {
+    let filters_cfg = &cfg.strategy.filters;
+    let mut fail_reasons = seed.pre_liquidity_fail_reasons.clone();
+    let max_liq = filters_cfg.reduced_static_gate_shadow_max_initial_liquidity_sol;
+    if max_liq > 0.0 && initial_liquidity_sol > max_liq {
+        fail_reasons.push(format!(
+            "initial_liquidity_sol_{:.1}_above_{:.1}",
+            initial_liquidity_sol, max_liq
+        ));
+    }
+
+    if !fail_reasons.is_empty() {
+        debug!(
+            mint = %mint,
+            score = format!("{:.1}", seed.bc_score),
+            buy_pressure = format!("{:.1}%", seed.buy_pressure_pct),
+            unique_buyers = seed.unique_buyers,
+            buy_sell_ratio = format!("{:.2}", seed.buy_sell_ratio),
+            sell_count = seed.sell_count,
+            creator_rebuy = seed.creator_rebuy,
+            fail_reasons = ?fail_reasons,
+            "reduced static-gate shadow did not qualify"
+        );
+        return;
+    }
+
+    let mut payload = seed.payload;
+    if let Some(entry_signals) = payload
+        .get("entry_signals")
+        .and_then(|v| v.as_object())
+        .cloned()
+    {
+        let mut updated = entry_signals;
+        updated.insert("would_trade_shadow".to_string(), serde_json::json!(true));
+        updated.insert(
+            "final_fail_reasons".to_string(),
+            serde_json::json!(fail_reasons),
+        );
+        updated.insert(
+            "creator_rebuy_quality_reasons".to_string(),
+            serde_json::json!(seed.creator_rebuy_quality_reasons.clone()),
+        );
+        payload.insert(
+            "entry_signals".to_string(),
+            serde_json::Value::Object(updated),
+        );
+    }
+    payload.insert("graduated".to_string(), serde_json::json!(true));
+    payload.insert("graduated_at".to_string(), serde_json::json!(graduated_at));
+    payload.insert(
+        "time_to_graduate_secs".to_string(),
+        serde_json::json!(time_to_graduate_secs),
+    );
+    payload.insert(
+        "initial_liquidity_sol".to_string(),
+        serde_json::json!(initial_liquidity_sol),
+    );
+
+    let url = format!("{}/bc_paper_trades", supabase.base_url);
+    match supabase
+        .client
+        .post(&url)
+        .json(&serde_json::Value::Object(payload))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            info!(
+                mint = %mint,
+                score = format!("{:.1}", seed.bc_score),
+                buy_pressure = format!("{:.1}%", seed.buy_pressure_pct),
+                unique_buyers = seed.unique_buyers,
+                creator_rebuy = seed.creator_rebuy,
+                "🧪 Reduced static-gate shadow recorded"
+            );
+        }
+        Ok(resp) => {
+            let body = resp.text().await.unwrap_or_default();
+            warn!(mint = %mint, "reduced_static_gate_shadow INSERT failed: {}", body);
+        }
+        Err(e) => warn!(mint = %mint, "reduced_static_gate_shadow INSERT error: {}", e),
+    }
 }
 
 fn build_post_grad_flow_seed(

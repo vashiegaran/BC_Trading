@@ -279,6 +279,19 @@ standard_lane_enabled = false
 # information gain. Easy to re-enable if the data picture changes.
 graduation_goplus_enabled = false
 
+# v18.9.4 shadow-only reduced static-gate lane. This does NOT forward live;
+# it writes a simulated graduation entry to bc_paper_trades with
+# entry_trigger='reduced_static_gate_shadow'. Goal: validate whether relaxed
+# buy-pressure / unique-buyer / creator-rebuy gates recover runners without
+# promoting more rugs.
+reduced_static_gate_shadow_enabled = true
+reduced_static_gate_shadow_min_score = 45.0
+reduced_static_gate_shadow_min_buy_pressure_pct = 55.0
+reduced_static_gate_shadow_min_unique_buyers = 10
+reduced_static_gate_shadow_max_initial_liquidity_sol = 85.0
+reduced_static_gate_shadow_creator_rebuy_min_narrative_score = 70.0
+reduced_static_gate_shadow_creator_rebuy_min_support_sol = 3.0
+
 # Minimum sniper score to pass.
 # v9 set at 60 (data-driven from corrupted post-bug data).
 # v10 kept at 60: historical pre-bug data (53 trades, +2.63 SOL, 65% WR) had NO

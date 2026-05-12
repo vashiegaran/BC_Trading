@@ -6,3 +6,5 @@ target/
 *.db
 scripts/
 wallets/
+bot.log
+analysis/

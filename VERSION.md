@@ -9,6 +9,35 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.9.4 — Reduced Static-Gate Shadow Lane (2026-05-12)
+
+**strategy_version**: unchanged (`v18.9-narrative-rebuy-exception`)
+
+### Why
+The May 12 filter audit showed strong overfit risk in stacked static gates: `buy_pressure`, `unique_buyers`, broad `creator_rebuy`, `buy_sell_ratio`, and old score floors were blocking many known runners while recent live trades still included rug-like losses. The next safe step is not live relaxation; it is fresh counterfactual data from a reduced-gate shadow lane.
+
+### Changes
+- Adds a shadow-only reduced static-gate lane that writes simulated graduation entries to `bc_paper_trades` with `entry_trigger = 'reduced_static_gate_shadow'`.
+- Adds [migrations/036_reduced_static_gate_shadow.sql](migrations/036_reduced_static_gate_shadow.sql) for a partial analysis index and updated trigger comment.
+- Adds config controls in [config.toml](config.toml):
+  - `reduced_static_gate_shadow_enabled = true`.
+  - `reduced_static_gate_shadow_min_score = 45.0`.
+  - `reduced_static_gate_shadow_min_buy_pressure_pct = 55.0`.
+  - `reduced_static_gate_shadow_min_unique_buyers = 10`.
+  - `reduced_static_gate_shadow_max_initial_liquidity_sol = 85.0`.
+  - creator-rebuy support thresholds for narrative/proven/whale/creator net-buy quality.
+- Creator rebuy can qualify only inside this shadow lane when it has no creator sell and at least one quality support reason: narrative score, proven-wallet support, whale support, or creator net-buy/no-sell support.
+- Existing by-mint price tracking patches the new shadow rows with the same outcome fields as other BC paper lanes; no additional price requests are introduced.
+- Does **not** change live entries, exits, sizing, standard-lane behavior, or broad `reject_creator_rebuy = true` behavior.
+
+### Safety / rate-limit note
+No live execution path reads this lane. It inserts one extra Supabase paper row only when a graduated token passes the reduced shadow gates. Existing price tracker patches all `bc_paper_trades` rows by mint, so the lane gets outcomes without extra DexScreener calls.
+
+### Rollback
+Set `reduced_static_gate_shadow_enabled = false` in [config.toml](config.toml), then restart. The migration/index can remain for historical analysis.
+
+---
+
 ## v18.9.3 — Creator-Rebuy Shadow Monitor Coverage (2026-05-11)
 
 **strategy_version**: unchanged (`v18.9-narrative-rebuy-exception`)
