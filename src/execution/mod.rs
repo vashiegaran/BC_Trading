@@ -262,6 +262,19 @@ pub fn start(
                     });
                     continue;
                 }
+
+                if let Err(reason) = narrative_canary_daily_limits_ok(&cfg, &supabase).await {
+                    warn!(mint = %mint_str, reason = %reason, "⏭️ Skipping narrative OR canary — daily cap reached");
+                    timing.outcome = Some("rejected_precheck".to_string());
+                    timing.rejection_stage = Some("precheck".to_string());
+                    timing.rejection_reason = Some(reason);
+                    let timing_payload = timing.to_json(&mint_str);
+                    let supabase_bg = supabase.clone();
+                    tokio::spawn(async move {
+                        log_pipeline_latency(&supabase_bg, &timing_payload).await;
+                    });
+                    continue;
+                }
             }
 
             // ── Dedup: skip if we already have a position in this mint (in-memory) ──
@@ -516,6 +529,87 @@ pub fn start(
     });
 
     (rx, alert_rx)
+}
+
+async fn narrative_canary_daily_limits_ok(
+    cfg: &AppConfig,
+    supabase: &SupabaseClient,
+) -> Result<(), String> {
+    let max_daily_trades = cfg.strategy.narrative_or_live_canary.max_daily_trades;
+    let max_daily_losses = cfg.strategy.narrative_or_live_canary.max_daily_losses;
+    if max_daily_trades == 0 && max_daily_losses == 0 {
+        return Ok(());
+    }
+
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let url = format!(
+        "{}/positions?select=id,status,pnl_sol,sol_received,exit_reason,sniper_features&created_at=gte.{}&is_paper_trade=eq.{}&order=created_at.desc&limit=200",
+        supabase.base_url, today, cfg.env.paper_trade
+    );
+
+    let resp = supabase
+        .client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("narrative_daily_limit_query_failed:{}", e))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "narrative_daily_limit_query_http_{}:{}",
+            status,
+            body.chars().take(160).collect::<String>()
+        ));
+    }
+
+    let rows: Vec<serde_json::Value> = resp
+        .json()
+        .await
+        .map_err(|e| format!("narrative_daily_limit_decode_failed:{}", e))?;
+    let mut trade_count = 0_u32;
+    let mut loss_count = 0_u32;
+    for row in rows {
+        let entry_tier = row
+            .get("sniper_features")
+            .and_then(|features| features.get("entry_tier"))
+            .and_then(|tier| tier.as_str());
+        if entry_tier != Some(NARRATIVE_CLUSTER_LIVE_CANARY_ENTRY_TIER) {
+            continue;
+        }
+        trade_count += 1;
+
+        let pnl = row.get("pnl_sol").and_then(|pnl| pnl.as_f64());
+        let sol_received = row
+            .get("sol_received")
+            .and_then(|value| value.as_f64())
+            .unwrap_or(0.0);
+        let exit_reason = row
+            .get("exit_reason")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        if exit_reason.contains("recovery_closed") && sol_received <= 0.0 {
+            continue;
+        }
+        if pnl.map(|pnl| pnl < 0.0).unwrap_or(false) {
+            loss_count += 1;
+        }
+    }
+
+    if max_daily_trades > 0 && trade_count >= max_daily_trades {
+        return Err(format!(
+            "narrative_or_daily_trade_cap_reached_{}/{}",
+            trade_count, max_daily_trades
+        ));
+    }
+    if max_daily_losses > 0 && loss_count >= max_daily_losses {
+        return Err(format!(
+            "narrative_or_daily_loss_stop_reached_{}/{}",
+            loss_count, max_daily_losses
+        ));
+    }
+
+    Ok(())
 }
 
 // ─── Pre-execution safety checks (in-memory cached) ─────────

@@ -20,6 +20,55 @@ pub struct TomlConfig {
     /// Re-entry shadow-mode tracking (post-moonbag exit).
     #[serde(default)]
     pub reentry: ReentryConfig,
+    /// Capped live promotion for the validated OR rule:
+    /// narrative live marker OR phase2 + post-grad + label confirmation.
+    #[serde(default)]
+    pub narrative_or_live_canary: NarrativeOrLiveCanaryConfig,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NarrativeOrLiveCanaryConfig {
+    /// Enable the post-grad leg watcher. The existing narrative live marker
+    /// remains controlled by `filters.narrative_cluster_live_canary_enabled`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Poll cadence for completed post-grad shadow rows.
+    #[serde(default = "default_narrative_or_live_canary_poll_interval_seconds")]
+    pub poll_interval_seconds: u64,
+    /// Startup grace window to catch rows completed while the process was
+    /// starting. Keep small to avoid stale post-grad entries on restart.
+    #[serde(default)]
+    pub startup_grace_seconds: u64,
+    /// Maximum completed post-grad rows fetched per poll.
+    #[serde(default = "default_narrative_or_live_canary_max_candidates_per_poll")]
+    pub max_candidates_per_poll: usize,
+    /// Max daily buys across both OR legs. 0 disables the daily trade cap.
+    #[serde(default)]
+    pub max_daily_trades: u32,
+    /// Stop new OR canary entries after this many realized losing exits today.
+    /// 0 disables the realized-loss-count stop.
+    #[serde(default)]
+    pub max_daily_losses: u32,
+}
+
+impl Default for NarrativeOrLiveCanaryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            poll_interval_seconds: default_narrative_or_live_canary_poll_interval_seconds(),
+            startup_grace_seconds: 0,
+            max_candidates_per_poll: default_narrative_or_live_canary_max_candidates_per_poll(),
+            max_daily_trades: 0,
+            max_daily_losses: 0,
+        }
+    }
+}
+
+fn default_narrative_or_live_canary_poll_interval_seconds() -> u64 {
+    15
+}
+fn default_narrative_or_live_canary_max_candidates_per_poll() -> usize {
+    50
 }
 
 #[derive(Debug, Deserialize)]

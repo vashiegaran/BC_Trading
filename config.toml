@@ -9,7 +9,23 @@
 #   filterable in analytics vs the broken v16.1 binary that was running
 #   from never-committed source. Detection: pumpfun_ws. Fast-track:
 #   2-source (on_chain_mint + goplus) so GoPlus runs PRE-buy.
-strategy_version = "v18.9.6-protected-runner-soft-exit-guard"
+strategy_version = "v18.9.9-capped-or-combo-live-canary"
+
+# ============================================================
+# CAPPED OR-COMBO LIVE CANARY
+# ============================================================
+# Promotion rule:
+#   narrative_live_marker OR (phase2_shadow_passed AND post_grad_flow_shadow
+#   AND label_flow_shadow)
+# The first leg is the existing narrative_cluster_live_canary. This section
+# enables only the delayed post-grad leg and applies the daily caps to both legs.
+[narrative_or_live_canary]
+enabled = true
+poll_interval_seconds = 15
+startup_grace_seconds = 15
+max_candidates_per_poll = 50
+max_daily_trades = 3
+max_daily_losses = 2
 
 # ============================================================
 # DETECTION
@@ -206,10 +222,9 @@ reject_creator_rebuy = true
 creator_rebuy_shadow_enabled = false
 creator_rebuy_shadow_min_score = 60.0
 
-# Tiny live canary: keep the broad creator_rebuy hard gate, but allow only
-# high-quality creator-rebuy profiles through after Fast-Track safety passes.
-# Rollback: set creator_rebuy_live_test_enabled=false and restart PM2.
-creator_rebuy_live_test_enabled = true
+# Tiny creator-rebuy canary is disabled for the v18.9.9 OR-combo run because
+# the recent live sample was weak. Re-enable only after separate fresh validation.
+creator_rebuy_live_test_enabled = false
 creator_rebuy_live_test_min_score = 63.0
 creator_rebuy_live_test_min_buy_pressure_pct = 80.0
 creator_rebuy_live_test_min_buy_sell_ratio = 4.0
@@ -273,10 +288,9 @@ allow_fast_track_buy_sell_ratio_bypass = true
 max_bc_sell_count = 40
 
 # ── BC Fast-Track Pipeline ──
-# Tokens with strong bonding curve scores skip full 2s enrichment and buy
-# with only mint+GoPlus safety checks (~250ms). Deferred verification runs
-# post-buy and triggers emergency exit if critical filters fail.
-bc_fast_track_enabled = true
+# Broad BC Fast-Track is disabled for the v18.9.9 OR-combo run. Both OR-combo
+# live legs still run mint/freeze-authority + GoPlus Fast-Track safety pre-buy.
+bc_fast_track_enabled = false
 # v18.6 retune: bc_score formula re-fit against >=3x outcomes. New score has
 # AUC=0.59 (was 0.53). Distribution is tighter, so the gate threshold drops
 # from 65 → 50 to keep similar pass-rate; 76% of BC-eligible tokens still

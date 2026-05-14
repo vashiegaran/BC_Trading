@@ -9,6 +9,37 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.9.9 — Capped OR-Combo Live Canary (2026-05-14)
+
+**strategy_version**: `v18.9.9-capped-or-combo-live-canary`
+
+### Why
+Fresh May 11-14 replay showed the combined rule `narrative_live_marker OR (phase2_shadow_passed AND post_grad_flow_shadow AND label_flow_shadow)` was the best balanced PumpFun live-promotion candidate, while current broad live lanes were losing.
+
+### Changes
+- Keeps the existing `narrative_cluster_live_canary` as the first OR leg.
+- Adds [src/narrative_or_live_canary.rs](src/narrative_or_live_canary.rs), a capped post-grad watcher for the second OR leg:
+  - requires `narrative_cluster_shadow.phase2_shadow_passed = true`,
+  - requires a `post_grad_flow_shadow` row with first-minute completion,
+  - requires a `bc_paper_trades` `label_flow_shadow` row,
+  - skips if any position already exists for the mint,
+  - runs Fast-Track mint/freeze-authority + GoPlus safety before live injection,
+  - injects a synthetic filtered token into the normal execution engine.
+- Adds `[narrative_or_live_canary]` config controls in [config.toml](config.toml): enable flag, poll interval, startup grace, max poll size, max daily trades, and max daily realized losses.
+- Adds execution-side OR-canary guardrails:
+  - max 3 OR-canary buys/day,
+  - stop after 2 realized OR-canary losses/day,
+  - existing max-open 1 narrative canary cap remains active.
+- Disables weak broad live lanes for this canary run:
+  - `creator_rebuy_live_test_enabled = false`,
+  - `bc_fast_track_enabled = false`.
+- Leaves emergency protections, post-buy verification, and exit protection logic unchanged.
+
+### Rollback
+Set `narrative_or_live_canary.enabled = false`, restore `strategy_version`, and optionally re-enable prior lanes in [config.toml](config.toml), then restart PM2.
+
+---
+
 ## v18.9.8 — Meteora DBC Shadow Collector (2026-05-14)
 
 **strategy_version**: unchanged (`v18.9.6-protected-runner-soft-exit-guard`)

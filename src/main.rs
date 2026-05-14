@@ -9,6 +9,7 @@ mod logger;
 mod meteora_dbc_shadow;
 mod monitoring;
 mod narrative;
+mod narrative_or_live_canary;
 mod reentry;
 mod sniper;
 
@@ -400,14 +401,21 @@ async fn main() {
     );
     info!("Exit engine started — ready to process exit signals");
 
-    // ── 11a. Start re-entry shadow watcher (post-moonbag exit) ──
+    // ── 11a. Start capped OR-combo live canary watcher ──
+    narrative_or_live_canary::start(
+        Arc::clone(&cfg_arc),
+        Arc::clone(&supabase_arc),
+        filter_tx.clone(),
+    );
+
+    // ── 11b. Start re-entry shadow watcher (post-moonbag exit) ──
     reentry::start(
         Arc::clone(&cfg_arc),
         Arc::clone(&supabase_arc),
         filter_tx.clone(),
     );
 
-    // ── 11b. Recover stuck positions from previous runs ─
+    // ── 11c. Recover stuck positions from previous runs ─
     recover_stuck_positions(&cfg_arc, &supabase_arc, &wallet, &recovery_tx).await;
 
     // ── 12. Register Ctrl+C handler (SAFETY Rule 8) ─────
