@@ -30,6 +30,17 @@ poll_interval_seconds = 5
 bonding_curve_signals_enabled = true
 bc_signal_volume_threshold = 30.0  # SOL — record when cumulative volume hits this
 
+# ── Meteora DBC shadow collector (observe-only, no live trading) ──
+# Runs inside the Rust bot/PM2 process, but only polls DexScreener and writes
+# to `meteora_dbc_shadow`. It does NOT use gRPC/Chainstack stream capacity,
+# wallet access, signing, filters, execution, or exits. If migration 038 has
+# not been applied yet, it logs a warning and live trading continues.
+meteora_dbc_shadow_enabled = true
+meteora_dbc_shadow_query = "meteoradbc"
+meteora_dbc_shadow_limit = 30
+meteora_dbc_shadow_interval_seconds = 60
+meteora_dbc_shadow_min_score = 65.0
+
 # ── Wallet-research shadow lanes (observe-only, never trade live) ──
 # label_flow_shadow: repeated same-label mint cluster seen shortly before this
 # token plus healthy curve flow.

@@ -114,6 +114,23 @@ pub struct DetectionConfig {
     /// ~50 SOL ≈ 60% to graduation, filters out 95% of dead tokens.
     #[serde(default = "default_bc_signal_volume_threshold")]
     pub bc_signal_volume_threshold: f64,
+    /// Shadow-only Meteora DBC collector. Runs in the same PM2-managed Rust
+    /// process but only polls DexScreener and writes `meteora_dbc_shadow`.
+    /// Never uses gRPC, wallet access, filters, execution, or exits.
+    #[serde(default)]
+    pub meteora_dbc_shadow_enabled: bool,
+    /// DexScreener search query used for DBC discovery.
+    #[serde(default = "default_meteora_dbc_shadow_query")]
+    pub meteora_dbc_shadow_query: String,
+    /// Maximum DBC mints processed per poll.
+    #[serde(default = "default_meteora_dbc_shadow_limit")]
+    pub meteora_dbc_shadow_limit: usize,
+    /// Poll interval for the DexScreener-only DBC shadow collector.
+    #[serde(default = "default_meteora_dbc_shadow_interval_seconds")]
+    pub meteora_dbc_shadow_interval_seconds: u64,
+    /// Research threshold for setting `would_trade_shadow`; never live.
+    #[serde(default = "default_meteora_dbc_shadow_min_score")]
+    pub meteora_dbc_shadow_min_score: f64,
     /// Shadow-only lane: record a would-be mint-time entry when a brand-new
     /// token arrives into a very recent same-label cluster.
     #[serde(default)]
@@ -256,6 +273,18 @@ fn default_true() -> bool {
 }
 fn default_bc_signal_volume_threshold() -> f64 {
     50.0
+}
+fn default_meteora_dbc_shadow_query() -> String {
+    "meteoradbc".to_string()
+}
+fn default_meteora_dbc_shadow_limit() -> usize {
+    30
+}
+fn default_meteora_dbc_shadow_interval_seconds() -> u64 {
+    60
+}
+fn default_meteora_dbc_shadow_min_score() -> f64 {
+    65.0
 }
 fn default_launch_label_shadow_max_age_seconds() -> u64 {
     30

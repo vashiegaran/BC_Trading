@@ -6,6 +6,7 @@ mod execution;
 mod exit;
 mod filters;
 mod logger;
+mod meteora_dbc_shadow;
 mod monitoring;
 mod narrative;
 mod reentry;
@@ -295,6 +296,11 @@ async fn main() {
 
     let cfg_arc = Arc::new(cfg);
     let supabase_arc = Arc::new(supabase);
+
+    // ── 6a. Start Meteora DBC shadow collector ───────────
+    // Observe-only DexScreener collector. It does not use gRPC, wallet,
+    // execution channels, filters, or exit logic.
+    meteora_dbc_shadow::start(Arc::clone(&cfg_arc), Arc::clone(&supabase_arc));
 
     // ── 6b. Initialize in-memory trading state ──────────
     let trading_state = execution::state::TradingState::new();

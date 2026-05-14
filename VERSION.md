@@ -9,6 +9,25 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.9.8 — Meteora DBC Shadow Collector (2026-05-14)
+
+**strategy_version**: unchanged (`v18.9.6-protected-runner-soft-exit-guard`)
+
+### Why
+A missed runner (`Cq7R2uzk71WzRzkGAdAzeoqeaQHAukNDk2AYJpg35gyv`) had no rows in the PumpFun bot/shadow tables because it launched/traded through Meteora DBC instead of the current PumpFun bonding-curve pipeline. This is a source-coverage gap, not a normal live-filter rejection.
+
+### Changes
+- Adds [migrations/038_meteora_dbc_shadow.sql](migrations/038_meteora_dbc_shadow.sql), an observe-only research table for Solana Meteora Dynamic Bonding Curve launches.
+- Adds Rust background collector [src/meteora_dbc_shadow.rs](src/meteora_dbc_shadow.rs) that runs inside the existing PM2-managed bot process, discovers `meteoradbc` pairs from DexScreener, fetches the token pair set, computes a PumpFun-inspired DBC score, and writes only to `meteora_dbc_shadow`.
+- Adds config controls in [config.toml](config.toml): `meteora_dbc_shadow_enabled`, query, limit, poll interval, and shadow score threshold.
+- Tracks first-seen market cap/price, peak market cap/price, peak multiplier, liquidity, volume, transaction counts, buy pressure, buy/sell ratio, and score reasons/penalties.
+- Keeps the lane shadow-only and DexScreener-only: no new gRPC stream, no Chainstack stream capacity usage, no wallet access, no signing, no Jupiter calls, no Helius trading path, no filter/execution/exit channel writes, and no live strategy-version change.
+
+### Rollback
+Set `meteora_dbc_shadow_enabled = false` in [config.toml](config.toml), then restart PM2. The table can remain for historical analysis; no live strategy config uses it.
+
+---
+
 ## v18.9.7 — Profit-Lock Shadow Signal (2026-05-12)
 
 **strategy_version**: unchanged (`v18.9.6-protected-runner-soft-exit-guard`)
