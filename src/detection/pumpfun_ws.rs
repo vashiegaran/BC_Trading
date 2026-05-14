@@ -198,7 +198,14 @@ struct CreatorBcMetrics {
     creator_buy_share_pct: Option<f64>,
 }
 
-const CREATOR_BC_TOP_LEVEL_COLUMNS: &[&str] = &[
+const OPTIONAL_BCS_TOP_LEVEL_COLUMNS: &[&str] = &[
+    "bc_progress_pct",
+    "bc_virtual_sol_reserves",
+    "bc_virtual_token_reserves",
+    "bc_market_cap_sol",
+    "bc_price_sol_per_token",
+    "creator_sold_during_bc",
+    "buy_pressure_at_entry_pct",
     "creator_buy_count_bc",
     "creator_buy_sol_total_bc",
     "creator_buy_max_sol_bc",
@@ -210,6 +217,14 @@ const CREATOR_BC_TOP_LEVEL_COLUMNS: &[&str] = &[
     "creator_sell_sol_total_bc",
     "creator_net_sol_bc",
     "creator_buy_share_pct",
+    "proven_wallet_buy_count_bc",
+    "proven_wallet_buy_sol_total_bc",
+    "proven_wallet_sell_count_bc",
+    "proven_wallet_sell_sol_total_bc",
+    "proven_wallet_net_sol_bc",
+    "creator_prior_mints_6h",
+    "creator_same_label_prior_mints_6h",
+    "creator_seconds_since_last_mint",
 ];
 
 fn secs_since_detection(timestamp_ms: Option<i64>, detected_at_ms: i64) -> Option<f64> {
@@ -426,32 +441,32 @@ fn proven_wallet_overlap_json(
     )
 }
 
-fn payload_without_creator_bc_top_level_columns(
+fn payload_without_optional_bcs_top_level_columns(
     payload: &serde_json::Value,
 ) -> Option<serde_json::Value> {
     let mut map = payload.as_object()?.clone();
     let mut removed_any = false;
-    for column in CREATOR_BC_TOP_LEVEL_COLUMNS {
+    for column in OPTIONAL_BCS_TOP_LEVEL_COLUMNS {
         removed_any |= map.remove(*column).is_some();
     }
     removed_any.then_some(serde_json::Value::Object(map))
 }
 
-async fn retry_insert_without_creator_bc_columns(
+async fn retry_insert_without_optional_bcs_columns(
     supabase: &SupabaseClient,
     url: &str,
     payload: &serde_json::Value,
     table_name: &str,
     mint: &str,
 ) -> bool {
-    let Some(fallback_payload) = payload_without_creator_bc_top_level_columns(payload) else {
+    let Some(fallback_payload) = payload_without_optional_bcs_top_level_columns(payload) else {
         return false;
     };
 
     warn!(
         mint = %mint,
         table = table_name,
-        "retrying insert without top-level creator BC metric columns; JSON metrics remain preserved"
+        "retrying insert without optional top-level bonding-curve signal columns; JSON metrics remain preserved"
     );
 
     match supabase
@@ -1815,7 +1830,7 @@ async fn write_narrative_cluster_shadow(supabase: &SupabaseClient, payload: &ser
         Ok(resp) => {
             let body = resp.text().await.unwrap_or_default();
             warn!(mint = %mint, "narrative_cluster_shadow INSERT failed: {}", body);
-            retry_insert_without_creator_bc_columns(
+            retry_insert_without_optional_bcs_columns(
                 supabase,
                 &url,
                 payload,
@@ -5094,7 +5109,7 @@ async fn write_bonding_curve_signal(supabase: &SupabaseClient, payload: &serde_j
         Ok(resp) => {
             let body = resp.text().await.unwrap_or_default();
             warn!(mint = %mint, "bonding_curve_signals INSERT failed: {}", body);
-            retry_insert_without_creator_bc_columns(
+            retry_insert_without_optional_bcs_columns(
                 supabase,
                 &url,
                 payload,

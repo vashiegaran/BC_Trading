@@ -250,13 +250,23 @@ async fn enqueue_new_closed(
     tracked: &mut HashMap<String, TrackedExit>,
     seen_positions: &mut HashSet<i64>,
 ) -> Result<()> {
-    let lookback = cfg.strategy.reentry.enqueue_lookback_seconds as i64;
+    let lookback = cfg
+        .strategy
+        .reentry
+        .enqueue_lookback_seconds
+        .max(cfg.strategy.reentry.window_seconds) as i64;
     let cutoff = (Utc::now() - chrono::Duration::seconds(lookback))
         .to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+    let peak_floor = cfg.strategy.reentry.min_peak_multiplier_to_track;
+    let peak_filter = if peak_floor > 0.0 {
+        format!("&peak_multiplier=gte.{}", peak_floor)
+    } else {
+        String::new()
+    };
 
     let url = format!(
-        "{}/positions?status=eq.closed&closed_at=gte.{}&select=id,mint,symbol,name,exit_price_usd,pnl_pct,exit_reason,exit_time,closed_at,peak_multiplier,sniper_features&order=closed_at.desc&limit=100",
-        supabase.base_url, cutoff
+        "{}/positions?status=eq.closed&closed_at=gte.{}{}&select=id,mint,symbol,name,exit_price_usd,pnl_pct,exit_reason,exit_time,closed_at,peak_multiplier,sniper_features&order=closed_at.desc&limit=500",
+        supabase.base_url, cutoff, peak_filter
     );
 
     let resp = supabase
@@ -292,7 +302,6 @@ async fn enqueue_new_closed(
 
         // Piggyback gate: only track exits that hit the moonbag peak floor.
         let peak = row.peak_multiplier.unwrap_or(0.0);
-        let peak_floor = cfg.strategy.reentry.min_peak_multiplier_to_track;
         if peak_floor > 0.0 && peak < peak_floor {
             seen_positions.insert(row.id);
             debug!(

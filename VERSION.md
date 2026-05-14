@@ -9,6 +9,24 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.9.10 — Bonding-Curve Signal Schema Guard (2026-05-14)
+
+**strategy_version**: unchanged (`v18.9.6-protected-runner-soft-exit-guard`)
+
+### Why
+The bonding-curve writer started sending creator lifecycle and proven-wallet flow fields as top-level `bonding_curve_signals` columns, but the table schema only had those fields in JSON/shadow tables. Supabase rejected inserts with PGRST204, e.g. missing `creator_prior_mints_6h`, which dropped bonding-curve signal rows.
+
+### Changes
+- Adds [migrations/039_bcs_flow_lifecycle_columns.sql](migrations/039_bcs_flow_lifecycle_columns.sql) for the missing top-level `bonding_curve_signals` columns.
+- Keeps [migrations/000_all_tables.sql](migrations/000_all_tables.sql) aligned for fresh installs.
+- Broadens the insert fallback in [src/detection/pumpfun_ws.rs](src/detection/pumpfun_ws.rs) so older or stale Supabase schemas can still record the core row while preserving these metrics inside the `signals` JSON payload.
+- Does **not** change live entries, exits, sizing, or filters.
+
+### Rollback
+No strategy rollback is required. Apply the migration, then restart the bot if the currently running process was built before this guard.
+
+---
+
 ## v18.9.9 — Capped OR-Combo Live Canary (2026-05-14)
 
 **strategy_version**: `v18.9.9-capped-or-combo-live-canary`

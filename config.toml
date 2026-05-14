@@ -9,23 +9,7 @@
 #   filterable in analytics vs the broken v16.1 binary that was running
 #   from never-committed source. Detection: pumpfun_ws. Fast-track:
 #   2-source (on_chain_mint + goplus) so GoPlus runs PRE-buy.
-strategy_version = "v18.9.9-capped-or-combo-live-canary"
-
-# ============================================================
-# CAPPED OR-COMBO LIVE CANARY
-# ============================================================
-# Promotion rule:
-#   narrative_live_marker OR (phase2_shadow_passed AND post_grad_flow_shadow
-#   AND label_flow_shadow)
-# The first leg is the existing narrative_cluster_live_canary. This section
-# enables only the delayed post-grad leg and applies the daily caps to both legs.
-[narrative_or_live_canary]
-enabled = true
-poll_interval_seconds = 15
-startup_grace_seconds = 15
-max_candidates_per_poll = 50
-max_daily_trades = 3
-max_daily_losses = 2
+strategy_version = "v18.9.6-protected-runner-soft-exit-guard"
 
 # ============================================================
 # DETECTION
@@ -45,17 +29,6 @@ poll_interval_seconds = 5
 # Data goes to `bonding_curve_signals` Supabase table for backtesting.
 bonding_curve_signals_enabled = true
 bc_signal_volume_threshold = 30.0  # SOL — record when cumulative volume hits this
-
-# ── Meteora DBC shadow collector (observe-only, no live trading) ──
-# Runs inside the Rust bot/PM2 process, but only polls DexScreener and writes
-# to `meteora_dbc_shadow`. It does NOT use gRPC/Chainstack stream capacity,
-# wallet access, signing, filters, execution, or exits. If migration 038 has
-# not been applied yet, it logs a warning and live trading continues.
-meteora_dbc_shadow_enabled = true
-meteora_dbc_shadow_query = "meteoradbc"
-meteora_dbc_shadow_limit = 30
-meteora_dbc_shadow_interval_seconds = 60
-meteora_dbc_shadow_min_score = 65.0
 
 # ── Wallet-research shadow lanes (observe-only, never trade live) ──
 # label_flow_shadow: repeated same-label mint cluster seen shortly before this
@@ -222,9 +195,10 @@ reject_creator_rebuy = true
 creator_rebuy_shadow_enabled = false
 creator_rebuy_shadow_min_score = 60.0
 
-# Tiny creator-rebuy canary is disabled for the v18.9.9 OR-combo run because
-# the recent live sample was weak. Re-enable only after separate fresh validation.
-creator_rebuy_live_test_enabled = false
+# Tiny live canary: keep the broad creator_rebuy hard gate, but allow only
+# high-quality creator-rebuy profiles through after Fast-Track safety passes.
+# Rollback: set creator_rebuy_live_test_enabled=false and restart PM2.
+creator_rebuy_live_test_enabled = true
 creator_rebuy_live_test_min_score = 63.0
 creator_rebuy_live_test_min_buy_pressure_pct = 80.0
 creator_rebuy_live_test_min_buy_sell_ratio = 4.0
@@ -288,9 +262,10 @@ allow_fast_track_buy_sell_ratio_bypass = true
 max_bc_sell_count = 40
 
 # ── BC Fast-Track Pipeline ──
-# Broad BC Fast-Track is disabled for the v18.9.9 OR-combo run. Both OR-combo
-# live legs still run mint/freeze-authority + GoPlus Fast-Track safety pre-buy.
-bc_fast_track_enabled = false
+# Tokens with strong bonding curve scores skip full 2s enrichment and buy
+# with only mint+GoPlus safety checks (~250ms). Deferred verification runs
+# post-buy and triggers emergency exit if critical filters fail.
+bc_fast_track_enabled = true
 # v18.6 retune: bc_score formula re-fit against >=3x outcomes. New score has
 # AUC=0.59 (was 0.53). Distribution is tighter, so the gate threshold drops
 # from 65 → 50 to keep similar pass-rate; 76% of BC-eligible tokens still
@@ -758,4 +733,4 @@ min_dip_pct = 0.15                  # require ≥15% dip from exit price
 min_narrative_score = 60            # unused when require_narrative=false
 check_interval_seconds = 90         # re-evaluate all tracked mints every 90s
 outcome_interval_seconds = 300      # backfill +30m/+2h/+6h prices every 5m
-enqueue_lookback_seconds = 300      # scan newly-closed positions over last 5m
+enqueue_lookback_seconds = 21600    # restart-safe: scan active 6h moonbag-exit window
