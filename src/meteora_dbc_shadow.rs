@@ -114,8 +114,6 @@ async fn shadow_table_ready(supabase: &SupabaseClient) -> bool {
 async fn run_once(client: &Client, cfg: &AppConfig, supabase: &SupabaseClient) -> Result<()> {
     let query = cfg.strategy.detection.meteora_dbc_shadow_query.as_str();
     let limit = cfg.strategy.detection.meteora_dbc_shadow_limit;
-    let min_score = cfg.strategy.detection.meteora_dbc_shadow_min_score;
-
     let mints = discover_meteoradbc_mints(client, query, limit).await?;
     info!(
         count = mints.len(),
@@ -124,7 +122,7 @@ async fn run_once(client: &Client, cfg: &AppConfig, supabase: &SupabaseClient) -
     );
 
     for mint in mints {
-        match process_mint(client, supabase, &mint, min_score).await {
+        match process_mint(client, cfg, supabase, &mint).await {
             Ok(status) => debug!(mint = %mint, status = status, "meteora_dbc_shadow: row updated"),
             Err(e) => warn!(mint = %mint, "meteora_dbc_shadow: mint update failed: {:#}", e),
         }
@@ -135,12 +133,12 @@ async fn run_once(client: &Client, cfg: &AppConfig, supabase: &SupabaseClient) -
 
 async fn process_mint(
     client: &Client,
+    cfg: &AppConfig,
     supabase: &SupabaseClient,
     mint: &str,
-    min_score: f64,
 ) -> Result<&'static str> {
     let pairs = fetch_pairs_for_mint(client, mint).await?;
-    let payload = build_payload(mint, &pairs, min_score)
+    let payload = build_payload(mint, &pairs, cfg)
         .ok_or_else(|| anyhow!("no meteoradbc pair found in token pair set"))?;
     update_shadow_row(supabase, payload).await
 }
@@ -165,7 +163,12 @@ async fn discover_meteoradbc_mints(
     let mut seen = HashSet::new();
     let mut mints = Vec::new();
 
-    for pair in data.get("pairs").and_then(Value::as_array).into_iter().flatten() {
+    for pair in data
+        .get("pairs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
         if str_field(pair, "chainId") != Some("solana")
             || str_field(pair, "dexId") != Some("meteoradbc")
         {
@@ -211,7 +214,7 @@ async fn fetch_pairs_for_mint(client: &Client, mint: &str) -> Result<Vec<Value>>
         .unwrap_or_default())
 }
 
-fn build_payload(mint: &str, all_pairs: &[Value], min_score: f64) -> Option<Value> {
+fn build_payload(mint: &str, all_pairs: &[Value], cfg: &AppConfig) -> Option<Value> {
     let dbc_pair = choose_best_pair(all_pairs, "meteoradbc")?;
     let meteora_pair = choose_best_pair(all_pairs, "meteora");
     let active_pair = meteora_pair.unwrap_or(dbc_pair);
@@ -219,20 +222,30 @@ fn build_payload(mint: &str, all_pairs: &[Value], min_score: f64) -> Option<Valu
         .get("baseToken")
         .or_else(|| dbc_pair.get("baseToken"));
 
-    let (score, reasons, penalties) = compute_meteora_dbc_score(dbc_pair, meteora_pair);
+    let min_score = cfg.strategy.detection.meteora_dbc_shadow_min_score;
+    let (score, mut reasons, mut penalties) = compute_meteora_dbc_score(dbc_pair, meteora_pair);
 
     let h1_buys = txns(active_pair, "h1", "buys").or_else(|| txns(active_pair, "h24", "buys"));
-    let h1_sells =
-        txns(active_pair, "h1", "sells").or_else(|| txns(active_pair, "h24", "sells"));
+    let h1_sells = txns(active_pair, "h1", "sells").or_else(|| txns(active_pair, "h24", "sells"));
     let m5_buys = txns(active_pair, "m5", "buys").unwrap_or(0);
     let m5_sells = txns(active_pair, "m5", "sells").unwrap_or(0);
     let h1_buys_i = h1_buys.unwrap_or(0);
     let h1_sells_i = h1_sells.unwrap_or(0);
+    let symbol = base.and_then(|v| v.get("symbol")).and_then(Value::as_str);
+    let name = base.and_then(|v| v.get("name")).and_then(Value::as_str);
+    let market_cap = field_f64(active_pair, "marketCap").or_else(|| field_f64(active_pair, "fdv"));
+    let bp_h1 = buy_pressure_pct(h1_buys_i, h1_sells_i);
+    let ratio_h1 = buy_sell_ratio(h1_buys_i, h1_sells_i);
+    let tier_a = evaluate_tier_a(
+        cfg, score, symbol, name, market_cap, h1_buys_i, bp_h1, ratio_h1,
+    );
+    reasons.extend(tier_a.reasons.iter().cloned());
+    penalties.extend(tier_a.penalties.iter().cloned());
 
     Some(json!({
         "mint": mint,
-        "symbol": base.and_then(|v| v.get("symbol")).and_then(Value::as_str),
-        "name": base.and_then(|v| v.get("name")).and_then(Value::as_str),
+        "symbol": symbol,
+        "name": name,
         "source": "dexscreener_search_rust",
         "chain_id": str_field(active_pair, "chainId").unwrap_or("solana"),
         "dbc_dex_id": "meteoradbc",
@@ -260,8 +273,8 @@ fn build_payload(mint: &str, all_pairs: &[Value], min_score: f64) -> Option<Valu
         "txns_h6_sells": txns(active_pair, "h6", "sells").unwrap_or(0),
         "txns_h24_buys": txns(active_pair, "h24", "buys").unwrap_or(0),
         "txns_h24_sells": txns(active_pair, "h24", "sells").unwrap_or(0),
-        "buy_pressure_h1_pct": buy_pressure_pct(h1_buys_i, h1_sells_i),
-        "buy_sell_ratio_h1": buy_sell_ratio(h1_buys_i, h1_sells_i),
+        "buy_pressure_h1_pct": bp_h1,
+        "buy_sell_ratio_h1": ratio_h1,
         "price_change_m5_pct": price_change(active_pair, "m5"),
         "price_change_h1_pct": price_change(active_pair, "h1"),
         "price_change_h6_pct": price_change(active_pair, "h6"),
@@ -269,11 +282,167 @@ fn build_payload(mint: &str, all_pairs: &[Value], min_score: f64) -> Option<Valu
         "meteora_dbc_score": score,
         "score_reasons": reasons,
         "score_penalties": penalties,
-        "would_trade_shadow": score >= min_score,
+        "would_trade_shadow": tier_a.eligible,
         "min_score_threshold": min_score,
         "raw_pairs": all_pairs,
-        "last_status": "tracking",
+        "last_status": if tier_a.eligible { "tier_a_live_canary_candidate" } else { "tracking" },
     }))
+}
+
+#[derive(Debug)]
+struct TierAGate {
+    eligible: bool,
+    reasons: Vec<String>,
+    penalties: Vec<String>,
+}
+
+fn evaluate_tier_a(
+    cfg: &AppConfig,
+    score: f64,
+    symbol: Option<&str>,
+    name: Option<&str>,
+    market_cap: Option<f64>,
+    h1_buys: i64,
+    buy_pressure_h1_pct: Option<f64>,
+    buy_sell_ratio_h1: Option<f64>,
+) -> TierAGate {
+    let detection = &cfg.strategy.detection;
+    if !detection.meteora_dbc_tier_a_enabled {
+        return TierAGate {
+            eligible: score >= detection.meteora_dbc_shadow_min_score,
+            reasons: vec!["tier_a_disabled_score_only_shadow".to_string()],
+            penalties: Vec::new(),
+        };
+    }
+
+    let mut eligible = true;
+    let mut reasons = Vec::new();
+    let mut penalties = Vec::new();
+    let min_score = detection.meteora_dbc_shadow_min_score;
+
+    if score >= min_score {
+        reasons.push(format!("tier_a_score_pass_{score:.1}_gte_{min_score:.1}"));
+    } else {
+        eligible = false;
+        penalties.push(format!("tier_a_score_fail_{score:.1}_lt_{min_score:.1}"));
+    }
+
+    match meteora_theme(symbol, name) {
+        Some(theme) => reasons.push(format!("tier_a_theme_{theme}")),
+        None if detection.meteora_dbc_tier_a_require_theme => {
+            eligible = false;
+            penalties.push("tier_a_missing_strong_theme".to_string());
+        }
+        None => reasons.push("tier_a_theme_not_required".to_string()),
+    }
+
+    match buy_pressure_h1_pct {
+        Some(bp) if bp >= detection.meteora_dbc_tier_a_min_buy_pressure_pct => {
+            reasons.push(format!(
+                "tier_a_buy_pressure_pass_{bp:.1}_gte_{:.1}",
+                detection.meteora_dbc_tier_a_min_buy_pressure_pct
+            ))
+        }
+        Some(bp) => {
+            eligible = false;
+            penalties.push(format!(
+                "tier_a_buy_pressure_fail_{bp:.1}_lt_{:.1}",
+                detection.meteora_dbc_tier_a_min_buy_pressure_pct
+            ));
+        }
+        None => {
+            eligible = false;
+            penalties.push("tier_a_missing_h1_buy_pressure".to_string());
+        }
+    }
+
+    match buy_sell_ratio_h1 {
+        Some(ratio) if ratio >= detection.meteora_dbc_tier_a_min_buy_sell_ratio => {
+            reasons.push(format!(
+                "tier_a_buy_sell_ratio_pass_{ratio:.2}_gte_{:.2}",
+                detection.meteora_dbc_tier_a_min_buy_sell_ratio
+            ))
+        }
+        Some(ratio) => {
+            eligible = false;
+            penalties.push(format!(
+                "tier_a_buy_sell_ratio_fail_{ratio:.2}_lt_{:.2}",
+                detection.meteora_dbc_tier_a_min_buy_sell_ratio
+            ));
+        }
+        None => {
+            eligible = false;
+            penalties.push("tier_a_missing_h1_buy_sell_ratio".to_string());
+        }
+    }
+
+    if h1_buys >= detection.meteora_dbc_tier_a_min_h1_buys {
+        reasons.push(format!(
+            "tier_a_h1_buys_pass_{h1_buys}_gte_{}",
+            detection.meteora_dbc_tier_a_min_h1_buys
+        ));
+    } else {
+        eligible = false;
+        penalties.push(format!(
+            "tier_a_h1_buys_fail_{h1_buys}_lt_{}",
+            detection.meteora_dbc_tier_a_min_h1_buys
+        ));
+    }
+
+    if let Some(mc) = market_cap {
+        let min_mc = detection.meteora_dbc_tier_a_min_market_cap_usd;
+        let max_mc = detection.meteora_dbc_tier_a_max_market_cap_usd;
+        if min_mc > 0.0 && mc < min_mc {
+            eligible = false;
+            penalties.push(format!("tier_a_market_cap_fail_{mc:.0}_lt_{min_mc:.0}"));
+        } else if max_mc > 0.0 && mc > max_mc {
+            eligible = false;
+            penalties.push(format!("tier_a_market_cap_fail_{mc:.0}_gt_{max_mc:.0}"));
+        } else {
+            reasons.push(format!("tier_a_market_cap_pass_{mc:.0}"));
+        }
+    } else {
+        eligible = false;
+        penalties.push("tier_a_missing_market_cap".to_string());
+    }
+
+    if eligible {
+        reasons.push("tier_a_live_canary_eligible".to_string());
+    }
+
+    TierAGate {
+        eligible,
+        reasons,
+        penalties,
+    }
+}
+
+fn meteora_theme(symbol: Option<&str>, name: Option<&str>) -> Option<&'static str> {
+    let text = format!(
+        "{} {}",
+        symbol.unwrap_or_default().to_lowercase(),
+        name.unwrap_or_default().to_lowercase()
+    );
+
+    if text.contains("worldcup") || text.contains("world cup") || text.contains("fifa") {
+        return Some("worldcup");
+    }
+    if text.contains("red bull") || text.contains("redbull") {
+        return Some("brand");
+    }
+    if text.contains("google ai")
+        || text.contains("googleai")
+        || text.contains("grok")
+        || text.contains("nvdia")
+        || text.contains("nvidia")
+        || text.contains("openai")
+        || text.contains("chatgpt")
+        || text.contains("anthropic")
+    {
+        return Some("ai_tech");
+    }
+
+    None
 }
 
 fn compute_meteora_dbc_score(
@@ -470,16 +639,15 @@ async fn update_shadow_row(supabase: &SupabaseClient, payload: Value) -> Result<
             row.get("peak_market_cap_usd").and_then(json_as_f64),
             current_mc,
         );
-        let peak_price = max_opt(row.get("peak_price_usd").and_then(json_as_f64), current_price);
+        let peak_price = max_opt(
+            row.get("peak_price_usd").and_then(json_as_f64),
+            current_price,
+        );
         let peak_multiplier = match (peak_mc, first_mc) {
             (Some(peak), Some(first)) if first > 0.0 => Some(peak / first),
             _ => None,
         };
-        let sample_count = row
-            .get("sample_count")
-            .and_then(Value::as_i64)
-            .unwrap_or(1)
-            + 1;
+        let sample_count = row.get("sample_count").and_then(Value::as_i64).unwrap_or(1) + 1;
 
         let mut patch = object_from_payload(&payload)?;
         patch.insert("first_seen_market_cap_usd".to_string(), json!(first_mc));
@@ -495,7 +663,13 @@ async fn update_shadow_row(supabase: &SupabaseClient, payload: Value) -> Result<
             "{}/meteora_dbc_shadow?mint=eq.{}",
             supabase.base_url, encoded_mint
         );
-        send_supabase_write(supabase.client.patch(&patch_url).json(&Value::Object(patch))).await?;
+        send_supabase_write(
+            supabase
+                .client
+                .patch(&patch_url)
+                .json(&Value::Object(patch)),
+        )
+        .await?;
         return Ok("patched");
     }
 
@@ -510,12 +684,21 @@ async fn update_shadow_row(supabase: &SupabaseClient, payload: Value) -> Result<
     );
 
     let insert_url = format!("{}/meteora_dbc_shadow", supabase.base_url);
-    send_supabase_write(supabase.client.post(&insert_url).json(&Value::Object(insert))).await?;
+    send_supabase_write(
+        supabase
+            .client
+            .post(&insert_url)
+            .json(&Value::Object(insert)),
+    )
+    .await?;
     Ok("inserted")
 }
 
 async fn send_supabase_write(builder: reqwest::RequestBuilder) -> Result<()> {
-    let resp = builder.send().await.context("Supabase write request failed")?;
+    let resp = builder
+        .send()
+        .await
+        .context("Supabase write request failed")?;
     if resp.status().is_success() {
         return Ok(());
     }
@@ -534,7 +717,9 @@ fn object_from_payload(payload: &Value) -> Result<Map<String, Value>> {
 fn choose_best_pair<'a>(pairs: &'a [Value], dex_id: &str) -> Option<&'a Value> {
     pairs
         .iter()
-        .filter(|pair| str_field(pair, "chainId") == Some("solana") && str_field(pair, "dexId") == Some(dex_id))
+        .filter(|pair| {
+            str_field(pair, "chainId") == Some("solana") && str_field(pair, "dexId") == Some(dex_id)
+        })
         .max_by(|a, b| {
             let av = nested_f64(a, &["liquidity", "usd"])
                 .or_else(|| field_f64(a, "marketCap"))

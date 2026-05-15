@@ -20,34 +20,24 @@ pub struct TomlConfig {
     /// Re-entry shadow-mode tracking (post-moonbag exit).
     #[serde(default)]
     pub reentry: ReentryConfig,
-    /// Capped live promotion for the validated OR rule:
-    /// narrative live marker OR phase2 + post-grad + label confirmation.
+    /// Capped post-grad OR-combo live canary controls.
     #[serde(default)]
     pub narrative_or_live_canary: NarrativeOrLiveCanaryConfig,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct NarrativeOrLiveCanaryConfig {
-    /// Enable the post-grad leg watcher. The existing narrative live marker
-    /// remains controlled by `filters.narrative_cluster_live_canary_enabled`.
     #[serde(default)]
     pub enabled: bool,
-    /// Poll cadence for completed post-grad shadow rows.
     #[serde(default = "default_narrative_or_live_canary_poll_interval_seconds")]
     pub poll_interval_seconds: u64,
-    /// Startup grace window to catch rows completed while the process was
-    /// starting. Keep small to avoid stale post-grad entries on restart.
-    #[serde(default)]
+    #[serde(default = "default_narrative_or_live_canary_startup_grace_seconds")]
     pub startup_grace_seconds: u64,
-    /// Maximum completed post-grad rows fetched per poll.
     #[serde(default = "default_narrative_or_live_canary_max_candidates_per_poll")]
     pub max_candidates_per_poll: usize,
-    /// Max daily buys across both OR legs. 0 disables the daily trade cap.
-    #[serde(default)]
+    #[serde(default = "default_narrative_or_live_canary_max_daily_trades")]
     pub max_daily_trades: u32,
-    /// Stop new OR canary entries after this many realized losing exits today.
-    /// 0 disables the realized-loss-count stop.
-    #[serde(default)]
+    #[serde(default = "default_narrative_or_live_canary_max_daily_losses")]
     pub max_daily_losses: u32,
 }
 
@@ -56,19 +46,28 @@ impl Default for NarrativeOrLiveCanaryConfig {
         Self {
             enabled: false,
             poll_interval_seconds: default_narrative_or_live_canary_poll_interval_seconds(),
-            startup_grace_seconds: 0,
+            startup_grace_seconds: default_narrative_or_live_canary_startup_grace_seconds(),
             max_candidates_per_poll: default_narrative_or_live_canary_max_candidates_per_poll(),
-            max_daily_trades: 0,
-            max_daily_losses: 0,
+            max_daily_trades: default_narrative_or_live_canary_max_daily_trades(),
+            max_daily_losses: default_narrative_or_live_canary_max_daily_losses(),
         }
     }
 }
 
 fn default_narrative_or_live_canary_poll_interval_seconds() -> u64 {
-    15
+    30
+}
+fn default_narrative_or_live_canary_startup_grace_seconds() -> u64 {
+    30
 }
 fn default_narrative_or_live_canary_max_candidates_per_poll() -> usize {
     50
+}
+fn default_narrative_or_live_canary_max_daily_trades() -> u32 {
+    3
+}
+fn default_narrative_or_live_canary_max_daily_losses() -> u32 {
+    2
 }
 
 #[derive(Debug, Deserialize)]
@@ -163,23 +162,6 @@ pub struct DetectionConfig {
     /// ~50 SOL ≈ 60% to graduation, filters out 95% of dead tokens.
     #[serde(default = "default_bc_signal_volume_threshold")]
     pub bc_signal_volume_threshold: f64,
-    /// Shadow-only Meteora DBC collector. Runs in the same PM2-managed Rust
-    /// process but only polls DexScreener and writes `meteora_dbc_shadow`.
-    /// Never uses gRPC, wallet access, filters, execution, or exits.
-    #[serde(default)]
-    pub meteora_dbc_shadow_enabled: bool,
-    /// DexScreener search query used for DBC discovery.
-    #[serde(default = "default_meteora_dbc_shadow_query")]
-    pub meteora_dbc_shadow_query: String,
-    /// Maximum DBC mints processed per poll.
-    #[serde(default = "default_meteora_dbc_shadow_limit")]
-    pub meteora_dbc_shadow_limit: usize,
-    /// Poll interval for the DexScreener-only DBC shadow collector.
-    #[serde(default = "default_meteora_dbc_shadow_interval_seconds")]
-    pub meteora_dbc_shadow_interval_seconds: u64,
-    /// Research threshold for setting `would_trade_shadow`; never live.
-    #[serde(default = "default_meteora_dbc_shadow_min_score")]
-    pub meteora_dbc_shadow_min_score: f64,
     /// Shadow-only lane: record a would-be mint-time entry when a brand-new
     /// token arrives into a very recent same-label cluster.
     #[serde(default)]
@@ -315,6 +297,42 @@ pub struct DetectionConfig {
     /// Seconds between initial and follow-up top-holder snapshots.
     #[serde(default = "default_top_holder_flow_shadow_delay_secs")]
     pub top_holder_flow_shadow_delay_secs: u64,
+    /// Shadow-only DexScreener collector for Solana Meteora DBC launches.
+    #[serde(default)]
+    pub meteora_dbc_shadow_enabled: bool,
+    /// DexScreener search query for the Meteora DBC shadow collector.
+    #[serde(default = "default_meteora_dbc_shadow_query")]
+    pub meteora_dbc_shadow_query: String,
+    /// Max search mints to process per Meteora DBC poll.
+    #[serde(default = "default_meteora_dbc_shadow_limit")]
+    pub meteora_dbc_shadow_limit: usize,
+    /// Seconds between Meteora DBC DexScreener polls.
+    #[serde(default = "default_meteora_dbc_shadow_interval_seconds")]
+    pub meteora_dbc_shadow_interval_seconds: u64,
+    /// Base score floor before a Meteora row can be considered a narrowed would-trade candidate.
+    #[serde(default = "default_meteora_dbc_shadow_min_score")]
+    pub meteora_dbc_shadow_min_score: f64,
+    /// Narrow Tier A classification for potential live-canary Meteora candidates.
+    #[serde(default = "default_true")]
+    pub meteora_dbc_tier_a_enabled: bool,
+    /// Require one of the proven repeated themes before a Meteora row can pass Tier A.
+    #[serde(default = "default_true")]
+    pub meteora_dbc_tier_a_require_theme: bool,
+    /// Minimum H1 buy pressure for Tier A when DexScreener flow is available.
+    #[serde(default = "default_meteora_dbc_tier_a_min_buy_pressure_pct")]
+    pub meteora_dbc_tier_a_min_buy_pressure_pct: f64,
+    /// Minimum H1 buy/sell ratio for Tier A when DexScreener flow is available.
+    #[serde(default = "default_meteora_dbc_tier_a_min_buy_sell_ratio")]
+    pub meteora_dbc_tier_a_min_buy_sell_ratio: f64,
+    /// Minimum H1 buy transactions for Tier A.
+    #[serde(default = "default_meteora_dbc_tier_a_min_h1_buys")]
+    pub meteora_dbc_tier_a_min_h1_buys: i64,
+    /// Minimum market cap band for Tier A. 0 disables this side of the band.
+    #[serde(default = "default_meteora_dbc_tier_a_min_market_cap_usd")]
+    pub meteora_dbc_tier_a_min_market_cap_usd: f64,
+    /// Maximum market cap band for Tier A. 0 disables this side of the band.
+    #[serde(default = "default_meteora_dbc_tier_a_max_market_cap_usd")]
+    pub meteora_dbc_tier_a_max_market_cap_usd: f64,
 }
 
 fn default_true() -> bool {
@@ -322,18 +340,6 @@ fn default_true() -> bool {
 }
 fn default_bc_signal_volume_threshold() -> f64 {
     50.0
-}
-fn default_meteora_dbc_shadow_query() -> String {
-    "meteoradbc".to_string()
-}
-fn default_meteora_dbc_shadow_limit() -> usize {
-    30
-}
-fn default_meteora_dbc_shadow_interval_seconds() -> u64 {
-    60
-}
-fn default_meteora_dbc_shadow_min_score() -> f64 {
-    65.0
 }
 fn default_launch_label_shadow_max_age_seconds() -> u64 {
     30
@@ -418,6 +424,33 @@ fn default_top_holder_flow_shadow_max_active() -> usize {
 }
 fn default_top_holder_flow_shadow_delay_secs() -> u64 {
     300
+}
+fn default_meteora_dbc_shadow_query() -> String {
+    "meteoradbc".to_string()
+}
+fn default_meteora_dbc_shadow_limit() -> usize {
+    30
+}
+fn default_meteora_dbc_shadow_interval_seconds() -> u64 {
+    60
+}
+fn default_meteora_dbc_shadow_min_score() -> f64 {
+    65.0
+}
+fn default_meteora_dbc_tier_a_min_buy_pressure_pct() -> f64 {
+    98.0
+}
+fn default_meteora_dbc_tier_a_min_buy_sell_ratio() -> f64 {
+    50.0
+}
+fn default_meteora_dbc_tier_a_min_h1_buys() -> i64 {
+    200
+}
+fn default_meteora_dbc_tier_a_min_market_cap_usd() -> f64 {
+    70_000.0
+}
+fn default_meteora_dbc_tier_a_max_market_cap_usd() -> f64 {
+    110_000.0
 }
 fn default_max_liquidity_usd() -> u64 {
     0

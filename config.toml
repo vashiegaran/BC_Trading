@@ -30,6 +30,23 @@ poll_interval_seconds = 5
 bonding_curve_signals_enabled = true
 bc_signal_volume_threshold = 30.0  # SOL — record when cumulative volume hits this
 
+# ── Meteora DBC shadow lane (observe-only, no live execution) ──
+# Collects Solana Meteora Dynamic Bonding Curve launches from DexScreener.
+# `would_trade_shadow` is intentionally narrowed to Tier A candidates only:
+# proven repeated themes + extreme buy dominance + real H1 buy activity.
+meteora_dbc_shadow_enabled = true
+meteora_dbc_shadow_query = "meteoradbc"
+meteora_dbc_shadow_limit = 30
+meteora_dbc_shadow_interval_seconds = 60
+meteora_dbc_shadow_min_score = 65.0
+meteora_dbc_tier_a_enabled = true
+meteora_dbc_tier_a_require_theme = true
+meteora_dbc_tier_a_min_buy_pressure_pct = 98.0
+meteora_dbc_tier_a_min_buy_sell_ratio = 50.0
+meteora_dbc_tier_a_min_h1_buys = 200
+meteora_dbc_tier_a_min_market_cap_usd = 70000.0
+meteora_dbc_tier_a_max_market_cap_usd = 110000.0
+
 # ── Wallet-research shadow lanes (observe-only, never trade live) ──
 # label_flow_shadow: repeated same-label mint cluster seen shortly before this
 # token plus healthy curve flow.
