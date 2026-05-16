@@ -7,6 +7,7 @@ use tracing::{debug, info, warn};
 use crate::logger::SupabaseClient;
 
 const CREATOR_REBUY_LIVE_TEST_ENTRY_TIER: &str = "creator_rebuy_live_test_fast_track";
+const CREATOR_REBUY_MOONBAG_CANARY_ENTRY_TIER: &str = "creator_rebuy_moonbag_canary";
 const NARRATIVE_CLUSTER_LIVE_CANARY_ENTRY_TIER: &str = "narrative_cluster_live_canary";
 
 /// In-memory trading state that replaces Supabase reads on the critical buy path.
@@ -110,7 +111,11 @@ impl TradingState {
                 .get("sniper_features")
                 .and_then(|features| features.get("entry_tier"))
                 .and_then(|entry_tier| entry_tier.as_str())
-                == Some(CREATOR_REBUY_LIVE_TEST_ENTRY_TIER);
+                .map(|entry_tier| {
+                    entry_tier == CREATOR_REBUY_LIVE_TEST_ENTRY_TIER
+                        || entry_tier == CREATOR_REBUY_MOONBAG_CANARY_ENTRY_TIER
+                })
+                .unwrap_or(false);
             if is_creator_rebuy_live_test {
                 if let Some(mint) = row.get("mint").and_then(|v| v.as_str()) {
                     inner

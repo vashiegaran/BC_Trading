@@ -2774,6 +2774,7 @@ fn is_protected_runner_entry(position: &PositionOpened) -> bool {
         .and_then(|tier| tier.as_str())
         .map(|tier| {
             tier.starts_with("creator_rebuy_live_test")
+                || tier == "creator_rebuy_moonbag_canary"
                 || tier == NARRATIVE_CLUSTER_LIVE_CANARY_ENTRY_TIER
         })
         .unwrap_or(false)

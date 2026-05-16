@@ -9,7 +9,7 @@
 #   filterable in analytics vs the broken v16.1 binary that was running
 #   from never-committed source. Detection: pumpfun_ws. Fast-track:
 #   2-source (on_chain_mint + goplus) so GoPlus runs PRE-buy.
-strategy_version = "v18.9.6-protected-runner-soft-exit-guard"
+strategy_version = "v18.9.11-creator-rebuy-moonbag-canary"
 
 # ============================================================
 # DETECTION
@@ -239,6 +239,25 @@ creator_rebuy_live_test_zero_sell_min_score = 50.0
 creator_rebuy_live_test_zero_sell_min_buy_pressure_pct = 70.0
 creator_rebuy_live_test_zero_sell_min_buy_sell_ratio = 5.0
 creator_rebuy_live_test_strong_flow_min_bc_progress_pct = 20.0
+
+# Capped creator-rebuy moonbag canary: keeps the broad creator-rebuy hard block,
+# but lets one fresh UTC/day profile through when flow looks runner-like instead
+# of score-like. This targets May 16 misses such as high-pressure creator-rebuy
+# runners while excluding low-pressure/high-progress noise.
+creator_rebuy_moonbag_canary_enabled = true
+creator_rebuy_moonbag_canary_min_buy_pressure_pct = 75.0
+creator_rebuy_moonbag_canary_min_buy_sell_ratio = 3.0
+creator_rebuy_moonbag_canary_min_unique_buyers = 14
+creator_rebuy_moonbag_canary_max_sell_count = 10
+creator_rebuy_moonbag_canary_min_total_volume_sol = 30.0
+creator_rebuy_moonbag_canary_max_bc_progress_pct = 50.0
+creator_rebuy_moonbag_canary_min_initial_liquidity_sol = 30.0
+creator_rebuy_moonbag_canary_max_initial_liquidity_sol = 80.0
+creator_rebuy_moonbag_canary_max_creator_sell_count = 1
+creator_rebuy_moonbag_canary_min_creator_net_sol = -2.0
+creator_rebuy_moonbag_canary_support_min_buy_sell_ratio = 5.0
+creator_rebuy_moonbag_canary_support_min_creator_net_sol = 1.0
+creator_rebuy_moonbag_canary_max_daily_trades = 1
 
 # Narrative cluster live canary: only the strict May 7-10 profile goes live.
 # v18.9 Phase 1: allow creator-rebuy ONLY inside this strict narrative lane.

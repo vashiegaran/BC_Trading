@@ -578,6 +578,38 @@ pub struct FiltersConfig {
     /// Minimum BC progress for the strong-flow creator-rebuy profile.
     #[serde(default = "default_creator_rebuy_live_test_strong_flow_min_bc_progress_pct")]
     pub creator_rebuy_live_test_strong_flow_min_bc_progress_pct: f64,
+    /// Second, tightly capped live canary for creator-rebuy moonbag profiles
+    /// that today's misses show the score-gated canary can skip. Broad
+    /// `reject_creator_rebuy` remains intact; this only creates a separate
+    /// live marker after Fast-Track safety passes.
+    #[serde(default)]
+    pub creator_rebuy_moonbag_canary_enabled: bool,
+    #[serde(default = "default_creator_rebuy_moonbag_canary_min_buy_pressure_pct")]
+    pub creator_rebuy_moonbag_canary_min_buy_pressure_pct: f64,
+    #[serde(default = "default_creator_rebuy_moonbag_canary_min_buy_sell_ratio")]
+    pub creator_rebuy_moonbag_canary_min_buy_sell_ratio: f64,
+    #[serde(default = "default_creator_rebuy_moonbag_canary_min_unique_buyers")]
+    pub creator_rebuy_moonbag_canary_min_unique_buyers: usize,
+    #[serde(default = "default_creator_rebuy_moonbag_canary_max_sell_count")]
+    pub creator_rebuy_moonbag_canary_max_sell_count: u64,
+    #[serde(default = "default_creator_rebuy_moonbag_canary_min_total_volume_sol")]
+    pub creator_rebuy_moonbag_canary_min_total_volume_sol: f64,
+    #[serde(default = "default_creator_rebuy_moonbag_canary_max_bc_progress_pct")]
+    pub creator_rebuy_moonbag_canary_max_bc_progress_pct: f64,
+    #[serde(default = "default_creator_rebuy_moonbag_canary_min_initial_liquidity_sol")]
+    pub creator_rebuy_moonbag_canary_min_initial_liquidity_sol: f64,
+    #[serde(default = "default_creator_rebuy_moonbag_canary_max_initial_liquidity_sol")]
+    pub creator_rebuy_moonbag_canary_max_initial_liquidity_sol: f64,
+    #[serde(default = "default_creator_rebuy_moonbag_canary_max_creator_sell_count")]
+    pub creator_rebuy_moonbag_canary_max_creator_sell_count: u64,
+    #[serde(default = "default_creator_rebuy_moonbag_canary_min_creator_net_sol")]
+    pub creator_rebuy_moonbag_canary_min_creator_net_sol: f64,
+    #[serde(default = "default_creator_rebuy_moonbag_canary_support_min_buy_sell_ratio")]
+    pub creator_rebuy_moonbag_canary_support_min_buy_sell_ratio: f64,
+    #[serde(default = "default_creator_rebuy_moonbag_canary_support_min_creator_net_sol")]
+    pub creator_rebuy_moonbag_canary_support_min_creator_net_sol: f64,
+    #[serde(default = "default_creator_rebuy_moonbag_canary_max_daily_trades")]
+    pub creator_rebuy_moonbag_canary_max_daily_trades: u32,
     /// Strict live canary for the best narrative-cluster shadow profile. This
     /// bypasses the Standard-lane kill switch only after the armed shadow
     /// snapshot matches the configured flow/liquidity gates and Fast-Track
@@ -785,6 +817,45 @@ fn default_creator_rebuy_live_test_zero_sell_min_buy_sell_ratio() -> f64 {
 }
 fn default_creator_rebuy_live_test_strong_flow_min_bc_progress_pct() -> f64 {
     20.0
+}
+fn default_creator_rebuy_moonbag_canary_min_buy_pressure_pct() -> f64 {
+    75.0
+}
+fn default_creator_rebuy_moonbag_canary_min_buy_sell_ratio() -> f64 {
+    3.0
+}
+fn default_creator_rebuy_moonbag_canary_min_unique_buyers() -> usize {
+    14
+}
+fn default_creator_rebuy_moonbag_canary_max_sell_count() -> u64 {
+    10
+}
+fn default_creator_rebuy_moonbag_canary_min_total_volume_sol() -> f64 {
+    30.0
+}
+fn default_creator_rebuy_moonbag_canary_max_bc_progress_pct() -> f64 {
+    50.0
+}
+fn default_creator_rebuy_moonbag_canary_min_initial_liquidity_sol() -> f64 {
+    30.0
+}
+fn default_creator_rebuy_moonbag_canary_max_initial_liquidity_sol() -> f64 {
+    80.0
+}
+fn default_creator_rebuy_moonbag_canary_max_creator_sell_count() -> u64 {
+    1
+}
+fn default_creator_rebuy_moonbag_canary_min_creator_net_sol() -> f64 {
+    -2.0
+}
+fn default_creator_rebuy_moonbag_canary_support_min_buy_sell_ratio() -> f64 {
+    5.0
+}
+fn default_creator_rebuy_moonbag_canary_support_min_creator_net_sol() -> f64 {
+    1.0
+}
+fn default_creator_rebuy_moonbag_canary_max_daily_trades() -> u32 {
+    1
 }
 fn default_narrative_cluster_live_canary_min_score() -> f64 {
     80.0

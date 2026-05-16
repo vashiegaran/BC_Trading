@@ -9,6 +9,26 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.9.11 — Creator-Rebuy Moonbag Canary (2026-05-16)
+
+**strategy_version**: `v18.9.11-creator-rebuy-moonbag-canary`
+
+### Why
+UTC May 16 data showed the broad `creator_rebuy_detected` hard block still protects against noisy launches, but it also blocked many of the day's largest PumpFun moonbag runners. Removing the block globally would admit too much junk, so this adds a second, capped exception profile while keeping `reject_creator_rebuy = true`.
+
+### Changes
+- Adds a separate live marker tier, `creator_rebuy_moonbag_canary`, in [src/sniper/mod.rs](src/sniper/mod.rs).
+- Requires Fast-Track mint/freeze/GoPlus safety before forwarding to the normal filter and execution path.
+- Uses stricter flow gates in [config.toml](config.toml): buy pressure >= 75%, BSR >= 3, unique buyers >= 14, sells <= 10, volume >= 30 SOL, progress <= 50%, liquidity 30-80 SOL, creator sells <= 1, creator net >= -2 SOL, and whale/strong-BSR/creator-net support.
+- Adds a daily cap of 1 trade for the new tier and keeps the existing combined creator-rebuy open cap at 1.
+- Gives the new tier the same protected-runner soft-exit handling as existing creator/narrative live markers.
+- Leaves broad creator-rebuy rejection, emergency protections, post-buy verification, and normal portfolio risk caps unchanged.
+
+### Rollback
+Set `creator_rebuy_moonbag_canary_enabled = false` and restore `strategy_version = "v18.9.6-protected-runner-soft-exit-guard"` in [config.toml](config.toml), then restart PM2.
+
+---
+
 ## v18.9.10 — Bonding-Curve Signal Schema Guard (2026-05-14)
 
 **strategy_version**: unchanged (`v18.9.6-protected-runner-soft-exit-guard`)

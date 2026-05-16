@@ -37,6 +37,7 @@ use sanity::SanityFilter;
 
 const FILTER_CHANNEL_CAPACITY: usize = 50;
 const CREATOR_REBUY_LIVE_TEST_ENTRY_TIER: &str = "creator_rebuy_live_test_fast_track";
+const CREATOR_REBUY_MOONBAG_CANARY_ENTRY_TIER: &str = "creator_rebuy_moonbag_canary";
 const NARRATIVE_CLUSTER_LIVE_CANARY_ENTRY_TIER: &str = "narrative_cluster_live_canary";
 
 fn live_marker_entry_tier(token: &GraduatedToken) -> Option<&str> {
@@ -59,6 +60,7 @@ fn is_live_marker_rescue_eligible(
 
     let entry_tier = live_marker_entry_tier(token)?;
     if entry_tier != CREATOR_REBUY_LIVE_TEST_ENTRY_TIER
+        && entry_tier != CREATOR_REBUY_MOONBAG_CANARY_ENTRY_TIER
         && entry_tier != NARRATIVE_CLUSTER_LIVE_CANARY_ENTRY_TIER
     {
         return None;

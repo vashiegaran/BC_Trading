@@ -33,6 +33,7 @@ use wallet::BotWallet;
 /// Channel capacity for execution → monitoring pipeline.
 const CHANNEL_CAPACITY: usize = 50;
 const CREATOR_REBUY_LIVE_TEST_ENTRY_TIER: &str = "creator_rebuy_live_test_fast_track";
+const CREATOR_REBUY_MOONBAG_CANARY_ENTRY_TIER: &str = "creator_rebuy_moonbag_canary";
 const NARRATIVE_CLUSTER_LIVE_CANARY_ENTRY_TIER: &str = "narrative_cluster_live_canary";
 
 /// Minimum liquidity floor for dynamic sizing scale (SOL).
@@ -61,13 +62,26 @@ fn compute_dynamic_buy_amount(cfg: &AppConfig, initial_liquidity_sol: f64) -> f6
 }
 
 fn is_creator_rebuy_live_test(token: &FilteredToken) -> bool {
+    let entry_tier = token
+        .event
+        .sniper_features
+        .as_ref()
+        .and_then(|features| features.get("entry_tier"))
+        .and_then(|entry_tier| entry_tier.as_str())
+        .unwrap_or("");
+
+    entry_tier == CREATOR_REBUY_LIVE_TEST_ENTRY_TIER
+        || entry_tier == CREATOR_REBUY_MOONBAG_CANARY_ENTRY_TIER
+}
+
+fn is_creator_rebuy_moonbag_canary(token: &FilteredToken) -> bool {
     token
         .event
         .sniper_features
         .as_ref()
         .and_then(|features| features.get("entry_tier"))
         .and_then(|entry_tier| entry_tier.as_str())
-        == Some(CREATOR_REBUY_LIVE_TEST_ENTRY_TIER)
+        == Some(CREATOR_REBUY_MOONBAG_CANARY_ENTRY_TIER)
 }
 
 fn is_narrative_cluster_live_canary(token: &FilteredToken) -> bool {
@@ -245,6 +259,23 @@ pub fn start(
                         log_pipeline_latency(&supabase_bg, &timing_payload).await;
                     });
                     continue;
+                }
+
+                if is_creator_rebuy_moonbag_canary(&token) {
+                    if let Err(reason) =
+                        creator_rebuy_moonbag_canary_daily_limit_ok(&cfg, &supabase).await
+                    {
+                        warn!(mint = %mint_str, reason = %reason, "⏭️ Skipping creator-rebuy moonbag canary — daily cap reached");
+                        timing.outcome = Some("rejected_precheck".to_string());
+                        timing.rejection_stage = Some("precheck".to_string());
+                        timing.rejection_reason = Some(reason);
+                        let timing_payload = timing.to_json(&mint_str);
+                        let supabase_bg = supabase.clone();
+                        tokio::spawn(async move {
+                            log_pipeline_latency(&supabase_bg, &timing_payload).await;
+                        });
+                        continue;
+                    }
                 }
             }
 
@@ -685,6 +716,64 @@ async fn live_marker_rescue_daily_limit_ok(
     if trade_count >= max_daily_trades {
         return Err(format!(
             "live_marker_rescue_daily_trade_cap_reached_{}/{}",
+            trade_count, max_daily_trades
+        ));
+    }
+
+    Ok(())
+}
+
+async fn creator_rebuy_moonbag_canary_daily_limit_ok(
+    cfg: &AppConfig,
+    supabase: &SupabaseClient,
+) -> Result<(), String> {
+    let max_daily_trades = cfg
+        .strategy
+        .filters
+        .creator_rebuy_moonbag_canary_max_daily_trades;
+    if max_daily_trades == 0 {
+        return Ok(());
+    }
+
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let url = format!(
+        "{}/positions?select=id,sniper_features&created_at=gte.{}&is_paper_trade=eq.{}&order=created_at.desc&limit=200",
+        supabase.base_url, today, cfg.env.paper_trade
+    );
+
+    let resp = supabase
+        .client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("creator_rebuy_moonbag_daily_limit_query_failed:{}", e))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "creator_rebuy_moonbag_daily_limit_query_http_{}:{}",
+            status,
+            body.chars().take(160).collect::<String>()
+        ));
+    }
+
+    let rows: Vec<serde_json::Value> = resp
+        .json()
+        .await
+        .map_err(|e| format!("creator_rebuy_moonbag_daily_limit_decode_failed:{}", e))?;
+    let trade_count = rows
+        .iter()
+        .filter(|row| {
+            row.get("sniper_features")
+                .and_then(|features| features.get("entry_tier"))
+                .and_then(|entry_tier| entry_tier.as_str())
+                == Some(CREATOR_REBUY_MOONBAG_CANARY_ENTRY_TIER)
+        })
+        .count() as u32;
+
+    if trade_count >= max_daily_trades {
+        return Err(format!(
+            "creator_rebuy_moonbag_daily_trade_cap_reached_{}/{}",
             trade_count, max_daily_trades
         ));
     }
