@@ -27,7 +27,7 @@ use crate::execution::wallet::BotWallet;
 use crate::logger::SupabaseClient;
 use crate::sniper::log_pipeline_latency;
 use solana_client::nonblocking::rpc_client::RpcClient;
-use types::{FilterSummary, FilteredToken};
+use types::{FilterResult, FilterSummary, FilteredToken};
 
 use age::AgeFilter;
 use buy_pressure::BuyPressureFilter;
@@ -36,6 +36,105 @@ use price_impact::PriceImpactFilter;
 use sanity::SanityFilter;
 
 const FILTER_CHANNEL_CAPACITY: usize = 50;
+const CREATOR_REBUY_LIVE_TEST_ENTRY_TIER: &str = "creator_rebuy_live_test_fast_track";
+const NARRATIVE_CLUSTER_LIVE_CANARY_ENTRY_TIER: &str = "narrative_cluster_live_canary";
+
+fn live_marker_entry_tier(token: &GraduatedToken) -> Option<&str> {
+    token
+        .sniper_features
+        .as_ref()
+        .and_then(|features| features.get("entry_tier"))
+        .and_then(|entry_tier| entry_tier.as_str())
+}
+
+fn is_live_marker_rescue_eligible(
+    token: &GraduatedToken,
+    summary: &FilterSummary,
+    cfg: &AppConfig,
+) -> Option<String> {
+    let filters = &cfg.strategy.filters;
+    if !filters.live_marker_rescue_enabled {
+        return None;
+    }
+
+    let entry_tier = live_marker_entry_tier(token)?;
+    if entry_tier != CREATOR_REBUY_LIVE_TEST_ENTRY_TIER
+        && entry_tier != NARRATIVE_CLUSTER_LIVE_CANARY_ENTRY_TIER
+    {
+        return None;
+    }
+
+    if token.buy_pressure_pct < filters.live_marker_rescue_min_buy_pressure_pct {
+        return None;
+    }
+
+    let failed = summary.failed_checks();
+    if failed.len() != 1 {
+        return None;
+    }
+
+    let failure = failed[0];
+    let reason = failure.fail_reason.as_deref().unwrap_or("unknown");
+    if failure.check_name == "buy_pressure"
+        && reason.starts_with("buy_pressure_")
+        && reason.contains("_below_min_")
+    {
+        Some(reason.to_string())
+    } else {
+        None
+    }
+}
+
+fn annotate_live_marker_rescue(token: &mut GraduatedToken, original_reason: &str, min_bp: f64) {
+    let mut features = token
+        .sniper_features
+        .take()
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    if !features.is_object() {
+        features = serde_json::json!({ "previous_sniper_features": features });
+    }
+
+    if let Some(obj) = features.as_object_mut() {
+        obj.insert(
+            "live_marker_rescue_filter_bypass".to_string(),
+            serde_json::json!(true),
+        );
+        obj.insert(
+            "live_marker_rescue_original_filter_rejection".to_string(),
+            serde_json::json!(original_reason),
+        );
+        obj.insert(
+            "live_marker_rescue_min_buy_pressure_pct".to_string(),
+            serde_json::json!(min_bp),
+        );
+        obj.insert(
+            "live_marker_rescue_buy_pressure_pct".to_string(),
+            serde_json::json!(token.buy_pressure_pct),
+        );
+    }
+
+    token.sniper_features = Some(features);
+}
+
+fn rescue_filter_summary(summary: &FilterSummary) -> FilterSummary {
+    let results = summary
+        .results
+        .iter()
+        .map(|result| {
+            if result.check_name == "buy_pressure" && !result.passed {
+                FilterResult::pass("buy_pressure_live_marker_rescue")
+            } else {
+                result.clone()
+            }
+        })
+        .collect();
+
+    FilterSummary {
+        results,
+        overall_passed: true,
+    }
+}
 
 pub fn start(
     cfg: Arc<AppConfig>,
@@ -245,7 +344,21 @@ pub fn start(
 
             let results = vec![age_result, bp_result, liquidity_result, impact_result];
 
-            let summary = FilterSummary::from_results(results);
+            let mut summary = FilterSummary::from_results(results);
+            if let Some(original_reason) = is_live_marker_rescue_eligible(&token, &summary, &cfg) {
+                annotate_live_marker_rescue(
+                    &mut token,
+                    &original_reason,
+                    cfg.strategy.filters.live_marker_rescue_min_buy_pressure_pct,
+                );
+                summary = rescue_filter_summary(&summary);
+                info!(
+                    mint = %token.mint,
+                    buy_pressure = token.buy_pressure_pct,
+                    original_reason = %original_reason,
+                    "🚦 LIVE-MARKER RESCUE — bypassing final buy-pressure-only filter reject"
+                );
+            }
 
             // ── Log fast-gate results to Supabase (fire-and-forget) ──
             let supabase_bg = Arc::clone(&supabase);

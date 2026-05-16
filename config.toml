@@ -178,6 +178,12 @@ reject_bundled = true
 #   Trade-off: ~60% lower fire volume but concentrated on highest-EV band.
 min_buy_pressure_pct = 65.0
 
+# Narrow rescue lane for already-approved live markers that only fail the final
+# legacy buy-pressure floor. Does not bypass age/liquidity/safety checks.
+live_marker_rescue_enabled = true
+live_marker_rescue_min_buy_pressure_pct = 60.0
+live_marker_rescue_max_daily_trades = 2
+
 # Minimum bonding curve volume (SOL) — below this, nobody cared
 min_bonding_volume_sol = 5.0
 

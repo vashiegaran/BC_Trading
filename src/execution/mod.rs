@@ -80,6 +80,16 @@ fn is_narrative_cluster_live_canary(token: &FilteredToken) -> bool {
         == Some(NARRATIVE_CLUSTER_LIVE_CANARY_ENTRY_TIER)
 }
 
+fn is_live_marker_rescue(token: &FilteredToken) -> bool {
+    token
+        .event
+        .sniper_features
+        .as_ref()
+        .and_then(|features| features.get("live_marker_rescue_filter_bypass"))
+        .and_then(|flag| flag.as_bool())
+        .unwrap_or(false)
+}
+
 fn compute_buy_amount(cfg: &AppConfig, token: &FilteredToken) -> f64 {
     let dynamic_amount = compute_dynamic_buy_amount(cfg, token.event.initial_liquidity_sol);
 
@@ -265,6 +275,21 @@ pub fn start(
 
                 if let Err(reason) = narrative_canary_daily_limits_ok(&cfg, &supabase).await {
                     warn!(mint = %mint_str, reason = %reason, "⏭️ Skipping narrative OR canary — daily cap reached");
+                    timing.outcome = Some("rejected_precheck".to_string());
+                    timing.rejection_stage = Some("precheck".to_string());
+                    timing.rejection_reason = Some(reason);
+                    let timing_payload = timing.to_json(&mint_str);
+                    let supabase_bg = supabase.clone();
+                    tokio::spawn(async move {
+                        log_pipeline_latency(&supabase_bg, &timing_payload).await;
+                    });
+                    continue;
+                }
+            }
+
+            if is_live_marker_rescue(&token) {
+                if let Err(reason) = live_marker_rescue_daily_limit_ok(&cfg, &supabase).await {
+                    warn!(mint = %mint_str, reason = %reason, "⏭️ Skipping live-marker rescue — daily cap reached");
                     timing.outcome = Some("rejected_precheck".to_string());
                     timing.rejection_stage = Some("precheck".to_string());
                     timing.rejection_reason = Some(reason);
@@ -606,6 +631,61 @@ async fn narrative_canary_daily_limits_ok(
         return Err(format!(
             "narrative_or_daily_loss_stop_reached_{}/{}",
             loss_count, max_daily_losses
+        ));
+    }
+
+    Ok(())
+}
+
+async fn live_marker_rescue_daily_limit_ok(
+    cfg: &AppConfig,
+    supabase: &SupabaseClient,
+) -> Result<(), String> {
+    let max_daily_trades = cfg.strategy.filters.live_marker_rescue_max_daily_trades;
+    if max_daily_trades == 0 {
+        return Ok(());
+    }
+
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let url = format!(
+        "{}/positions?select=id,sniper_features&created_at=gte.{}&is_paper_trade=eq.{}&order=created_at.desc&limit=200",
+        supabase.base_url, today, cfg.env.paper_trade
+    );
+
+    let resp = supabase
+        .client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("live_marker_rescue_daily_limit_query_failed:{}", e))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "live_marker_rescue_daily_limit_query_http_{}:{}",
+            status,
+            body.chars().take(160).collect::<String>()
+        ));
+    }
+
+    let rows: Vec<serde_json::Value> = resp
+        .json()
+        .await
+        .map_err(|e| format!("live_marker_rescue_daily_limit_decode_failed:{}", e))?;
+    let trade_count = rows
+        .iter()
+        .filter(|row| {
+            row.get("sniper_features")
+                .and_then(|features| features.get("live_marker_rescue_filter_bypass"))
+                .and_then(|flag| flag.as_bool())
+                .unwrap_or(false)
+        })
+        .count() as u32;
+
+    if trade_count >= max_daily_trades {
+        return Err(format!(
+            "live_marker_rescue_daily_trade_cap_reached_{}/{}",
+            trade_count, max_daily_trades
         ));
     }
 

@@ -491,6 +491,16 @@ pub struct FiltersConfig {
     pub min_lock_duration_days: u64,
     pub reject_bundled: bool,
     pub min_buy_pressure_pct: f64,
+    /// Narrow rescue for already-approved live-marker candidates that only miss
+    /// the final legacy buy-pressure floor. Does not bypass age/liquidity/safety.
+    #[serde(default)]
+    pub live_marker_rescue_enabled: bool,
+    /// Minimum final-filter buy pressure for the live-marker rescue lane.
+    #[serde(default = "default_live_marker_rescue_min_buy_pressure_pct")]
+    pub live_marker_rescue_min_buy_pressure_pct: f64,
+    /// Maximum live-marker rescue buys per UTC day. 0 = no rescue-specific cap.
+    #[serde(default = "default_live_marker_rescue_max_daily_trades")]
+    pub live_marker_rescue_max_daily_trades: u32,
     pub min_bonding_volume_sol: f64,
     pub min_unique_buyers: usize,
     pub coordinated_window_ms: i64,
@@ -721,6 +731,12 @@ fn default_min_holder_count() -> usize {
 }
 fn default_min_buy_sell_ratio() -> f64 {
     1.2
+}
+fn default_live_marker_rescue_min_buy_pressure_pct() -> f64 {
+    60.0
+}
+fn default_live_marker_rescue_max_daily_trades() -> u32 {
+    2
 }
 fn default_creator_rebuy_shadow_min_score() -> f64 {
     60.0
