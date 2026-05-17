@@ -407,6 +407,7 @@ async fn monitor_position(
     let is_protected_runner = is_protected_runner_entry(&position);
     let mut protected_runner_started_at: Option<Instant> = None;
     const MAX_EXIT_FAILURES: u32 = 5;
+    const CASH_BUILDER_TP2_TAIL_ONLY: bool = true;
 
     // ── Narrative moonbag state ──────────────────────────
     let has_narrative =
@@ -1853,6 +1854,7 @@ async fn monitor_position(
         // in the existing TP1 intercept which has cached last_narrative_result.
         // Runs at most once per position via moonbag_eval_done flag.
         if !moonbag_eval_done
+            && !CASH_BUILDER_TP2_TAIL_ONLY
             && entry_price_usd > 0.000001
             && remaining_token_amount > 1.0
             && current_price / entry_price_usd >= exit_cfg.tp1_multiplier
@@ -2008,7 +2010,9 @@ async fn monitor_position(
                 _ => {}
             }
 
-            // ── TP2 moonbag intercept: on-chain score OR fast-runner OR paper-path ──
+            let mut tp2_tail_promotion_source: Option<PromotionSource> = None;
+
+            // ── TP2 moonbag tail evaluation: bank TP2 first, then promote leftovers ──
             if signal_reason_clone == types::ExitReason::TakeProfit2 && remaining_token_amount > 1.0
             {
                 // v18.7: gate uses on-chain bc_score as the primary signal,
@@ -2150,7 +2154,8 @@ async fn monitor_position(
                             hold_secs = elapsed_secs,
                             threshold = fast_runner_threshold,
                             remaining_tokens = remaining_token_amount,
-                            "🚀 FAST RUNNER — auto-promoting to moonbag (no narrative yet, background check will fire)"
+                            tp2_pct = signal.pct_to_sell,
+                            "🚀 FAST RUNNER — TP2 will sell first, then remaining tail promotes to moonbag"
                         );
                     } else if let Some(ref p) = paper_path {
                         info!(
@@ -2159,7 +2164,8 @@ async fn monitor_position(
                             openai_score = format!("{:.0}/100", openai_score),
                             min_score = format!("{:.0}", min_score),
                             remaining_tokens = remaining_token_amount,
-                            "🌙 v14 PAPER-PATH — score below gate but B/C/D matched, PROMOTING to moonbag"
+                            tp2_pct = signal.pct_to_sell,
+                            "🌙 v14 PAPER-PATH — TP2 will sell first, then remaining tail promotes to moonbag"
                         );
                     } else {
                         info!(
@@ -2168,44 +2174,11 @@ async fn monitor_position(
                             min_score = format!("{:.0}", min_score),
                             narrative_state = %narrative_state,
                             remaining_tokens = remaining_token_amount,
-                            "🌙 TP2 intercept — score passed → PROMOTING to moonbag (skipping TP2 sell)"
+                            tp2_pct = signal.pct_to_sell,
+                            "🌙 TP2 score passed — TP2 will sell first, then remaining tail promotes to moonbag"
                         );
                     }
-
-                    // Reset TP2 flag since we're not actually selling
-                    tp2_triggered = false;
-
-                    let cmd = MoonbagCommand {
-                        position_id: position.position_id,
-                        mint: position.mint.clone(),
-                        token_name: position.token_name.clone(),
-                        token_symbol: position.token_symbol.clone(),
-                        entry_price_usd,
-                        token_amount: remaining_token_amount,
-                        sol_value: remaining_sol_spent,
-                        peak_price,
-                        narrative_state,
-                        is_paper_trade: position.is_paper_trade,
-                        narrative_result: last_narrative_result.clone(),
-                        promotion_source,
-                        price_at_promotion: last_price,
-                    };
-
-                    if moonbag_tx.send(cmd).await.is_ok() {
-                        trading_state
-                            .record_exit(&position.mint, position.sol_spent, 0.0, true)
-                            .await;
-
-                        info!(
-                            mint = %position.mint,
-                            "🌙 TP2 → moonbag promotion complete — slot freed"
-                        );
-                        last_exit_reason = Some("moonbag_promoted_tp2".to_string());
-                        break;
-                    } else {
-                        warn!(mint = %position.mint, "Moonbag channel closed — falling through to normal TP2 sell");
-                        tp2_triggered = true; // Re-set so normal sell proceeds
-                    }
+                    tp2_tail_promotion_source = Some(promotion_source);
                 } else {
                     debug!(
                         mint = %position.mint,
@@ -2342,11 +2315,52 @@ async fn monitor_position(
                 break;
             }
 
+            if signal_reason_clone == types::ExitReason::TakeProfit2
+                && got_confirmation
+                && tp2_triggered
+                && remaining_token_amount > 1.0
+            {
+                if let Some(promo_source) = tp2_tail_promotion_source {
+                    let cmd = MoonbagCommand {
+                        position_id: position.position_id,
+                        mint: position.mint.clone(),
+                        token_name: position.token_name.clone(),
+                        token_symbol: position.token_symbol.clone(),
+                        entry_price_usd,
+                        token_amount: remaining_token_amount,
+                        sol_value: remaining_sol_spent,
+                        peak_price,
+                        narrative_state,
+                        is_paper_trade: position.is_paper_trade,
+                        narrative_result: last_narrative_result.clone(),
+                        promotion_source: promo_source,
+                        price_at_promotion: last_price,
+                    };
+
+                    if moonbag_tx.send(cmd).await.is_ok() {
+                        trading_state
+                            .record_exit(&position.mint, position.sol_spent, 0.0, true)
+                            .await;
+
+                        info!(
+                            mint = %position.mint,
+                            remaining_tokens = remaining_token_amount,
+                            "🌙 TP2 confirmed — remaining tail promoted to moonbag and slot freed"
+                        );
+                        last_exit_reason = Some("moonbag_promoted_tp2_tail".to_string());
+                        break;
+                    } else {
+                        warn!(mint = %position.mint, "Moonbag channel closed — continuing normal post-TP2 monitoring");
+                    }
+                }
+            }
+
             // ── Moonbag promotion: TP1 confirmed + on-chain bc_score (v18.7) ──
             // Primary gate is on-chain bc_score from sniper_features. Narrative
             // score (if available) is additive via .max(). v14 paper-paths
             // remain as a secondary fallback.
             if signal_reason_clone == types::ExitReason::TakeProfit1
+                && !CASH_BUILDER_TP2_TAIL_ONLY
                 && got_confirmation
                 && tp1_triggered
                 && remaining_token_amount > 1.0

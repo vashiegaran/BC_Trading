@@ -9,7 +9,7 @@
 #   filterable in analytics vs the broken v16.1 binary that was running
 #   from never-committed source. Detection: pumpfun_ws. Fast-track:
 #   2-source (on_chain_mint + goplus) so GoPlus runs PRE-buy.
-strategy_version = "v18.9.11-creator-rebuy-moonbag-canary"
+strategy_version = "v18.9.12-cash-builder-tail"
 
 # ============================================================
 # DETECTION
@@ -29,6 +29,22 @@ poll_interval_seconds = 5
 # Data goes to `bonding_curve_signals` Supabase table for backtesting.
 bonding_curve_signals_enabled = true
 bc_signal_volume_threshold = 30.0  # SOL — record when cumulative volume hits this
+legacy_bc_paper_lanes_enabled = false
+
+# ── Optimized runner shadow lane (observe-only, no live execution) ──
+# Consolidates the strongest pre-grad evidence into one candidate lane. It is
+# intentionally a little wider than live filters so we can measure moonbag
+# capture without spraying several duplicate paper rows per token.
+optimized_runner_shadow_enabled = true
+optimized_runner_shadow_min_score = 70.0
+optimized_runner_shadow_min_progress_pct = 55.0
+optimized_runner_shadow_min_volume_sol = 30.0
+optimized_runner_shadow_min_buy_pressure_pct = 65.0
+optimized_runner_shadow_min_buy_sell_ratio = 2.0
+optimized_runner_shadow_min_unique_buyers = 8
+optimized_runner_shadow_max_sell_count = 40
+optimized_runner_shadow_max_label_gap_seconds = 300
+optimized_runner_shadow_min_support_signals = 1
 
 # ── Meteora DBC shadow lane (observe-only, no live execution) ──
 # Collects Solana Meteora Dynamic Bonding Curve launches from DexScreener.
@@ -50,7 +66,7 @@ meteora_dbc_tier_a_max_market_cap_usd = 110000.0
 # ── Wallet-research shadow lanes (observe-only, never trade live) ──
 # label_flow_shadow: repeated same-label mint cluster seen shortly before this
 # token plus healthy curve flow.
-label_flow_shadow_enabled = true
+label_flow_shadow_enabled = false
 label_flow_shadow_min_progress_pct = 30.0
 label_flow_shadow_min_prior_mints = 1
 label_flow_shadow_max_gap_seconds = 1800
@@ -58,7 +74,7 @@ label_flow_shadow_max_gap_seconds = 1800
 # narrative_cluster_shadow: separate armed-post-grad simulation for repeated
 # narrative/name clusters. It can tolerate creator rebuy inside this shadow
 # lane only. Strict non-creator-rebuy rows can feed the live canary below.
-narrative_cluster_shadow_enabled = true
+narrative_cluster_shadow_enabled = false
 narrative_cluster_min_prior_mints = 1
 narrative_cluster_min_progress_pct = 20.0
 narrative_cluster_max_progress_pct = 100.0
@@ -68,7 +84,7 @@ narrative_cluster_min_score = 45.0
 # probe_add_shadow: shadow-only ladder model. Record a would-be probe once
 # the curve is strong, then a would-be add only if the same mint keeps
 # strengthening.
-probe_add_shadow_enabled = true
+probe_add_shadow_enabled = false
 probe_add_probe_progress_pct = 60.0
 probe_add_add_progress_pct = 75.0
 probe_add_min_unique_buyer_delta = 10
@@ -77,7 +93,7 @@ probe_add_min_volume_multiplier = 1.5
 # early_buyer_rebuy_shadow: observe-only signal. If any of the first N
 # non-creator buyers buys again before graduation, write a separate shadow row.
 # This is an OR-candidate research lane only; it never forwards live.
-early_buyer_rebuy_shadow_enabled = true
+early_buyer_rebuy_shadow_enabled = false
 early_buyer_rebuy_first_n = 5
 early_buyer_rebuy_min_rebuy_wallets = 1
 early_buyer_rebuy_min_rebuy_sol = 0.0
@@ -182,7 +198,8 @@ min_buy_pressure_pct = 65.0
 # legacy buy-pressure floor. Does not bypass age/liquidity/safety checks.
 live_marker_rescue_enabled = true
 live_marker_rescue_min_buy_pressure_pct = 60.0
-live_marker_rescue_max_daily_trades = 2
+# 0 disables this lane-specific daily cap; global 0.20 SOL loss stop governs.
+live_marker_rescue_max_daily_trades = 0
 
 # Minimum bonding curve volume (SOL) — below this, nobody cared
 min_bonding_volume_sol = 5.0
@@ -257,7 +274,8 @@ creator_rebuy_moonbag_canary_max_creator_sell_count = 1
 creator_rebuy_moonbag_canary_min_creator_net_sol = -2.0
 creator_rebuy_moonbag_canary_support_min_buy_sell_ratio = 5.0
 creator_rebuy_moonbag_canary_support_min_creator_net_sol = 1.0
-creator_rebuy_moonbag_canary_max_daily_trades = 1
+# 0 disables this lane-specific daily cap; global 0.20 SOL loss stop governs.
+creator_rebuy_moonbag_canary_max_daily_trades = 0
 
 # Narrative cluster live canary: only the strict May 7-10 profile goes live.
 # v18.9 Phase 1: allow creator-rebuy ONLY inside this strict narrative lane.
@@ -279,7 +297,7 @@ narrative_cluster_live_canary_allow_creator_rebuy = true
 
 # v18.9 Phase 2 shadow-only profit-max profile. Never forwards live; marks
 # narrative_cluster_shadow rows so we can validate on fresh data before promotion.
-narrative_cluster_phase2_shadow_enabled = true
+narrative_cluster_phase2_shadow_enabled = false
 narrative_cluster_phase2_shadow_min_score = 70.0
 narrative_cluster_phase2_shadow_min_buy_pressure_pct = 80.0
 narrative_cluster_phase2_shadow_min_buy_sell_ratio = 4.0
@@ -335,7 +353,7 @@ graduation_goplus_enabled = false
 # entry_trigger='reduced_static_gate_shadow'. Goal: validate whether relaxed
 # buy-pressure / unique-buyer / creator-rebuy gates recover runners without
 # promoting more rugs.
-reduced_static_gate_shadow_enabled = true
+reduced_static_gate_shadow_enabled = false
 reduced_static_gate_shadow_min_score = 45.0
 reduced_static_gate_shadow_min_buy_pressure_pct = 55.0
 reduced_static_gate_shadow_min_unique_buyers = 10
@@ -380,10 +398,9 @@ low_liq_threshold_sol = 50.0
 # v8: reduced from 1500 → 1000 — 15% entry cost caused -45% losses on weak tokens.
 slippage_bps = 1000
 
-# Maximum number of open positions at any time
-# v2: raised from 5 → 8; 74% of passed tokens never traded due to full slots
-# LIVE CANARY (2026-05-06): cap at 2 while PAPER_TRADE=false and wallet is small.
-max_open_positions = 2
+# Maximum number of open positions at any time. 0 disables this global cap.
+# Temporary cash-builder mode relies on the daily loss stop instead.
+max_open_positions = 0
 
 # Transaction confirmation timeout in seconds
 tx_confirm_timeout_secs = 25
@@ -452,15 +469,17 @@ tip_multiplier = 3.0
 # Sniped tokens that don't move in 15 min are dead
 max_hold_seconds = 900
 
-# TP1: sell 25% at 1.8x — small insurance, keep 75% for potential moonbag
-tp1_multiplier = 1.8
-tp1_sell_pct = 25
+# TP1 cash-builder insurance: bank 30% at 1.5x.
+tp1_multiplier = 1.5
+tp1_sell_pct = 30
 
-# TP2: sell 50% of remaining at 4x (300% gain)
-tp2_multiplier = 4.0
-tp2_sell_pct = 50
+# TP2 cash-builder bank: sell ~50% of original size after TP1.
+# The exit engine sells a percent of remaining, so 71% of the post-TP1 stack
+# leaves roughly a 20% original-position moonbag tail.
+tp2_multiplier = 2.0
+tp2_sell_pct = 71
 
-# TP3: moonshot sell remainder at 8x
+# TP3 is a backup only; qualifying TP2 tails are handed to the moonbag tracker.
 tp3_multiplier = 8.0
 
 # Hard stop — accept losses quickly for sniping
@@ -523,12 +542,13 @@ momentum_kill_min_multiplier = 1.3
 # ============================================================
 [risk]
 
-# Daily loss limit in SOL — stop new buys if exceeded
-# LIVE CANARY (2026-05-06): hard-cap day-1 downside to 2 failed 0.05 SOL entries.
-daily_loss_limit_sol = 0.10
+# Daily loss limit in SOL — stop new buys if exceeded.
+# Temporary cash-builder mode: no global entry/exposure cap; stop for the UTC day
+# once realized closed-position PnL is down 0.20 SOL or worse.
+daily_loss_limit_sol = 0.20
 
-# Maximum SOL deployed across all open positions
-max_portfolio_exposure_sol = 0.10
+# Maximum SOL deployed across all open positions. 0 disables this global cap.
+max_portfolio_exposure_sol = 0.0
 
 # Minimum SOL balance to keep for gas fees
 min_sol_balance = 0.2
@@ -657,42 +677,34 @@ moonbag_max_hold_confirmed_hours = 48
 # Floor: moonbag never exits below this × entry price.
 moonbag_floor_multiplier = 1.2
 
-# Initial trailing stops per narrative state. v18.7.7 widens early tails so
-# true moonbags can survive first-hour chop while floor/partials protect PnL.
-moonbag_trailing_early = 70.0
-moonbag_trailing_expanding = 70.0
-moonbag_trailing_confirmed = 70.0
+# Strict cash-builder tail: after TP1+TP2 have banked most of the trade,
+# close the small moonbag tail on a 30% drawdown from peak.
+moonbag_trailing_early = 30.0
+moonbag_trailing_expanding = 30.0
+moonbag_trailing_confirmed = 30.0
 
-# v18.7.6: after a TP1 moonbag promotion, keep early 2x-5x runners on a
-# wider leash for 15m. Floor protection still exits if the bag falls to 1.2x.
-moonbag_early_trailing_grace_secs = 900
+# No wide early grace in temporary bankroll mode.
+moonbag_early_trailing_grace_secs = 0
 
-# v18.7.7 balanced moonbag split:
-#   - sell 30% of the promoted moonbag stack at 3x
-#   - sell 20% of the promoted moonbag stack at 5x
-#   - keep roughly 50% as the long moonshot tail
-moonbag_partial_3x_pct = 30
-moonbag_partial_5x_pct = 20
+# Tail is already only ~20% of original size, so do not split it again.
+moonbag_partial_3x_pct = 0
+moonbag_partial_5x_pct = 0
 
-# Do not close a moonbag tail on a soft trailing breach for the first 60m.
-# Partial exits and the 1.2x profit floor still work during this window.
-moonbag_min_hold_secs = 3600
+# Allow strict tail exits immediately after TP2 promotion.
+moonbag_min_hold_secs = 0
 
-# Price-only weak-flow confirmation: require two consecutive trailing breaches
-# before closing the tail. This avoids paid social/API scoring in the live path.
-moonbag_trailing_confirm_checks = 2
+# One confirmed price breach is enough in temporary bankroll mode.
+moonbag_trailing_confirm_checks = 1
 
-# Multiplier-based tail trailing. Wider early, tighter only after the token
-# reaches larger market-cap multiples.
-moonbag_trail_2x_5x = 70.0
-moonbag_trail_5x_10x = 50.0
-moonbag_trail_10x_15x = 40.0
+# Multiplier-based tail trailing: keep the small tail strict across tiers.
+moonbag_trail_2x_5x = 30.0
+moonbag_trail_5x_10x = 30.0
+moonbag_trail_10x_15x = 30.0
 moonbag_trail_15x_20x = 30.0
-moonbag_trail_20x_plus = 20.0
+moonbag_trail_20x_plus = 30.0
 
-# Profit gate: age-based trail decay only kicks in once peak >= this × entry.
-# Below this multiplier, keep the initial wide trail.
-moonbag_profit_gate_multiplier = 2.0
+# Enable strict trailing as soon as the TP2 tail is promoted.
+moonbag_profit_gate_multiplier = 1.0
 
 # Combined promotion score: on-chain strength (0-70) + narrative bonus (0-30).
 # Token needs >= this score at TP1 to be promoted to moonbag.

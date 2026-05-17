@@ -797,17 +797,21 @@ async fn pre_execution_checks_cached(
     let current_exposure = state.total_exposure().await;
     let today_pnl = state.today_pnl().await;
 
-    // SAFETY Rule 6: Check open position count
-    if open_count >= cfg.strategy.execution.max_open_positions as i64 {
+    // SAFETY Rule 6: Check open position count. 0 disables this cap.
+    if cfg.strategy.execution.max_open_positions > 0
+        && open_count >= cfg.strategy.execution.max_open_positions as i64
+    {
         return Err(format!(
             "Max open positions reached ({}/{})",
             open_count, cfg.strategy.execution.max_open_positions
         ));
     }
 
-    // SAFETY Rule 6: Check portfolio exposure
+    // SAFETY Rule 6: Check portfolio exposure. 0 disables this cap.
     let would_be_exposure = current_exposure + cfg.strategy.execution.buy_amount_sol;
-    if would_be_exposure > cfg.strategy.risk.max_portfolio_exposure_sol {
+    if cfg.strategy.risk.max_portfolio_exposure_sol > 0.0
+        && would_be_exposure > cfg.strategy.risk.max_portfolio_exposure_sol
+    {
         return Err(format!(
             "Portfolio exposure cap would be exceeded ({:.4} + {:.4} > {:.4})",
             current_exposure,

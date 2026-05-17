@@ -9,6 +9,26 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.9.12 — Cash-Builder Strict Moonbag Tail (2026-05-17)
+
+**strategy_version**: `v18.9.12-cash-builder-tail`
+
+### Why
+May 17 exit simulations showed the current moonbag path was too exposed: positions could promote before TP2 and keep too much size through rug-like reversals. The temporary goal is to build realized SOL first, while still keeping a small chance to capture runners.
+
+### Changes
+- Changes [config.toml](config.toml) TP exits to sell 30% at 1.5x and about 50% of original size at 2.0x.
+- Converts moonbag promotion in [src/monitoring/mod.rs](src/monitoring/mod.rs) to TP2-tail-only behavior: TP1 promotion paths are disabled, TP2 sells first, and only the remaining roughly 20% original-position tail is handed to the moonbag tracker.
+- Tightens moonbag tail management in [config.toml](config.toml): 30% trailing across tiers, no early wide-grace window, no long minimum hold, one trailing confirmation, and no extra 3x/5x partials on the already-small tail.
+- Disables the global open-position, portfolio-exposure, live-marker-rescue daily, and creator-rebuy moonbag-canary daily caps by setting them to 0, and raises the UTC daily loss stop to 0.20 SOL.
+- Adds observe-only `optimized_runner_shadow` in [src/detection/pumpfun_ws.rs](src/detection/pumpfun_ws.rs): one consolidated `bc_paper_trades` lane that scores BC progress/volume, buy pressure, BSR, unique buyers, label repeats, early-buyer rebuy, whale/proven-wallet flow, and creator support. The old duplicate pre-grad paper lanes are disabled in [config.toml](config.toml) while raw `bonding_curve_signals`, `post_grad_flow_shadow`, and Meteora DBC collection remain active.
+- Keeps hard emergency protections, post-buy verification, stop loss, wallet gas reserve, and creator-rebuy entry controls unchanged.
+
+### Rollback
+Restore `strategy_version = "v18.9.11-creator-rebuy-moonbag-canary"`, TP settings, and prior moonbag trailing/partial settings in [config.toml](config.toml), then restart PM2. The code change is conservative: if moonbag tail promotion fails, the position continues normal post-TP2 monitoring.
+
+---
+
 ## v18.9.11 — Creator-Rebuy Moonbag Canary (2026-05-16)
 
 **strategy_version**: `v18.9.11-creator-rebuy-moonbag-canary`

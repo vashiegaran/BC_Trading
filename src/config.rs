@@ -162,6 +162,32 @@ pub struct DetectionConfig {
     /// ~50 SOL ≈ 60% to graduation, filters out 95% of dead tokens.
     #[serde(default = "default_bc_signal_volume_threshold")]
     pub bc_signal_volume_threshold: f64,
+    /// Legacy bc_paper_trades scoreboards: control/progress/graduation rows.
+    /// Set false when a newer consolidated shadow lane replaces them.
+    #[serde(default = "default_true")]
+    pub legacy_bc_paper_lanes_enabled: bool,
+    /// Consolidated shadow lane that scores broad runner candidates from BC
+    /// strength + label/narrative + early support signals into one scoreboard.
+    #[serde(default)]
+    pub optimized_runner_shadow_enabled: bool,
+    #[serde(default = "default_optimized_runner_shadow_min_score")]
+    pub optimized_runner_shadow_min_score: f64,
+    #[serde(default = "default_optimized_runner_shadow_min_progress_pct")]
+    pub optimized_runner_shadow_min_progress_pct: f64,
+    #[serde(default = "default_optimized_runner_shadow_min_volume_sol")]
+    pub optimized_runner_shadow_min_volume_sol: f64,
+    #[serde(default = "default_optimized_runner_shadow_min_buy_pressure_pct")]
+    pub optimized_runner_shadow_min_buy_pressure_pct: f64,
+    #[serde(default = "default_optimized_runner_shadow_min_buy_sell_ratio")]
+    pub optimized_runner_shadow_min_buy_sell_ratio: f64,
+    #[serde(default = "default_optimized_runner_shadow_min_unique_buyers")]
+    pub optimized_runner_shadow_min_unique_buyers: usize,
+    #[serde(default = "default_optimized_runner_shadow_max_sell_count")]
+    pub optimized_runner_shadow_max_sell_count: u64,
+    #[serde(default = "default_optimized_runner_shadow_max_label_gap_seconds")]
+    pub optimized_runner_shadow_max_label_gap_seconds: u64,
+    #[serde(default = "default_optimized_runner_shadow_min_support_signals")]
+    pub optimized_runner_shadow_min_support_signals: usize,
     /// Shadow-only lane: record a would-be mint-time entry when a brand-new
     /// token arrives into a very recent same-label cluster.
     #[serde(default)]
@@ -340,6 +366,33 @@ fn default_true() -> bool {
 }
 fn default_bc_signal_volume_threshold() -> f64 {
     50.0
+}
+fn default_optimized_runner_shadow_min_score() -> f64 {
+    70.0
+}
+fn default_optimized_runner_shadow_min_progress_pct() -> f64 {
+    55.0
+}
+fn default_optimized_runner_shadow_min_volume_sol() -> f64 {
+    30.0
+}
+fn default_optimized_runner_shadow_min_buy_pressure_pct() -> f64 {
+    65.0
+}
+fn default_optimized_runner_shadow_min_buy_sell_ratio() -> f64 {
+    2.0
+}
+fn default_optimized_runner_shadow_min_unique_buyers() -> usize {
+    8
+}
+fn default_optimized_runner_shadow_max_sell_count() -> u64 {
+    40
+}
+fn default_optimized_runner_shadow_max_label_gap_seconds() -> u64 {
+    300
+}
+fn default_optimized_runner_shadow_min_support_signals() -> usize {
+    1
 }
 fn default_launch_label_shadow_max_age_seconds() -> u64 {
     30

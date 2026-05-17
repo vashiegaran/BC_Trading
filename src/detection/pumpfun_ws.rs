@@ -892,6 +892,108 @@ fn maybe_fire_probe_add_shadow(
     );
 }
 
+fn maybe_fire_optimized_runner_shadow(
+    entry: &mut WatchlistEntry,
+    mint_str: &str,
+    supabase: &Arc<SupabaseClient>,
+    cfg: &Arc<AppConfig>,
+    bc_progress_pct: f64,
+) {
+    let detection_cfg = &cfg.strategy.detection;
+    if !detection_cfg.optimized_runner_shadow_enabled || entry.optimized_runner_shadow_recorded {
+        return;
+    }
+
+    let buy_pressure_pct = entry.buy_pressure_pct();
+    let buy_sell_ratio = compute_current_buy_sell_ratio(entry);
+    let has_flow_strength = bc_progress_pct
+        >= detection_cfg.optimized_runner_shadow_min_progress_pct
+        || entry.total_volume_sol >= detection_cfg.optimized_runner_shadow_min_volume_sol;
+    if !has_flow_strength
+        || buy_pressure_pct < detection_cfg.optimized_runner_shadow_min_buy_pressure_pct
+        || buy_sell_ratio < detection_cfg.optimized_runner_shadow_min_buy_sell_ratio
+        || entry.unique_buyers.len() < detection_cfg.optimized_runner_shadow_min_unique_buyers
+        || entry.sell_count > detection_cfg.optimized_runner_shadow_max_sell_count
+    {
+        return;
+    }
+
+    let early_metrics = compute_early_buyer_rebuy_metrics(
+        entry,
+        detection_cfg.early_buyer_rebuy_first_n.max(5),
+        detection_cfg.early_buyer_rebuy_min_rebuy_sol,
+    );
+    let decision = compute_optimized_runner_score(
+        entry,
+        early_metrics.as_ref(),
+        bc_progress_pct,
+        detection_cfg.optimized_runner_shadow_max_label_gap_seconds,
+    );
+
+    if decision.score < detection_cfg.optimized_runner_shadow_min_score
+        || decision.support_signals.len()
+            < detection_cfg.optimized_runner_shadow_min_support_signals
+    {
+        debug!(
+            mint = %mint_str,
+            score = format!("{:.1}", decision.score),
+            supports = decision.support_signals.len(),
+            "Optimized runner shadow skipped — score/support gate not met"
+        );
+        return;
+    }
+
+    entry.optimized_runner_shadow_recorded = true;
+    fire_optimized_runner_shadow(entry, mint_str, supabase, decision, bc_progress_pct);
+}
+
+fn fire_optimized_runner_shadow(
+    entry: &WatchlistEntry,
+    mint_str: &str,
+    supabase: &Arc<SupabaseClient>,
+    decision: OptimizedRunnerScore,
+    bc_progress_pct: f64,
+) {
+    let score = decision.score;
+    let mut signal_payload = build_signal_payload(entry, mint_str);
+    if let Some(signals) = signal_payload
+        .get_mut("signals")
+        .and_then(|signals| signals.as_object_mut())
+    {
+        signals.insert(
+            "optimized_runner_shadow".to_string(),
+            serde_json::json!({
+                "version": "v1",
+                "score": score,
+                "mining_goal": "let_some_noise_in_to_catch_big_winners",
+                "reasons": decision.reasons,
+                "penalties": decision.penalties,
+                "support_signals": decision.support_signals,
+                "breakdown": decision.breakdown,
+                "bc_progress_pct": bc_progress_pct,
+            }),
+        );
+    }
+
+    let supabase_c = Arc::clone(supabase);
+    let mint_for = mint_str.to_string();
+    tokio::spawn(async move {
+        info!(
+            mint = %mint_for,
+            progress = format!("{:.1}%", bc_progress_pct),
+            score = format!("{:.1}", score),
+            "🎯 Optimized runner shadow fired"
+        );
+        write_bc_paper_trade(
+            &supabase_c,
+            &signal_payload,
+            "optimized_runner_shadow",
+            score,
+        )
+        .await;
+    });
+}
+
 #[derive(Debug, Clone)]
 struct EarlyBuyerRebuyMetrics {
     first_buyers: Vec<Pubkey>,
@@ -908,6 +1010,15 @@ struct NarrativeClusterScore {
     score: f64,
     reasons: Vec<String>,
     penalties: Vec<String>,
+    breakdown: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
+struct OptimizedRunnerScore {
+    score: f64,
+    reasons: Vec<String>,
+    penalties: Vec<String>,
+    support_signals: Vec<String>,
     breakdown: serde_json::Value,
 }
 
@@ -1229,6 +1340,312 @@ fn compute_narrative_cluster_score(
         score: score.clamp(0.0, 100.0),
         reasons,
         penalties,
+        breakdown: serde_json::Value::Object(breakdown),
+    }
+}
+
+fn compute_optimized_runner_score(
+    entry: &WatchlistEntry,
+    early_metrics: Option<&EarlyBuyerRebuyMetrics>,
+    bc_progress_pct: f64,
+    max_label_gap_seconds: u64,
+) -> OptimizedRunnerScore {
+    let mut score = 0.0_f64;
+    let mut reasons = Vec::new();
+    let mut penalties = Vec::new();
+    let mut support_signals = Vec::new();
+    let mut breakdown = serde_json::Map::new();
+
+    let progress_points = if bc_progress_pct >= 75.0 {
+        30.0
+    } else if bc_progress_pct >= 60.0 {
+        25.0
+    } else if bc_progress_pct >= 45.0 {
+        15.0
+    } else {
+        0.0
+    };
+    add_narrative_component(
+        &mut score,
+        &mut reasons,
+        &mut penalties,
+        &mut breakdown,
+        "bc_progress",
+        progress_points,
+        "BC progress",
+    );
+
+    let volume_points = if entry.total_volume_sol >= 50.0 {
+        25.0
+    } else if entry.total_volume_sol >= 30.0 {
+        15.0
+    } else if entry.total_volume_sol >= 15.0 {
+        6.0
+    } else {
+        0.0
+    };
+    add_narrative_component(
+        &mut score,
+        &mut reasons,
+        &mut penalties,
+        &mut breakdown,
+        "entry_volume_sol",
+        volume_points,
+        "BC volume",
+    );
+
+    let buy_pressure = entry.buy_pressure_pct();
+    let pressure_points = if buy_pressure >= 85.0 {
+        20.0
+    } else if buy_pressure >= 75.0 {
+        14.0
+    } else if buy_pressure >= 65.0 {
+        8.0
+    } else {
+        -10.0
+    };
+    add_narrative_component(
+        &mut score,
+        &mut reasons,
+        &mut penalties,
+        &mut breakdown,
+        "buy_pressure",
+        pressure_points,
+        "buy pressure",
+    );
+
+    let buy_sell_ratio = compute_current_buy_sell_ratio(entry);
+    let bsr_points = if buy_sell_ratio >= 5.0 {
+        20.0
+    } else if buy_sell_ratio >= 3.0 {
+        15.0
+    } else if buy_sell_ratio >= 2.0 {
+        8.0
+    } else {
+        -10.0
+    };
+    add_narrative_component(
+        &mut score,
+        &mut reasons,
+        &mut penalties,
+        &mut breakdown,
+        "buy_sell_ratio",
+        bsr_points,
+        "buy/sell ratio",
+    );
+
+    let unique_buyers = entry.unique_buyers.len();
+    let buyer_points = if unique_buyers >= 40 {
+        12.0
+    } else if unique_buyers >= 20 {
+        8.0
+    } else if unique_buyers >= 8 {
+        4.0
+    } else {
+        0.0
+    };
+    add_narrative_component(
+        &mut score,
+        &mut reasons,
+        &mut penalties,
+        &mut breakdown,
+        "unique_buyers",
+        buyer_points,
+        "unique buyers",
+    );
+
+    let label_recent = entry.prior_same_label_mints_6h > 0
+        && entry
+            .seconds_since_label_seen
+            .map(|gap| gap <= max_label_gap_seconds as i64)
+            .unwrap_or(false);
+    if label_recent {
+        support_signals.push("label_repeat_recent".to_string());
+    }
+    let label_points = if label_recent {
+        18.0
+    } else if entry.prior_same_label_mints_6h > 0 {
+        8.0
+    } else {
+        0.0
+    };
+    add_narrative_component(
+        &mut score,
+        &mut reasons,
+        &mut penalties,
+        &mut breakdown,
+        "label_repeat",
+        label_points,
+        "label repeat",
+    );
+
+    if let Some(metrics) = early_metrics {
+        if !metrics.rebuy_wallets.is_empty() {
+            support_signals.push("early_buyer_rebuy".to_string());
+        }
+        let rebuy_points = if metrics.rebuy_sol_total >= 1.0 {
+            18.0
+        } else if metrics.rebuy_sol_total >= 0.5 {
+            12.0
+        } else if !metrics.rebuy_wallets.is_empty() {
+            8.0
+        } else {
+            0.0
+        };
+        add_narrative_component(
+            &mut score,
+            &mut reasons,
+            &mut penalties,
+            &mut breakdown,
+            "early_buyer_rebuy",
+            rebuy_points,
+            "early buyer rebuy",
+        );
+
+        let early_seller_points = if metrics.early_seller_wallets.len() >= 2 {
+            -8.0
+        } else if metrics.early_seller_wallets.is_empty() {
+            3.0
+        } else {
+            0.0
+        };
+        add_narrative_component(
+            &mut score,
+            &mut reasons,
+            &mut penalties,
+            &mut breakdown,
+            "early_seller_pressure",
+            early_seller_points,
+            "early seller pressure",
+        );
+    }
+
+    let flow_metrics = compute_flow_quality_metrics(entry, 5);
+    if flow_metrics.whale_net_sol >= 3.0 || flow_metrics.whale_buy_max_sol >= 4.0 {
+        support_signals.push("whale_net_support".to_string());
+    }
+    let whale_points = if flow_metrics.whale_net_sol >= 5.0 {
+        16.0
+    } else if flow_metrics.whale_net_sol >= 3.0 || flow_metrics.whale_buy_max_sol >= 4.0 {
+        10.0
+    } else if flow_metrics.whale_sell_sol_total >= 3.0 {
+        -8.0
+    } else {
+        0.0
+    };
+    add_narrative_component(
+        &mut score,
+        &mut reasons,
+        &mut penalties,
+        &mut breakdown,
+        "whale_flow",
+        whale_points,
+        "whale flow",
+    );
+
+    if flow_metrics.proven_wallet_net_sol >= 1.0 || flow_metrics.proven_wallet_unique_buyers > 0 {
+        support_signals.push("proven_wallet_support".to_string());
+    }
+    let proven_points = if flow_metrics.proven_wallet_net_sol >= 2.0 {
+        16.0
+    } else if flow_metrics.proven_wallet_net_sol >= 1.0
+        || flow_metrics.proven_wallet_unique_buyers > 0
+    {
+        10.0
+    } else {
+        0.0
+    };
+    add_narrative_component(
+        &mut score,
+        &mut reasons,
+        &mut penalties,
+        &mut breakdown,
+        "proven_wallet_flow",
+        proven_points,
+        "proven wallet flow",
+    );
+
+    let creator_metrics = compute_creator_bc_metrics(entry);
+    if creator_metrics.creator_net_sol_bc >= 1.0 && creator_metrics.creator_sell_count_bc == 0 {
+        support_signals.push("creator_net_buy_no_sell".to_string());
+    }
+    let creator_points = if creator_metrics.creator_net_sol_bc >= 2.0
+        && creator_metrics.creator_sell_count_bc == 0
+    {
+        12.0
+    } else if creator_metrics.creator_net_sol_bc >= 1.0
+        && creator_metrics.creator_sell_count_bc == 0
+    {
+        8.0
+    } else if creator_metrics.creator_sell_count_bc > 0 {
+        -12.0
+    } else {
+        0.0
+    };
+    add_narrative_component(
+        &mut score,
+        &mut reasons,
+        &mut penalties,
+        &mut breakdown,
+        "creator_flow",
+        creator_points,
+        "creator flow",
+    );
+
+    if bc_progress_pct >= 60.0 && entry.total_volume_sol >= 50.0 {
+        support_signals.push("high_bc_flow".to_string());
+        add_narrative_component(
+            &mut score,
+            &mut reasons,
+            &mut penalties,
+            &mut breakdown,
+            "high_bc_flow_bonus",
+            10.0,
+            "high BC flow",
+        );
+    } else {
+        breakdown.insert("high_bc_flow_bonus".to_string(), serde_json::json!(0.0));
+    }
+
+    if entry.sell_count > 25 {
+        add_narrative_component(
+            &mut score,
+            &mut reasons,
+            &mut penalties,
+            &mut breakdown,
+            "sell_count_penalty",
+            -8.0,
+            "sell count",
+        );
+    }
+
+    if compute_current_creator_rebuy(entry) && creator_metrics.creator_net_sol_bc < 1.0 {
+        add_narrative_component(
+            &mut score,
+            &mut reasons,
+            &mut penalties,
+            &mut breakdown,
+            "unsupported_creator_rebuy_penalty",
+            -10.0,
+            "unsupported creator rebuy",
+        );
+    }
+
+    breakdown.insert("raw_score".to_string(), serde_json::json!(score));
+    breakdown.insert(
+        "support_signal_count".to_string(),
+        serde_json::json!(support_signals.len()),
+    );
+    breakdown.insert(
+        "support_signals".to_string(),
+        serde_json::json!(support_signals.clone()),
+    );
+
+    OptimizedRunnerScore {
+        score: score.clamp(0.0, 100.0),
+        reasons,
+        penalties,
+        support_signals,
         breakdown: serde_json::Value::Object(breakdown),
     }
 }
@@ -2351,6 +2768,7 @@ async fn handle_new_token(
         graduation_recorded: false,
         control_recorded: false,
         launch_label_shadow_recorded: false,
+        optimized_runner_shadow_recorded: false,
         label_flow_shadow_recorded: false,
         narrative_cluster_shadow_recorded: false,
         narrative_cluster_context: None,
@@ -2640,15 +3058,18 @@ async fn handle_token_trade(
         let signal_payload = build_signal_payload(entry, mint_str);
         let supabase_clone = Arc::clone(supabase);
         let score_for_paper = bc_score;
+        let write_legacy_bc_paper = cfg.strategy.detection.legacy_bc_paper_lanes_enabled;
         tokio::spawn(async move {
             write_bonding_curve_signal(&supabase_clone, &signal_payload).await;
-            write_bc_paper_trade(
-                &supabase_clone,
-                &signal_payload,
-                "volume_50sol",
-                score_for_paper,
-            )
-            .await;
+            if write_legacy_bc_paper {
+                write_bc_paper_trade(
+                    &supabase_clone,
+                    &signal_payload,
+                    "volume_50sol",
+                    score_for_paper,
+                )
+                .await;
+            }
         });
     }
 
@@ -2672,12 +3093,16 @@ async fn handle_token_trade(
         );
         maybe_fire_early_buyer_rebuy_shadow(entry, mint_str, supabase, cfg, bc_progress_pct);
         maybe_fire_narrative_cluster_shadow(entry, mint_str, supabase, cfg, bc_progress_pct);
+        maybe_fire_optimized_runner_shadow(entry, mint_str, supabase, cfg, bc_progress_pct);
 
         // v14.1 counterfactual control — record once when warming starts.
         // Gives us a negative-class sample of tokens that crossed 30% but
         // never reached our 60% lane threshold. Same writer/payload so
         // analysis filters cleanly on entry_trigger='control_no_fire'.
-        if !entry.control_recorded && bc_progress_pct >= 30.0 {
+        if cfg.strategy.detection.legacy_bc_paper_lanes_enabled
+            && !entry.control_recorded
+            && bc_progress_pct >= 30.0
+        {
             entry.control_recorded = true;
             fire_bc_lane(
                 entry,
@@ -2690,7 +3115,10 @@ async fn handle_token_trade(
             );
         }
 
-        if !entry.progress_60_recorded && bc_progress_pct >= 60.0 {
+        if cfg.strategy.detection.legacy_bc_paper_lanes_enabled
+            && !entry.progress_60_recorded
+            && bc_progress_pct >= 60.0
+        {
             entry.progress_60_recorded = true;
             fire_bc_lane(
                 entry,
@@ -2702,7 +3130,10 @@ async fn handle_token_trade(
                 bc_progress_pct,
             );
         }
-        if !entry.progress_signal_recorded && bc_progress_pct >= 75.0 {
+        if cfg.strategy.detection.legacy_bc_paper_lanes_enabled
+            && !entry.progress_signal_recorded
+            && bc_progress_pct >= 75.0
+        {
             entry.progress_signal_recorded = true;
             fire_bc_lane(
                 entry,
@@ -2714,7 +3145,10 @@ async fn handle_token_trade(
                 bc_progress_pct,
             );
         }
-        if !entry.progress_90_recorded && bc_progress_pct >= 90.0 {
+        if cfg.strategy.detection.legacy_bc_paper_lanes_enabled
+            && !entry.progress_90_recorded
+            && bc_progress_pct >= 90.0
+        {
             entry.progress_90_recorded = true;
             fire_bc_lane(
                 entry,
@@ -3181,7 +3615,12 @@ async fn handle_token_complete(
             100.0 // already graduated → treat as 100%
         };
 
-        if !entry.progress_60_recorded && entry.last_v_sol_reserves > 0.0 {
+        maybe_fire_optimized_runner_shadow(entry, mint_str, supabase, cfg, bc_progress_pct);
+
+        if cfg.strategy.detection.legacy_bc_paper_lanes_enabled
+            && !entry.progress_60_recorded
+            && entry.last_v_sol_reserves > 0.0
+        {
             entry.progress_60_recorded = true;
             fire_bc_lane(
                 entry,
@@ -3193,7 +3632,10 @@ async fn handle_token_complete(
                 bc_progress_pct,
             );
         }
-        if !entry.progress_signal_recorded && entry.last_v_sol_reserves > 0.0 {
+        if cfg.strategy.detection.legacy_bc_paper_lanes_enabled
+            && !entry.progress_signal_recorded
+            && entry.last_v_sol_reserves > 0.0
+        {
             entry.progress_signal_recorded = true;
             fire_bc_lane(
                 entry,
@@ -3205,7 +3647,10 @@ async fn handle_token_complete(
                 bc_progress_pct,
             );
         }
-        if !entry.progress_90_recorded && entry.last_v_sol_reserves > 0.0 {
+        if cfg.strategy.detection.legacy_bc_paper_lanes_enabled
+            && !entry.progress_90_recorded
+            && entry.last_v_sol_reserves > 0.0
+        {
             entry.progress_90_recorded = true;
             fire_bc_lane(
                 entry,
@@ -3223,7 +3668,7 @@ async fn handle_token_complete(
         maybe_fire_probe_add_shadow(entry, mint_str, supabase, cfg, bc_progress_pct);
         maybe_fire_early_buyer_rebuy_shadow(entry, mint_str, supabase, cfg, bc_progress_pct);
 
-        if !entry.graduation_recorded {
+        if cfg.strategy.detection.legacy_bc_paper_lanes_enabled && !entry.graduation_recorded {
             entry.graduation_recorded = true;
             fire_bc_lane(
                 entry,

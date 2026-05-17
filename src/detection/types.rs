@@ -372,6 +372,9 @@ pub struct WatchlistEntry {
     /// Whether the mint-time same-label launch shadow lane row has already
     /// been written.
     pub launch_label_shadow_recorded: bool,
+    /// Whether the consolidated optimized runner shadow lane row has already
+    /// been written.
+    pub optimized_runner_shadow_recorded: bool,
     /// Whether the repeated-label shadow lane row has already been written.
     pub label_flow_shadow_recorded: bool,
     /// Whether the narrative-cluster armed-post-grad simulation row has been written.
