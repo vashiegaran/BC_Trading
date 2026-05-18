@@ -32,19 +32,21 @@ bc_signal_volume_threshold = 30.0  # SOL — record when cumulative volume hits 
 legacy_bc_paper_lanes_enabled = false
 
 # ── Optimized runner shadow lane (observe-only, no live execution) ──
-# Consolidates the strongest pre-grad evidence into one candidate lane. It is
-# intentionally a little wider than live filters so we can measure moonbag
-# capture without spraying several duplicate paper rows per token.
+# Switch-ready profile: much narrower than the discovery net. Requires strong
+# score, strong buy dominance, limited sell pressure, 2+ support signals, and
+# a real support combo in code before it writes the paper row. Creator-net is
+# recorded as context, but is not enough by itself to pass the switch profile.
 optimized_runner_shadow_enabled = true
-optimized_runner_shadow_min_score = 70.0
-optimized_runner_shadow_min_progress_pct = 55.0
+optimized_runner_shadow_min_score = 90.0
+optimized_runner_shadow_min_progress_pct = 30.0
 optimized_runner_shadow_min_volume_sol = 30.0
-optimized_runner_shadow_min_buy_pressure_pct = 65.0
-optimized_runner_shadow_min_buy_sell_ratio = 2.0
+optimized_runner_shadow_min_buy_pressure_pct = 75.0
+optimized_runner_shadow_min_buy_sell_ratio = 5.0
 optimized_runner_shadow_min_unique_buyers = 8
-optimized_runner_shadow_max_sell_count = 40
+optimized_runner_shadow_max_sell_count = 10
 optimized_runner_shadow_max_label_gap_seconds = 300
-optimized_runner_shadow_min_support_signals = 1
+optimized_runner_shadow_min_support_signals = 2
+optimized_runner_shadow_switch_profile_enabled = true
 
 # ── Meteora DBC shadow lane (observe-only, no live execution) ──
 # Collects Solana Meteora Dynamic Bonding Curve launches from DexScreener.

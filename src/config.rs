@@ -188,6 +188,8 @@ pub struct DetectionConfig {
     pub optimized_runner_shadow_max_label_gap_seconds: u64,
     #[serde(default = "default_optimized_runner_shadow_min_support_signals")]
     pub optimized_runner_shadow_min_support_signals: usize,
+    #[serde(default = "default_true")]
+    pub optimized_runner_shadow_switch_profile_enabled: bool,
     /// Shadow-only lane: record a would-be mint-time entry when a brand-new
     /// token arrives into a very recent same-label cluster.
     #[serde(default)]
@@ -368,31 +370,31 @@ fn default_bc_signal_volume_threshold() -> f64 {
     50.0
 }
 fn default_optimized_runner_shadow_min_score() -> f64 {
-    70.0
+    90.0
 }
 fn default_optimized_runner_shadow_min_progress_pct() -> f64 {
-    55.0
+    30.0
 }
 fn default_optimized_runner_shadow_min_volume_sol() -> f64 {
     30.0
 }
 fn default_optimized_runner_shadow_min_buy_pressure_pct() -> f64 {
-    65.0
+    75.0
 }
 fn default_optimized_runner_shadow_min_buy_sell_ratio() -> f64 {
-    2.0
+    5.0
 }
 fn default_optimized_runner_shadow_min_unique_buyers() -> usize {
     8
 }
 fn default_optimized_runner_shadow_max_sell_count() -> u64 {
-    40
+    10
 }
 fn default_optimized_runner_shadow_max_label_gap_seconds() -> u64 {
     300
 }
 fn default_optimized_runner_shadow_min_support_signals() -> usize {
-    1
+    2
 }
 fn default_launch_label_shadow_max_age_seconds() -> u64 {
     30

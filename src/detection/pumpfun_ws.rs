@@ -943,8 +943,67 @@ fn maybe_fire_optimized_runner_shadow(
         return;
     }
 
+    let (switch_profile_passed, switch_profile) =
+        evaluate_optimized_runner_switch_profile(&decision);
+    if detection_cfg.optimized_runner_shadow_switch_profile_enabled && !switch_profile_passed {
+        debug!(
+            mint = %mint_str,
+            score = format!("{:.1}", decision.score),
+            supports = ?decision.support_signals,
+            "Optimized runner shadow skipped — switch profile combo not met"
+        );
+        return;
+    }
+
     entry.optimized_runner_shadow_recorded = true;
-    fire_optimized_runner_shadow(entry, mint_str, supabase, decision, bc_progress_pct);
+    fire_optimized_runner_shadow(
+        entry,
+        mint_str,
+        supabase,
+        decision,
+        bc_progress_pct,
+        switch_profile,
+    );
+}
+
+fn evaluate_optimized_runner_switch_profile(
+    decision: &OptimizedRunnerScore,
+) -> (bool, serde_json::Value) {
+    let has_support = |name: &str| decision.support_signals.iter().any(|signal| signal == name);
+
+    let high_bc_flow = has_support("high_bc_flow");
+    let whale = has_support("whale_net_support");
+    let label = has_support("label_repeat_recent");
+    let early_rebuy = has_support("early_buyer_rebuy");
+    let proven = has_support("proven_wallet_support");
+    let creator_net = has_support("creator_net_buy_no_sell");
+
+    let mut matched_profiles = Vec::new();
+    if high_bc_flow {
+        matched_profiles.push("high_bc_flow".to_string());
+    }
+    if whale && label {
+        matched_profiles.push("whale_plus_label_repeat".to_string());
+    }
+    if whale && early_rebuy {
+        matched_profiles.push("whale_plus_early_rebuy".to_string());
+    }
+    if whale && proven {
+        matched_profiles.push("whale_plus_proven_wallet".to_string());
+    }
+    let creator_net_context = creator_net && (label || early_rebuy || proven || high_bc_flow);
+
+    let passed = !matched_profiles.is_empty();
+    (
+        passed,
+        serde_json::json!({
+            "version": "switch_v1",
+            "passed": passed,
+            "matched_profiles": matched_profiles,
+            "creator_net_context": creator_net_context,
+            "requires": "high_bc_flow OR whale_net_support plus label/early/proven support; creator-net is context only",
+        }),
+    )
 }
 
 fn fire_optimized_runner_shadow(
@@ -953,6 +1012,7 @@ fn fire_optimized_runner_shadow(
     supabase: &Arc<SupabaseClient>,
     decision: OptimizedRunnerScore,
     bc_progress_pct: f64,
+    switch_profile: serde_json::Value,
 ) {
     let score = decision.score;
     let mut signal_payload = build_signal_payload(entry, mint_str);
@@ -963,12 +1023,13 @@ fn fire_optimized_runner_shadow(
         signals.insert(
             "optimized_runner_shadow".to_string(),
             serde_json::json!({
-                "version": "v1",
+                "version": "v2_switch_narrow",
                 "score": score,
-                "mining_goal": "let_some_noise_in_to_catch_big_winners",
+                "mining_goal": "switch_ready_moonbag_runner_candidate",
                 "reasons": decision.reasons,
                 "penalties": decision.penalties,
                 "support_signals": decision.support_signals,
+                "switch_profile": switch_profile,
                 "breakdown": decision.breakdown,
                 "bc_progress_pct": bc_progress_pct,
             }),
