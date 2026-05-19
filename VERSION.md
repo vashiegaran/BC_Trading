@@ -9,6 +9,14 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.9.15 — Creator Serial-Clone Live Guard (2026-05-19)
+
+Adds a live pre-buy guard for creator-rebuy canary entries that match the VOLTIX failure pattern: the same creator has many prior launches, many same-label prior launches, and another mint within the last two minutes. Matching entries are rejected before order submission and logged through pipeline latency as `creator_rebuy_serial_clone_guard_*`.
+
+The guard is configurable in [config.toml](config.toml) and defaults to blocking when `creator_prior_mints_6h >= 20`, `creator_same_label_prior_mints_6h >= 10`, and `creator_seconds_since_last_mint <= 120`.
+
+---
+
 ## v18.9.14 — Optimized Big-Winner Shadow Marker (2026-05-19)
 
 Adds an observe-only `optimized_big_winner_candidate` marker to `bc_paper_trades` for optimized-runner tokens that mature into the strongest simulated 3x/5x profile: age >=10s, buy/sell ratio >=8, buy pressure >=75%, and either sell count <=5 or whale net >=5 SOL, while still requiring optimized-runner score/switch-profile quality.

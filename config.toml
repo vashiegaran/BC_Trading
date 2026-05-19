@@ -294,6 +294,14 @@ creator_rebuy_moonbag_canary_support_min_creator_net_sol = 1.0
 # 0 disables this lane-specific daily cap; global 0.20 SOL loss stop governs.
 creator_rebuy_moonbag_canary_max_daily_trades = 0
 
+# Live safety guard against serial same-label creator relaunch farms. Blocks
+# creator-rebuy live canary entries when the same creator has rapidly relaunched
+# the same label many times, like the VOLTIX rug-like collapse.
+creator_rebuy_serial_clone_guard_enabled = true
+creator_rebuy_serial_clone_min_creator_prior_mints = 20
+creator_rebuy_serial_clone_min_same_label_prior_mints = 10
+creator_rebuy_serial_clone_max_seconds_since_last_mint = 120
+
 # Narrative cluster live canary: only the strict May 7-10 profile goes live.
 # v18.9 Phase 1: allow creator-rebuy ONLY inside this strict narrative lane.
 # Backtest/sim: score>=80, buy_pressure>=80, BSR>=4, sells<=3, no creator sell,

@@ -711,6 +711,16 @@ pub struct FiltersConfig {
     pub creator_rebuy_moonbag_canary_support_min_creator_net_sol: f64,
     #[serde(default = "default_creator_rebuy_moonbag_canary_max_daily_trades")]
     pub creator_rebuy_moonbag_canary_max_daily_trades: u32,
+    /// Live safety guard for serial same-label creator relaunches. These can
+    /// show strong creator rebuy/whale flow while acting like exit liquidity.
+    #[serde(default = "default_true")]
+    pub creator_rebuy_serial_clone_guard_enabled: bool,
+    #[serde(default = "default_creator_rebuy_serial_clone_min_creator_prior_mints")]
+    pub creator_rebuy_serial_clone_min_creator_prior_mints: usize,
+    #[serde(default = "default_creator_rebuy_serial_clone_min_same_label_prior_mints")]
+    pub creator_rebuy_serial_clone_min_same_label_prior_mints: usize,
+    #[serde(default = "default_creator_rebuy_serial_clone_max_seconds_since_last_mint")]
+    pub creator_rebuy_serial_clone_max_seconds_since_last_mint: u64,
     /// Strict live canary for the best narrative-cluster shadow profile. This
     /// bypasses the Standard-lane kill switch only after the armed shadow
     /// snapshot matches the configured flow/liquidity gates and Fast-Track
@@ -957,6 +967,15 @@ fn default_creator_rebuy_moonbag_canary_support_min_creator_net_sol() -> f64 {
 }
 fn default_creator_rebuy_moonbag_canary_max_daily_trades() -> u32 {
     1
+}
+fn default_creator_rebuy_serial_clone_min_creator_prior_mints() -> usize {
+    20
+}
+fn default_creator_rebuy_serial_clone_min_same_label_prior_mints() -> usize {
+    10
+}
+fn default_creator_rebuy_serial_clone_max_seconds_since_last_mint() -> u64 {
+    120
 }
 fn default_narrative_cluster_live_canary_min_score() -> f64 {
     80.0

@@ -84,6 +84,55 @@ fn is_creator_rebuy_moonbag_canary(token: &FilteredToken) -> bool {
         == Some(CREATOR_REBUY_MOONBAG_CANARY_ENTRY_TIER)
 }
 
+fn sniper_feature_u64(token: &FilteredToken, key: &str) -> Option<u64> {
+    token
+        .event
+        .sniper_features
+        .as_ref()?
+        .get(key)
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_i64().and_then(|number| u64::try_from(number).ok()))
+                .or_else(|| {
+                    value
+                        .as_f64()
+                        .filter(|number| number.is_finite() && *number >= 0.0)
+                        .map(|number| number as u64)
+                })
+                .or_else(|| value.as_str().and_then(|text| text.parse::<u64>().ok()))
+        })
+}
+
+fn creator_rebuy_serial_clone_guard_reason(
+    cfg: &AppConfig,
+    token: &FilteredToken,
+) -> Option<String> {
+    let filters = &cfg.strategy.filters;
+    if !filters.creator_rebuy_serial_clone_guard_enabled || !is_creator_rebuy_live_test(token) {
+        return None;
+    }
+
+    let creator_prior_mints = sniper_feature_u64(token, "creator_prior_mints_6h").unwrap_or(0);
+    let same_label_prior_mints =
+        sniper_feature_u64(token, "creator_same_label_prior_mints_6h").unwrap_or(0);
+    let seconds_since_last_mint = sniper_feature_u64(token, "creator_seconds_since_last_mint")?;
+
+    if creator_prior_mints >= filters.creator_rebuy_serial_clone_min_creator_prior_mints as u64
+        && same_label_prior_mints
+            >= filters.creator_rebuy_serial_clone_min_same_label_prior_mints as u64
+        && seconds_since_last_mint
+            <= filters.creator_rebuy_serial_clone_max_seconds_since_last_mint
+    {
+        return Some(format!(
+            "creator_rebuy_serial_clone_guard_creator_prior_{}_same_label_{}_last_mint_{}s",
+            creator_prior_mints, same_label_prior_mints, seconds_since_last_mint
+        ));
+    }
+
+    None
+}
+
 fn is_narrative_cluster_live_canary(token: &FilteredToken) -> bool {
     token
         .event
@@ -239,6 +288,19 @@ pub fn start(
             // Creator-rebuy is still broadly blocked upstream. If the tiny canary lane
             // is allowed through, keep at most one such position open by default.
             if is_creator_rebuy_live_test(&token) {
+                if let Some(reason) = creator_rebuy_serial_clone_guard_reason(&cfg, &token) {
+                    warn!(mint = %mint_str, reason = %reason, "⏭️ Skipping creator-rebuy canary — serial same-label creator guard");
+                    timing.outcome = Some("rejected_precheck".to_string());
+                    timing.rejection_stage = Some("precheck".to_string());
+                    timing.rejection_reason = Some(reason);
+                    let timing_payload = timing.to_json(&mint_str);
+                    let supabase_bg = supabase.clone();
+                    tokio::spawn(async move {
+                        log_pipeline_latency(&supabase_bg, &timing_payload).await;
+                    });
+                    continue;
+                }
+
                 let cap = cfg
                     .strategy
                     .filters
