@@ -9,6 +9,22 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.9.17 — Safe 50% + Creator Share Guard (2026-05-19)
+
+**strategy_version**: `v18.9.17-safe-50pct-creator-share-guard`
+
+Keeps the `1.5x` full-exit cash-builder from v18.9.16 and adds a narrow creator-rebuy live-test guard: reject when the creator wallet accounts for more than `80%` of BC buy volume. This targets CAP-style creator-dominated bait flow, where the creator supplied `85.6%` of the buy volume and the trade never reached the safer `1.5x` exit.
+
+---
+
+## v18.9.16 — Safe 50% Cash Builder (2026-05-19)
+
+**strategy_version**: `v18.9.16-safe-50pct-cash-builder`
+
+Changes the live cash-builder exit to sell `100%` at `1.5x` instead of waiting for `1.8x`. The May 16-19 live replay favored this safer target: `1.5x` was reached by 27/44 live trades versus 12/44 for `1.8x`, with higher simulated PnL even after fill haircuts. This intentionally sacrifices some upside on the small runner subset to avoid VOLTIX/PETRO-style round trips.
+
+---
+
 ## v18.9.15 — Creator Serial-Clone Live Guard (2026-05-19)
 
 Adds a live pre-buy guard for creator-rebuy canary entries that match the VOLTIX failure pattern: the same creator has many prior launches, many same-label prior launches, and another mint within the last two minutes. Matching entries are rejected before order submission and logged through pipeline latency as `creator_rebuy_serial_clone_guard_*`.

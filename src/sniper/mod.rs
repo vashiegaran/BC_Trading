@@ -267,6 +267,20 @@ fn creator_rebuy_live_test_rejection_reason(
         ));
     }
 
+    if filters_cfg.creator_rebuy_live_test_max_creator_buy_share_pct > 0.0 {
+        if let Some(creator_buy_share_pct) = bc_entry.creator_buy_share_pct {
+            if creator_buy_share_pct
+                > filters_cfg.creator_rebuy_live_test_max_creator_buy_share_pct
+            {
+                return Some(format!(
+                    "creator_buy_share_pct_{:.1}_above_live_test_max_{:.1}",
+                    creator_buy_share_pct,
+                    filters_cfg.creator_rebuy_live_test_max_creator_buy_share_pct
+                ));
+            }
+        }
+    }
+
     if filters_cfg.creator_rebuy_live_test_max_bc_progress_pct > 0.0 {
         if bc_entry.bc_progress_pct <= 0.0 {
             return Some("bc_progress_unknown_for_live_test".to_string());
@@ -817,6 +831,7 @@ pub fn start(
                             "creator_rebuy_live_test_max_bc_progress_pct": cfg.strategy.filters.creator_rebuy_live_test_max_bc_progress_pct,
                             "creator_rebuy_live_test_min_total_volume_sol": cfg.strategy.filters.creator_rebuy_live_test_min_total_volume_sol,
                             "creator_rebuy_live_test_min_whale_buy_sol": cfg.strategy.filters.creator_rebuy_live_test_min_whale_buy_sol,
+                            "creator_rebuy_live_test_max_creator_buy_share_pct": cfg.strategy.filters.creator_rebuy_live_test_max_creator_buy_share_pct,
                             "creator_rebuy_live_test_zero_sell_enabled": cfg.strategy.filters.creator_rebuy_live_test_zero_sell_enabled,
                             "creator_rebuy_live_test_zero_sell_min_score": cfg.strategy.filters.creator_rebuy_live_test_zero_sell_min_score,
                             "creator_rebuy_live_test_zero_sell_min_buy_pressure_pct": cfg.strategy.filters.creator_rebuy_live_test_zero_sell_min_buy_pressure_pct,

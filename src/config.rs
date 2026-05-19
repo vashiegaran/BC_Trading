@@ -664,6 +664,10 @@ pub struct FiltersConfig {
     /// Minimum largest single buy in SOL for creator-rebuy canary.
     #[serde(default = "default_creator_rebuy_live_test_min_whale_buy_sol")]
     pub creator_rebuy_live_test_min_whale_buy_sol: f64,
+    /// Maximum percent of BC buy volume that may come from the creator wallet.
+    /// 0 = disabled. Prevents creator-dominated bait candles like CAP.
+    #[serde(default = "default_creator_rebuy_live_test_max_creator_buy_share_pct")]
+    pub creator_rebuy_live_test_max_creator_buy_share_pct: f64,
     /// Enable the high-precision zero-sell creator-rebuy profile.
     #[serde(default = "default_true")]
     pub creator_rebuy_live_test_zero_sell_enabled: bool,
@@ -916,6 +920,9 @@ fn default_creator_rebuy_live_test_min_total_volume_sol() -> f64 {
 }
 fn default_creator_rebuy_live_test_min_whale_buy_sol() -> f64 {
     4.0
+}
+fn default_creator_rebuy_live_test_max_creator_buy_share_pct() -> f64 {
+    80.0
 }
 fn default_creator_rebuy_live_test_zero_sell_min_score() -> f64 {
     50.0

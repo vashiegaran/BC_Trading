@@ -9,7 +9,7 @@
 #   filterable in analytics vs the broken v16.1 binary that was running
 #   from never-committed source. Detection: pumpfun_ws. Fast-track:
 #   2-source (on_chain_mint + goplus) so GoPlus runs PRE-buy.
-strategy_version = "v18.9.13-fast-exit-cash-builder"
+strategy_version = "v18.9.17-safe-50pct-creator-share-guard"
 
 # ============================================================
 # DETECTION
@@ -268,6 +268,7 @@ creator_rebuy_live_test_require_valid_identity = true
 creator_rebuy_live_test_max_bc_progress_pct = 45.0
 creator_rebuy_live_test_min_total_volume_sol = 30.0
 creator_rebuy_live_test_min_whale_buy_sol = 4.0
+creator_rebuy_live_test_max_creator_buy_share_pct = 80.0
 creator_rebuy_live_test_zero_sell_enabled = true
 creator_rebuy_live_test_zero_sell_min_score = 50.0
 creator_rebuy_live_test_zero_sell_min_buy_pressure_pct = 70.0
@@ -494,8 +495,8 @@ tip_multiplier = 3.0
 # Sniped tokens that don't move in 15 min are dead
 max_hold_seconds = 900
 
-# Fast-exit cash builder: sell the full position at 1.8x before rug-like reversals.
-tp1_multiplier = 1.8
+# Safe cash builder: sell the full position at 1.5x before rug-like reversals.
+tp1_multiplier = 1.5
 tp1_sell_pct = 100
 
 # TP2 is dormant while TP1 sells 100%; kept as a rollback-friendly backup.
