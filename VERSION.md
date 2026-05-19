@@ -9,6 +9,14 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.9.14 — Optimized Big-Winner Shadow Marker (2026-05-19)
+
+Adds an observe-only `optimized_big_winner_candidate` marker to `bc_paper_trades` for optimized-runner tokens that mature into the strongest simulated 3x/5x profile: age >=10s, buy/sell ratio >=8, buy pressure >=75%, and either sell count <=5 or whale net >=5 SOL, while still requiring optimized-runner score/switch-profile quality.
+
+This does not place live trades. It creates a narrower forward-validation stream for future moonbag-lane promotion while the fast-exit cash-builder remains the live production mode.
+
+---
+
 ## v18.9.13 — Fast-Exit Cash Builder (2026-05-19)
 
 **strategy_version**: `v18.9.13-fast-exit-cash-builder`

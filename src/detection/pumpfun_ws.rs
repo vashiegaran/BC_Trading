@@ -1055,6 +1055,149 @@ fn fire_optimized_runner_shadow(
     });
 }
 
+fn maybe_fire_optimized_big_winner_shadow(
+    entry: &mut WatchlistEntry,
+    mint_str: &str,
+    supabase: &Arc<SupabaseClient>,
+    cfg: &Arc<AppConfig>,
+    bc_progress_pct: f64,
+) {
+    let detection_cfg = &cfg.strategy.detection;
+    if !detection_cfg.optimized_big_winner_shadow_enabled
+        || entry.optimized_big_winner_shadow_recorded
+    {
+        return;
+    }
+
+    let now = chrono::Utc::now().timestamp_millis();
+    let token_age_secs = ((now - entry.detected_at).max(0) as f64) / 1_000.0;
+    let buy_pressure_pct = entry.buy_pressure_pct();
+    let buy_sell_ratio = compute_current_buy_sell_ratio(entry);
+    let flow_metrics = compute_flow_quality_metrics(entry, 5);
+    let has_flow_strength = bc_progress_pct
+        >= detection_cfg.optimized_big_winner_shadow_min_progress_pct
+        || entry.total_volume_sol >= detection_cfg.optimized_runner_shadow_min_volume_sol;
+    let low_sell_or_whale = entry.sell_count
+        <= detection_cfg.optimized_big_winner_shadow_max_sell_count
+        || flow_metrics.whale_net_sol
+            >= detection_cfg.optimized_big_winner_shadow_min_whale_net_sol;
+
+    if !has_flow_strength
+        || token_age_secs < detection_cfg.optimized_big_winner_shadow_min_age_secs as f64
+        || buy_pressure_pct < detection_cfg.optimized_big_winner_shadow_min_buy_pressure_pct
+        || buy_sell_ratio < detection_cfg.optimized_big_winner_shadow_min_buy_sell_ratio
+        || entry.unique_buyers.len()
+            < detection_cfg.optimized_big_winner_shadow_min_unique_buyers
+        || !low_sell_or_whale
+    {
+        return;
+    }
+
+    let early_metrics = compute_early_buyer_rebuy_metrics(
+        entry,
+        detection_cfg.early_buyer_rebuy_first_n.max(5),
+        detection_cfg.early_buyer_rebuy_min_rebuy_sol,
+    );
+    let decision = compute_optimized_runner_score(
+        entry,
+        early_metrics.as_ref(),
+        bc_progress_pct,
+        detection_cfg.optimized_runner_shadow_max_label_gap_seconds,
+    );
+    if decision.score < detection_cfg.optimized_big_winner_shadow_min_score {
+        return;
+    }
+
+    let (switch_profile_passed, switch_profile) =
+        evaluate_optimized_runner_switch_profile(&decision);
+    if detection_cfg.optimized_big_winner_shadow_require_switch_profile && !switch_profile_passed {
+        return;
+    }
+
+    entry.optimized_big_winner_shadow_recorded = true;
+    fire_optimized_big_winner_shadow(
+        entry,
+        mint_str,
+        supabase,
+        decision,
+        bc_progress_pct,
+        token_age_secs,
+        buy_sell_ratio,
+        buy_pressure_pct,
+        flow_metrics,
+        low_sell_or_whale,
+        switch_profile,
+    );
+}
+
+fn fire_optimized_big_winner_shadow(
+    entry: &WatchlistEntry,
+    mint_str: &str,
+    supabase: &Arc<SupabaseClient>,
+    decision: OptimizedRunnerScore,
+    bc_progress_pct: f64,
+    token_age_secs: f64,
+    buy_sell_ratio: f64,
+    buy_pressure_pct: f64,
+    flow_metrics: FlowQualityMetrics,
+    low_sell_or_whale: bool,
+    switch_profile: serde_json::Value,
+) {
+    let score = decision.score;
+    let mut signal_payload = build_signal_payload(entry, mint_str);
+    if let Some(signals) = signal_payload
+        .get_mut("signals")
+        .and_then(|signals| signals.as_object_mut())
+    {
+        signals.insert(
+            "optimized_big_winner_candidate".to_string(),
+            serde_json::json!({
+                "version": "v1_bsr_age_whale_or_low_sells",
+                "score": score,
+                "mining_goal": "narrow_3x_5x_runner_candidate",
+                "rule": "age>=10s AND bsr>=8 AND (sells<=5 OR whale_net>=5) on optimized-runner-quality flow",
+                "token_age_secs": token_age_secs,
+                "buy_sell_ratio": buy_sell_ratio,
+                "buy_pressure_pct": buy_pressure_pct,
+                "sell_count": entry.sell_count,
+                "unique_buyers": entry.unique_buyers.len(),
+                "whale_net_sol": flow_metrics.whale_net_sol,
+                "whale_buy_sol_total": flow_metrics.whale_buy_sol_total,
+                "whale_sell_sol_total": flow_metrics.whale_sell_sol_total,
+                "low_sell_or_whale": low_sell_or_whale,
+                "bc_progress_pct": bc_progress_pct,
+                "total_volume_sol": entry.total_volume_sol,
+                "reasons": decision.reasons,
+                "penalties": decision.penalties,
+                "support_signals": decision.support_signals,
+                "switch_profile": switch_profile,
+                "breakdown": decision.breakdown,
+            }),
+        );
+    }
+
+    let supabase_c = Arc::clone(supabase);
+    let mint_for = mint_str.to_string();
+    tokio::spawn(async move {
+        info!(
+            mint = %mint_for,
+            progress = format!("{:.1}%", bc_progress_pct),
+            age_secs = format!("{:.1}", token_age_secs),
+            bsr = format!("{:.1}", buy_sell_ratio),
+            whale_net = format!("{:.2}", flow_metrics.whale_net_sol),
+            score = format!("{:.1}", score),
+            "🏁 Optimized big-winner shadow fired"
+        );
+        write_bc_paper_trade(
+            &supabase_c,
+            &signal_payload,
+            "optimized_big_winner_candidate",
+            score,
+        )
+        .await;
+    });
+}
+
 #[derive(Debug, Clone)]
 struct EarlyBuyerRebuyMetrics {
     first_buyers: Vec<Pubkey>,
@@ -2830,6 +2973,7 @@ async fn handle_new_token(
         control_recorded: false,
         launch_label_shadow_recorded: false,
         optimized_runner_shadow_recorded: false,
+        optimized_big_winner_shadow_recorded: false,
         label_flow_shadow_recorded: false,
         narrative_cluster_shadow_recorded: false,
         narrative_cluster_context: None,
@@ -3155,6 +3299,7 @@ async fn handle_token_trade(
         maybe_fire_early_buyer_rebuy_shadow(entry, mint_str, supabase, cfg, bc_progress_pct);
         maybe_fire_narrative_cluster_shadow(entry, mint_str, supabase, cfg, bc_progress_pct);
         maybe_fire_optimized_runner_shadow(entry, mint_str, supabase, cfg, bc_progress_pct);
+        maybe_fire_optimized_big_winner_shadow(entry, mint_str, supabase, cfg, bc_progress_pct);
 
         // v14.1 counterfactual control — record once when warming starts.
         // Gives us a negative-class sample of tokens that crossed 30% but
@@ -3677,6 +3822,7 @@ async fn handle_token_complete(
         };
 
         maybe_fire_optimized_runner_shadow(entry, mint_str, supabase, cfg, bc_progress_pct);
+        maybe_fire_optimized_big_winner_shadow(entry, mint_str, supabase, cfg, bc_progress_pct);
 
         if cfg.strategy.detection.legacy_bc_paper_lanes_enabled
             && !entry.progress_60_recorded

@@ -48,6 +48,21 @@ optimized_runner_shadow_max_label_gap_seconds = 300
 optimized_runner_shadow_min_support_signals = 2
 optimized_runner_shadow_switch_profile_enabled = true
 
+# ── Optimized big-winner candidate shadow marker (observe-only) ──
+# Narrow follow-up marker for optimized-runner tokens that mature into the
+# strongest in-sample 3x/5x profile: older than the first-second chop, strong
+# buy/sell dominance, and either limited sells or strong whale net support.
+optimized_big_winner_shadow_enabled = true
+optimized_big_winner_shadow_min_score = 90.0
+optimized_big_winner_shadow_min_age_secs = 10
+optimized_big_winner_shadow_min_buy_sell_ratio = 8.0
+optimized_big_winner_shadow_max_sell_count = 5
+optimized_big_winner_shadow_min_whale_net_sol = 5.0
+optimized_big_winner_shadow_min_unique_buyers = 8
+optimized_big_winner_shadow_min_buy_pressure_pct = 75.0
+optimized_big_winner_shadow_min_progress_pct = 30.0
+optimized_big_winner_shadow_require_switch_profile = true
+
 # ── Meteora DBC shadow lane (observe-only, no live execution) ──
 # Collects Solana Meteora Dynamic Bonding Curve launches from DexScreener.
 # `would_trade_shadow` is intentionally narrowed to Tier A candidates only:

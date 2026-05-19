@@ -190,6 +190,28 @@ pub struct DetectionConfig {
     pub optimized_runner_shadow_min_support_signals: usize,
     #[serde(default = "default_true")]
     pub optimized_runner_shadow_switch_profile_enabled: bool,
+    /// Narrow shadow marker layered on top of optimized-runner flow to study
+    /// 3x/5x candidates before promoting any live moonbag lane.
+    #[serde(default)]
+    pub optimized_big_winner_shadow_enabled: bool,
+    #[serde(default = "default_optimized_big_winner_shadow_min_score")]
+    pub optimized_big_winner_shadow_min_score: f64,
+    #[serde(default = "default_optimized_big_winner_shadow_min_age_secs")]
+    pub optimized_big_winner_shadow_min_age_secs: u64,
+    #[serde(default = "default_optimized_big_winner_shadow_min_buy_sell_ratio")]
+    pub optimized_big_winner_shadow_min_buy_sell_ratio: f64,
+    #[serde(default = "default_optimized_big_winner_shadow_max_sell_count")]
+    pub optimized_big_winner_shadow_max_sell_count: u64,
+    #[serde(default = "default_optimized_big_winner_shadow_min_whale_net_sol")]
+    pub optimized_big_winner_shadow_min_whale_net_sol: f64,
+    #[serde(default = "default_optimized_big_winner_shadow_min_unique_buyers")]
+    pub optimized_big_winner_shadow_min_unique_buyers: usize,
+    #[serde(default = "default_optimized_big_winner_shadow_min_buy_pressure_pct")]
+    pub optimized_big_winner_shadow_min_buy_pressure_pct: f64,
+    #[serde(default = "default_optimized_big_winner_shadow_min_progress_pct")]
+    pub optimized_big_winner_shadow_min_progress_pct: f64,
+    #[serde(default = "default_true")]
+    pub optimized_big_winner_shadow_require_switch_profile: bool,
     /// Shadow-only lane: record a would-be mint-time entry when a brand-new
     /// token arrives into a very recent same-label cluster.
     #[serde(default)]
@@ -395,6 +417,30 @@ fn default_optimized_runner_shadow_max_label_gap_seconds() -> u64 {
 }
 fn default_optimized_runner_shadow_min_support_signals() -> usize {
     2
+}
+fn default_optimized_big_winner_shadow_min_score() -> f64 {
+    90.0
+}
+fn default_optimized_big_winner_shadow_min_age_secs() -> u64 {
+    10
+}
+fn default_optimized_big_winner_shadow_min_buy_sell_ratio() -> f64 {
+    8.0
+}
+fn default_optimized_big_winner_shadow_max_sell_count() -> u64 {
+    5
+}
+fn default_optimized_big_winner_shadow_min_whale_net_sol() -> f64 {
+    5.0
+}
+fn default_optimized_big_winner_shadow_min_unique_buyers() -> usize {
+    8
+}
+fn default_optimized_big_winner_shadow_min_buy_pressure_pct() -> f64 {
+    75.0
+}
+fn default_optimized_big_winner_shadow_min_progress_pct() -> f64 {
+    30.0
 }
 fn default_launch_label_shadow_max_age_seconds() -> u64 {
     30
