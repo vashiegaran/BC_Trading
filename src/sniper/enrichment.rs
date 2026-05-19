@@ -113,7 +113,7 @@ pub async fn enrich_token(
             let t = Instant::now();
             let r = match tokio::time::timeout(
                 timeout,
-                fetch_creator_history(&st_client, rpc, &creator_str),
+                fetch_creator_history(cfg, &st_client, rpc, &creator_str),
             )
             .await
             {
@@ -626,6 +626,7 @@ async fn fetch_bonding_curve(
 /// Fetch creator wallet history — tries Solana Tracker /tokens/deployer first (exact count),
 /// falls back to RPC signature heuristic if ST is unavailable.
 async fn fetch_creator_history(
+    cfg: &AppConfig,
     st_client: &SolanaTrackerClient,
     rpc: &RpcClient,
     creator: &str,
@@ -660,9 +661,38 @@ async fn fetch_creator_history(
     let creator_pubkey = Pubkey::from_str(creator).ok()?;
     let sigs = match rpc.get_signatures_for_address(&creator_pubkey).await {
         Ok(s) => s,
-        Err(e) => {
-            warn!(creator = %creator, "Failed to fetch creator signatures: {}", e);
-            return None;
+        Err(primary_err) => {
+            let fallback_url = cfg
+                .env
+                .helius_rpc_url
+                .as_deref()
+                .unwrap_or(&cfg.env.solana_rpc_backup_url)
+                .to_string();
+            warn!(
+                creator = %creator,
+                error = %primary_err,
+                "Primary RPC failed to fetch creator signatures; trying fallback RPC"
+            );
+
+            let fallback_rpc = RpcClient::new_with_timeout(fallback_url, Duration::from_secs(3));
+            match fallback_rpc
+                .get_signatures_for_address(&creator_pubkey)
+                .await
+            {
+                Ok(s) => {
+                    info!(creator = %creator, "Creator signatures fetched via fallback RPC");
+                    s
+                }
+                Err(fallback_err) => {
+                    warn!(
+                        creator = %creator,
+                        primary_error = %primary_err,
+                        fallback_error = %fallback_err,
+                        "Failed to fetch creator signatures from primary and fallback RPC"
+                    );
+                    return None;
+                }
+            }
         }
     };
 

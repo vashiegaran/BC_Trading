@@ -40,6 +40,7 @@ const NARRATIVE_CLUSTER_LIVE_CANARY_ENTRY_TIER: &str = "narrative_cluster_live_c
 const DYNAMIC_SIZE_LIQ_FLOOR: f64 = 30.0;
 /// Liquidity at which position size reaches max (SOL).
 const DYNAMIC_SIZE_LIQ_CAP: f64 = 80.0;
+const PRE_BUY_SOL_FEE_BUFFER: f64 = 0.01;
 
 /// Compute dynamic position size based on pool liquidity.
 /// Scales linearly from min_buy_sol (at FLOOR) to max_buy_sol (at CAP+).
@@ -248,8 +249,15 @@ pub fn start(
 
             // ── Pre-execution safety checks (in-memory — no Supabase reads) ─────────
             let pre_check_start = Instant::now();
-            match pre_execution_checks_cached(&cfg, &trading_state, &rpc, &backup_rpc, &wallet)
-                .await
+            match pre_execution_checks_cached(
+                &cfg,
+                &trading_state,
+                &rpc,
+                &backup_rpc,
+                &wallet,
+                &token,
+            )
+            .await
             {
                 Ok(()) => {
                     let precheck_ms = pre_check_start.elapsed().as_millis() as u64;
@@ -851,8 +859,10 @@ async fn pre_execution_checks_cached(
     rpc: &RpcClient,
     backup_rpc: &RpcClient,
     wallet: &BotWallet,
+    token: &FilteredToken,
 ) -> Result<(), String> {
     let check_start = Instant::now();
+    let intended_buy_amount_sol = compute_buy_amount(cfg, token);
 
     // Read safety values from in-memory cache (< 1ms)
     let open_count = state.open_position_count().await;
@@ -870,15 +880,13 @@ async fn pre_execution_checks_cached(
     }
 
     // SAFETY Rule 6: Check portfolio exposure. 0 disables this cap.
-    let would_be_exposure = current_exposure + cfg.strategy.execution.buy_amount_sol;
+    let would_be_exposure = current_exposure + intended_buy_amount_sol;
     if cfg.strategy.risk.max_portfolio_exposure_sol > 0.0
         && would_be_exposure > cfg.strategy.risk.max_portfolio_exposure_sol
     {
         return Err(format!(
             "Portfolio exposure cap would be exceeded ({:.4} + {:.4} > {:.4})",
-            current_exposure,
-            cfg.strategy.execution.buy_amount_sol,
-            cfg.strategy.risk.max_portfolio_exposure_sol
+            current_exposure, intended_buy_amount_sol, cfg.strategy.risk.max_portfolio_exposure_sol
         ));
     }
 
@@ -905,10 +913,17 @@ async fn pre_execution_checks_cached(
         match balance_result {
             Ok(lamports) => {
                 let balance_sol = lamports_to_sol(lamports);
-                if balance_sol < cfg.strategy.risk.min_sol_balance {
+                let reserve_required_sol = cfg.strategy.risk.min_sol_balance
+                    + intended_buy_amount_sol
+                    + PRE_BUY_SOL_FEE_BUFFER;
+                if balance_sol < reserve_required_sol {
                     return Err(format!(
-                        "Insufficient SOL balance ({:.4} < {:.4})",
-                        balance_sol, cfg.strategy.risk.min_sol_balance
+                        "Insufficient SOL balance for buy reserve ({:.4} < {:.4}; buy {:.4} + min {:.4} + fee buffer {:.4})",
+                        balance_sol,
+                        reserve_required_sol,
+                        intended_buy_amount_sol,
+                        cfg.strategy.risk.min_sol_balance,
+                        PRE_BUY_SOL_FEE_BUFFER
                     ));
                 }
             }
