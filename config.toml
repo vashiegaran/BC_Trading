@@ -9,7 +9,7 @@
 #   filterable in analytics vs the broken v16.1 binary that was running
 #   from never-committed source. Detection: pumpfun_ws. Fast-track:
 #   2-source (on_chain_mint + goplus) so GoPlus runs PRE-buy.
-strategy_version = "v18.9.12-cash-builder-tail"
+strategy_version = "v18.9.13-fast-exit-cash-builder"
 
 # ============================================================
 # DETECTION
@@ -377,20 +377,20 @@ min_sniper_score = 60.0
 [execution]
 
 # Amount of SOL to spend per trade (max for dynamic sizing)
-buy_amount_sol = 0.05
+buy_amount_sol = 0.20
 
 # Creator-rebuy canary uses this fixed size. Execution uses the smaller of
-# this value and the normal dynamic size; 0.05 keeps it at normal size.
-creator_rebuy_live_test_buy_amount_sol = 0.05
+# this value and the normal dynamic size; keep it aligned with fast-exit size.
+creator_rebuy_live_test_buy_amount_sol = 0.20
 
-# Narrative-cluster live canary uses the same controlled 0.05 SOL size.
-narrative_cluster_live_canary_buy_amount_sol = 0.05
+# Narrative-cluster live canary uses the same controlled fast-exit size.
+narrative_cluster_live_canary_buy_amount_sol = 0.20
 
 # Dynamic position sizing: scale buy size based on pool liquidity.
 # Low-liq tokens get smaller positions to limit risk.
 # Range: min_buy_sol (at 30 SOL liq) → max_buy_sol (at 80+ SOL liq)
-min_buy_sol = 0.04
-max_buy_sol = 0.05
+min_buy_sol = 0.20
+max_buy_sol = 0.20
 
 # Liquidity threshold: below this = "low-liq" (tighter exits + smaller sizing)
 low_liq_threshold_sol = 50.0
@@ -401,8 +401,8 @@ low_liq_threshold_sol = 50.0
 slippage_bps = 1000
 
 # Maximum number of open positions at any time. 0 disables this global cap.
-# Temporary cash-builder mode relies on the daily loss stop instead.
-max_open_positions = 0
+# Fast-exit sizing uses one active 0.2 SOL position at a time to avoid stacking rugs.
+max_open_positions = 1
 
 # Transaction confirmation timeout in seconds
 tx_confirm_timeout_secs = 25
@@ -471,13 +471,11 @@ tip_multiplier = 3.0
 # Sniped tokens that don't move in 15 min are dead
 max_hold_seconds = 900
 
-# TP1 cash-builder insurance: bank 30% at 1.5x.
-tp1_multiplier = 1.5
-tp1_sell_pct = 30
+# Fast-exit cash builder: sell the full position at 1.8x before rug-like reversals.
+tp1_multiplier = 1.8
+tp1_sell_pct = 100
 
-# TP2 cash-builder bank: sell ~50% of original size after TP1.
-# The exit engine sells a percent of remaining, so 71% of the post-TP1 stack
-# leaves roughly a 20% original-position moonbag tail.
+# TP2 is dormant while TP1 sells 100%; kept as a rollback-friendly backup.
 tp2_multiplier = 2.0
 tp2_sell_pct = 71
 
@@ -550,7 +548,7 @@ momentum_kill_min_multiplier = 1.3
 daily_loss_limit_sol = 0.20
 
 # Maximum SOL deployed across all open positions. 0 disables this global cap.
-max_portfolio_exposure_sol = 0.0
+max_portfolio_exposure_sol = 0.20
 
 # Minimum SOL balance to keep for gas fees
 min_sol_balance = 0.2

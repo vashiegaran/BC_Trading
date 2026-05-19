@@ -9,6 +9,25 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.9.13 — Fast-Exit Cash Builder (2026-05-19)
+
+**strategy_version**: `v18.9.13-fast-exit-cash-builder`
+
+### Why
+May 16-19 live simulation showed the current strategy lost slightly on recorded sizes while a fixed `0.2 SOL` fast full exit at `1.8x` would have produced positive realized SOL. The objective is no longer to hold these rug-prone entries for moonbags; it is to catch the vertical move and exit before the common reversal zone around `1.9x`.
+
+### Changes
+- Changes [config.toml](config.toml) live sizing from `0.05 SOL` to `0.20 SOL` for normal dynamic sizing plus creator-rebuy and narrative live canary overrides.
+- Changes TP1 in [config.toml](config.toml) from a `30%` sell at `1.5x` to a `100%` sell at `1.8x`.
+- Keeps TP2/TP3 settings as rollback-friendly backups, but they are dormant while TP1 exits the full position.
+- Restores bounded exposure for larger sizing: one open position at a time and `0.20 SOL` max portfolio exposure.
+- Keeps emergency protections unchanged: post-buy verification, stop loss, dev dump, LP drain, dip-death, momentum kill, wallet reserve, and UTC daily loss stop.
+
+### Rollback
+Restore `strategy_version = "v18.9.12-cash-builder-tail"`, `buy_amount_sol = 0.05`, canary buy amounts to `0.05`, dynamic sizing to `0.04`-`0.05`, `max_open_positions = 0`, `tp1_multiplier = 1.5`, `tp1_sell_pct = 30`, and `max_portfolio_exposure_sol = 0.0` in [config.toml](config.toml), then restart PM2.
+
+---
+
 ## v18.9.12 — Cash-Builder Strict Moonbag Tail (2026-05-17)
 
 **strategy_version**: `v18.9.12-cash-builder-tail`
