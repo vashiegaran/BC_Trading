@@ -9,6 +9,18 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.9.21 — Structural UB30 Cash Builder (2026-05-20)
+
+**strategy_version**: `v18.9.21-structural-ub30-cash-builder`
+
+Retunes the creator-rebuy structural rescue for the current `1.5x` / `2x` cash-builder objective. The broad creator-rebuy hard block remains enabled, standard lane remains disabled, and the structural rescue liquidity cap stays tight at `5-60 SOL`; only the structural rescue unique-buyer floor moves from `40` to `30`.
+
+Simulation across rejected/blocked known-outcome samples: the old `40+` unique-buyer shape was clean but slightly under-captured. Lowering to `30+` while keeping liquidity `<=60 SOL` selected `4/4` >=1.5x in 24h, `19/19` >=1.5x in 72h, and `41/41` >=1.5x in 7d; the 7d 2x count was `37/41`. Raising the liquidity cap to `80 SOL` admitted many more losers, so that stays unchanged.
+
+Rollback: restore `strategy_version = "v18.9.20-two-slot-cash-builder"` and `creator_rebuy_structural_rescue_min_unique_buyers = 40` in [config.toml](config.toml), then restart PM2.
+
+---
+
 ## v18.9.20 — Two-Slot Cash Builder (2026-05-20)
 
 **strategy_version**: `v18.9.20-two-slot-cash-builder`
