@@ -9,7 +9,7 @@
 #   filterable in analytics vs the broken v16.1 binary that was running
 #   from never-committed source. Detection: pumpfun_ws. Fast-track:
 #   2-source (on_chain_mint + goplus) so GoPlus runs PRE-buy.
-strategy_version = "v18.9.19-strict-2x-shadow"
+strategy_version = "v18.9.20-two-slot-cash-builder"
 
 # ============================================================
 # DETECTION
@@ -263,7 +263,7 @@ creator_rebuy_live_test_min_unique_buyers = 0
 creator_rebuy_live_test_max_sell_count = 3
 creator_rebuy_live_test_min_initial_liquidity_sol = 30.0
 creator_rebuy_live_test_max_initial_liquidity_sol = 80.0
-creator_rebuy_live_test_max_open_positions = 1
+creator_rebuy_live_test_max_open_positions = 2
 creator_rebuy_live_test_require_valid_identity = true
 creator_rebuy_live_test_max_bc_progress_pct = 45.0
 creator_rebuy_live_test_min_total_volume_sol = 30.0
@@ -439,8 +439,8 @@ low_liq_threshold_sol = 50.0
 slippage_bps = 1000
 
 # Maximum number of open positions at any time. 0 disables this global cap.
-# Fast-exit sizing uses one active 0.2 SOL position at a time to avoid stacking rugs.
-max_open_positions = 1
+# Two active 0.2 SOL slots reduce missed high-quality signals while keeping exposure capped.
+max_open_positions = 2
 
 # Transaction confirmation timeout in seconds
 tx_confirm_timeout_secs = 25
@@ -581,12 +581,12 @@ momentum_kill_min_multiplier = 1.3
 [risk]
 
 # Daily loss limit in SOL — stop new buys if exceeded.
-# Temporary cash-builder mode: no global entry/exposure cap; stop for the UTC day
-# once realized closed-position PnL is down 0.20 SOL or worse.
-daily_loss_limit_sol = 0.20
+# Two-slot cash-builder mode: stop for the UTC day once realized closed-position
+# PnL is down 0.40 SOL or worse.
+daily_loss_limit_sol = 0.40
 
 # Maximum SOL deployed across all open positions. 0 disables this global cap.
-max_portfolio_exposure_sol = 0.20
+max_portfolio_exposure_sol = 0.40
 
 # Minimum SOL balance to keep for gas fees
 min_sol_balance = 0.2

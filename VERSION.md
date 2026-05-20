@@ -9,6 +9,18 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.9.20 — Two-Slot Cash Builder (2026-05-20)
+
+**strategy_version**: `v18.9.20-two-slot-cash-builder`
+
+Raises the live cash-builder capacity from one to two concurrent `0.2 SOL` positions so the bot does not skip a second qualifying creator-rebuy structural rescue while the first trade is still open. The per-trade size stays unchanged at `0.2 SOL`; only the global open-position cap, creator-rebuy open cap, portfolio exposure cap, and UTC daily loss stop move to two-slot sizing.
+
+Risk envelope: max two open positions, max `0.40 SOL` deployed, and `0.40 SOL` UTC realized daily loss stop. The strict 2x lane remains shadow-only; live exits still use the hard `1.5x` full exit.
+
+Rollback: restore `strategy_version = "v18.9.19-strict-2x-shadow"`, `max_open_positions = 1`, `creator_rebuy_live_test_max_open_positions = 1`, `max_portfolio_exposure_sol = 0.20`, and `daily_loss_limit_sol = 0.20` in [config.toml](config.toml), then restart PM2.
+
+---
+
 ## v18.9.19 — Strict 2x Shadow Overlay (2026-05-20)
 
 **strategy_version**: `v18.9.19-strict-2x-shadow`
