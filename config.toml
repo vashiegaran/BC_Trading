@@ -9,7 +9,7 @@
 #   filterable in analytics vs the broken v16.1 binary that was running
 #   from never-committed source. Detection: pumpfun_ws. Fast-track:
 #   2-source (on_chain_mint + goplus) so GoPlus runs PRE-buy.
-strategy_version = "v18.9.18-creator-rebuy-structural-rescue"
+strategy_version = "v18.9.19-strict-2x-shadow"
 
 # ============================================================
 # DETECTION
@@ -305,6 +305,9 @@ creator_rebuy_structural_rescue_max_total_volume_sol = 400.0
 creator_rebuy_structural_rescue_min_initial_liquidity_sol = 5.0
 creator_rebuy_structural_rescue_max_initial_liquidity_sol = 60.0
 creator_rebuy_structural_rescue_min_token_age_secs = 60.0
+creator_rebuy_strict_2x_shadow_enabled = true
+creator_rebuy_strict_2x_shadow_min_total_volume_sol = 200.0
+creator_rebuy_strict_2x_shadow_target_multiplier = 2.0
 
 # Live safety guard against serial same-label creator relaunch farms. Blocks
 # creator-rebuy live canary entries when the same creator has rapidly relaunched

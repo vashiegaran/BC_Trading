@@ -731,6 +731,14 @@ pub struct FiltersConfig {
     pub creator_rebuy_structural_rescue_max_initial_liquidity_sol: f64,
     #[serde(default = "default_creator_rebuy_structural_rescue_min_token_age_secs")]
     pub creator_rebuy_structural_rescue_min_token_age_secs: f64,
+    /// Shadow-only 2x hold overlay for the strongest structural creator-rebuy
+    /// rescues. Never changes live exits; only logs a separate would-hold row.
+    #[serde(default)]
+    pub creator_rebuy_strict_2x_shadow_enabled: bool,
+    #[serde(default = "default_creator_rebuy_strict_2x_shadow_min_total_volume_sol")]
+    pub creator_rebuy_strict_2x_shadow_min_total_volume_sol: f64,
+    #[serde(default = "default_creator_rebuy_strict_2x_shadow_target_multiplier")]
+    pub creator_rebuy_strict_2x_shadow_target_multiplier: f64,
     /// Live safety guard for serial same-label creator relaunches. These can
     /// show strong creator rebuy/whale flow while acting like exit liquidity.
     #[serde(default = "default_true")]
@@ -1005,6 +1013,12 @@ fn default_creator_rebuy_structural_rescue_max_initial_liquidity_sol() -> f64 {
 }
 fn default_creator_rebuy_structural_rescue_min_token_age_secs() -> f64 {
     60.0
+}
+fn default_creator_rebuy_strict_2x_shadow_min_total_volume_sol() -> f64 {
+    200.0
+}
+fn default_creator_rebuy_strict_2x_shadow_target_multiplier() -> f64 {
+    2.0
 }
 fn default_creator_rebuy_serial_clone_min_creator_prior_mints() -> usize {
     20

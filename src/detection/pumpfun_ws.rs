@@ -1086,8 +1086,7 @@ fn maybe_fire_optimized_big_winner_shadow(
         || token_age_secs < detection_cfg.optimized_big_winner_shadow_min_age_secs as f64
         || buy_pressure_pct < detection_cfg.optimized_big_winner_shadow_min_buy_pressure_pct
         || buy_sell_ratio < detection_cfg.optimized_big_winner_shadow_min_buy_sell_ratio
-        || entry.unique_buyers.len()
-            < detection_cfg.optimized_big_winner_shadow_min_unique_buyers
+        || entry.unique_buyers.len() < detection_cfg.optimized_big_winner_shadow_min_unique_buyers
         || !low_sell_or_whale
     {
         return;

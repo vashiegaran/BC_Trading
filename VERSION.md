@@ -9,6 +9,18 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.9.19 — Strict 2x Shadow Overlay (2026-05-20)
+
+**strategy_version**: `v18.9.19-strict-2x-shadow`
+
+Adds an observe-only `creator_rebuy_strict_2x_shadow` marker on top of the creator-rebuy structural rescue. It only fires after the structural rescue profile and Fast-Track safety pass, and then requires at least `200 SOL` of BC volume while keeping the existing `<=400 SOL`, `40+` unique buyers, `5-60 SOL` initial liquidity, and `60s+` token age gates.
+
+Simulation: with a `0.2 SOL` hypothetical buy and full exit at `2.0x`, the 72h window was `13/13` to 2x with zero rugs; the 7d window was `29/31` to 2x, `+5.4 SOL` modeled PnL, with one rug. This is shadow-only: live entries still use the current hard `1.5x` full exit.
+
+Rollback: set `creator_rebuy_strict_2x_shadow_enabled = false` and restore `strategy_version = "v18.9.18-creator-rebuy-structural-rescue"` in [config.toml](config.toml), then restart PM2.
+
+---
+
 ## v18.9.18 — Creator-Rebuy Structural Rescue (2026-05-20)
 
 **strategy_version**: `v18.9.18-creator-rebuy-structural-rescue`

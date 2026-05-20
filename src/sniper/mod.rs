@@ -36,6 +36,7 @@ const CREATOR_REBUY_SHADOW_ENTRY_TIER: &str = "creator_rebuy_shadow_fast_track";
 const CREATOR_REBUY_LIVE_TEST_ENTRY_TIER: &str = "creator_rebuy_live_test_fast_track";
 const CREATOR_REBUY_MOONBAG_CANARY_ENTRY_TIER: &str = "creator_rebuy_moonbag_canary";
 const CREATOR_REBUY_STRUCTURAL_RESCUE_ENTRY_TIER: &str = "creator_rebuy_structural_rescue";
+const CREATOR_REBUY_STRICT_2X_SHADOW_ENTRY_TIER: &str = "creator_rebuy_strict_2x_shadow";
 const NARRATIVE_CLUSTER_LIVE_CANARY_ENTRY_TIER: &str = "narrative_cluster_live_canary";
 const SYSTEM_PROGRAM_ID: &str = "11111111111111111111111111111111";
 
@@ -545,6 +546,30 @@ fn creator_rebuy_structural_rescue_rejection_reason(
     None
 }
 
+fn creator_rebuy_strict_2x_shadow_rejection_reason(
+    structural_rescue_rejection_reason: Option<&str>,
+    bc_entry: &BcScoreEntry,
+    filters_cfg: &FiltersConfig,
+) -> Option<String> {
+    if !filters_cfg.creator_rebuy_strict_2x_shadow_enabled {
+        return Some("creator_rebuy_strict_2x_shadow_disabled".to_string());
+    }
+
+    if let Some(reason) = structural_rescue_rejection_reason {
+        return Some(format!("structural_rescue_not_passed_{}", reason));
+    }
+
+    let min_volume = filters_cfg.creator_rebuy_strict_2x_shadow_min_total_volume_sol;
+    if min_volume > 0.0 && bc_entry.total_volume_sol < min_volume {
+        return Some(format!(
+            "total_volume_sol_{:.1}_below_strict_2x_min_{:.1}",
+            bc_entry.total_volume_sol, min_volume
+        ));
+    }
+
+    None
+}
+
 /// Start the sniper enrichment pipeline.
 ///
 /// Consumes `GraduatedToken` events from the detection channel,
@@ -778,11 +803,32 @@ pub fn start(
                     };
                     let creator_rebuy_structural_rescue_qualifies =
                         creator_rebuy_structural_rescue_rejection_reason.is_none();
+                    let creator_rebuy_strict_2x_shadow_rejection_reason = if reason
+                        == "creator_rebuy_detected"
+                    {
+                        bc_entry
+                            .as_ref()
+                            .map(|entry| {
+                                creator_rebuy_strict_2x_shadow_rejection_reason(
+                                    creator_rebuy_structural_rescue_rejection_reason.as_deref(),
+                                    entry,
+                                    &cfg.strategy.filters,
+                                )
+                            })
+                            .unwrap_or_else(|| {
+                                Some("creator_rebuy_strict_2x_shadow_missing_bc_entry".to_string())
+                            })
+                    } else {
+                        Some("creator_rebuy_strict_2x_shadow_not_creator_rebuy".to_string())
+                    };
+                    let creator_rebuy_strict_2x_shadow_profile_qualifies =
+                        creator_rebuy_strict_2x_shadow_rejection_reason.is_none();
 
                     if creator_rebuy_shadow_qualifies
                         || creator_rebuy_live_test_profile_qualifies
                         || creator_rebuy_moonbag_canary_profile_qualifies
                         || creator_rebuy_structural_rescue_qualifies
+                        || creator_rebuy_strict_2x_shadow_profile_qualifies
                     {
                         let bc_entry = bc_entry
                             .clone()
@@ -847,6 +893,18 @@ pub fn start(
                         };
                         let structural_rescue_qualifies =
                             shadow_filter.passed && structural_rescue_rejection_reason.is_none();
+                        let strict_2x_shadow_rejection_reason = if shadow_filter.passed {
+                            creator_rebuy_strict_2x_shadow_rejection_reason.clone()
+                        } else {
+                            Some(
+                                shadow_filter
+                                    .rejection_reason
+                                    .clone()
+                                    .unwrap_or_else(|| "fast_track_safety_unknown".to_string()),
+                            )
+                        };
+                        let strict_2x_shadow_qualifies =
+                            shadow_filter.passed && strict_2x_shadow_rejection_reason.is_none();
                         let live_forwarded = live_test_qualifies
                             || moonbag_canary_qualifies
                             || structural_rescue_qualifies;
@@ -902,7 +960,7 @@ pub fn start(
                             "creator_rebuy_live_test_rejected"
                         };
 
-                        let shadow_features = serde_json::json!({
+                        let mut shadow_features = serde_json::json!({
                             "entry_tier": entry_tier,
                             "creator_rebuy_shadow_enabled": cfg.strategy.filters.creator_rebuy_shadow_enabled,
                             "shadow_mode": !live_test_qualifies && creator_rebuy_shadow_qualifies,
@@ -986,6 +1044,51 @@ pub fn start(
                             "initial_liquidity_sol": initial_liquidity_sol,
                         });
 
+                        if let Some(features) = shadow_features.as_object_mut() {
+                            features.insert(
+                                "creator_rebuy_strict_2x_shadow_enabled".to_string(),
+                                serde_json::json!(
+                                    cfg.strategy.filters.creator_rebuy_strict_2x_shadow_enabled
+                                ),
+                            );
+                            features.insert(
+                                "creator_rebuy_strict_2x_shadow_passed".to_string(),
+                                serde_json::json!(strict_2x_shadow_qualifies),
+                            );
+                            features.insert(
+                                "creator_rebuy_strict_2x_shadow_rejection_reason".to_string(),
+                                serde_json::json!(strict_2x_shadow_rejection_reason.as_deref()),
+                            );
+                            features.insert(
+                                "creator_rebuy_strict_2x_shadow_min_total_volume_sol".to_string(),
+                                serde_json::json!(
+                                    cfg.strategy
+                                        .filters
+                                        .creator_rebuy_strict_2x_shadow_min_total_volume_sol
+                                ),
+                            );
+                            features.insert(
+                                "creator_rebuy_strict_2x_shadow_target_multiplier".to_string(),
+                                serde_json::json!(
+                                    cfg.strategy
+                                        .filters
+                                        .creator_rebuy_strict_2x_shadow_target_multiplier
+                                ),
+                            );
+                            features.insert(
+                                "creator_rebuy_strict_2x_shadow_sell_pct".to_string(),
+                                serde_json::json!(100.0),
+                            );
+                            features.insert(
+                                "creator_rebuy_strict_2x_shadow_sim_buy_sol".to_string(),
+                                serde_json::json!(
+                                    cfg.strategy
+                                        .execution
+                                        .creator_rebuy_live_test_buy_amount_sol
+                                ),
+                            );
+                        }
+
                         let candidate_id = log_sniper_candidate(
                             &supabase,
                             &mint_str,
@@ -1005,6 +1108,43 @@ pub fn start(
                             &shadow_features,
                         )
                         .await;
+
+                        if strict_2x_shadow_qualifies {
+                            info!(
+                                mint = %mint_str,
+                                total_volume_sol = format!("{:.1}", bc_entry.total_volume_sol),
+                                target_multiplier = format!("{:.2}", cfg.strategy.filters.creator_rebuy_strict_2x_shadow_target_multiplier),
+                                "🧪 CREATOR-REBUY STRICT 2X SHADOW PASS — tracking full exit at 100% gain, no live exit change"
+                            );
+
+                            let strict_supabase = Arc::clone(&supabase);
+                            let strict_cfg = Arc::clone(&cfg);
+                            let strict_bc_entry = bc_entry.clone();
+                            let strict_mint = mint_str.clone();
+                            let strict_name = token.name.clone();
+                            let strict_symbol = token.symbol.clone();
+                            let strict_pool = token.pool_address.as_ref().map(|p| p.to_string());
+                            let strict_creator = creator_str.clone();
+                            let strict_liquidity_sol = initial_liquidity_sol;
+                            tokio::spawn(async move {
+                                log_creator_rebuy_strict_2x_shadow_candidate(
+                                    &strict_supabase,
+                                    &strict_mint,
+                                    &strict_name,
+                                    &strict_symbol,
+                                    strict_pool.as_deref(),
+                                    &strict_creator,
+                                    strict_liquidity_sol,
+                                    &strict_bc_entry,
+                                    &strict_cfg.strategy.filters,
+                                    strict_cfg
+                                        .strategy
+                                        .execution
+                                        .creator_rebuy_live_test_buy_amount_sol,
+                                )
+                                .await;
+                            });
+                        }
 
                         if live_forwarded {
                             info!(
@@ -1868,6 +2008,77 @@ async fn log_sniper_candidate(
             None
         }
     }
+}
+
+async fn log_creator_rebuy_strict_2x_shadow_candidate(
+    supabase: &SupabaseClient,
+    mint: &str,
+    name: &str,
+    symbol: &str,
+    pool_address: Option<&str>,
+    creator_wallet: &str,
+    initial_liquidity_sol: f64,
+    bc_entry: &BcScoreEntry,
+    filters_cfg: &FiltersConfig,
+    sim_buy_sol: f64,
+) -> Option<i64> {
+    let target_multiplier = filters_cfg.creator_rebuy_strict_2x_shadow_target_multiplier;
+    let strict_features = serde_json::json!({
+        "entry_tier": CREATOR_REBUY_STRICT_2X_SHADOW_ENTRY_TIER,
+        "shadow_mode": true,
+        "live_forwarded": false,
+        "live_exit_unchanged": true,
+        "shadow_exit_multiplier": target_multiplier,
+        "shadow_sell_pct": 100.0,
+        "shadow_sim_buy_sol": sim_buy_sol,
+        "creator_rebuy_strict_2x_shadow_enabled": filters_cfg.creator_rebuy_strict_2x_shadow_enabled,
+        "creator_rebuy_strict_2x_shadow_min_total_volume_sol": filters_cfg.creator_rebuy_strict_2x_shadow_min_total_volume_sol,
+        "creator_rebuy_strict_2x_shadow_target_multiplier": target_multiplier,
+        "creator_rebuy_structural_rescue_min_unique_buyers": filters_cfg.creator_rebuy_structural_rescue_min_unique_buyers,
+        "creator_rebuy_structural_rescue_max_total_volume_sol": filters_cfg.creator_rebuy_structural_rescue_max_total_volume_sol,
+        "creator_rebuy_structural_rescue_min_initial_liquidity_sol": filters_cfg.creator_rebuy_structural_rescue_min_initial_liquidity_sol,
+        "creator_rebuy_structural_rescue_max_initial_liquidity_sol": filters_cfg.creator_rebuy_structural_rescue_max_initial_liquidity_sol,
+        "creator_rebuy_structural_rescue_min_token_age_secs": filters_cfg.creator_rebuy_structural_rescue_min_token_age_secs,
+        "bc_score": bc_entry.score,
+        "bc_unique_buyers": bc_entry.unique_buyers,
+        "bc_buy_sell_ratio": bc_entry.buy_sell_ratio,
+        "bc_buy_pressure_pct": if bc_entry.buy_count + bc_entry.sell_count > 0 {
+            (bc_entry.buy_count as f64 / (bc_entry.buy_count + bc_entry.sell_count) as f64) * 100.0
+        } else {
+            0.0
+        },
+        "bc_creator_rebuy": bc_entry.creator_rebuy,
+        "bc_whale_buy": bc_entry.whale_buy,
+        "bc_max_single_buy_sol": bc_entry.max_single_buy_sol,
+        "bc_progress_pct_at_score": bc_entry.bc_progress_pct,
+        "bc_buy_count": bc_entry.buy_count,
+        "bc_sell_count": bc_entry.sell_count,
+        "bc_total_volume_sol": bc_entry.total_volume_sol,
+        "bc_creator_buy_count": bc_entry.creator_buy_count_bc,
+        "bc_creator_buy_sol_total": bc_entry.creator_buy_sol_total_bc,
+        "bc_creator_sell_count": bc_entry.creator_sell_count_bc,
+        "bc_creator_sell_sol_total": bc_entry.creator_sell_sol_total_bc,
+        "bc_creator_net_sol": bc_entry.creator_net_sol_bc,
+        "bc_creator_buy_share_pct": bc_entry.creator_buy_share_pct,
+        "bc_score_recorded_at": bc_entry.recorded_at,
+        "initial_liquidity_sol": initial_liquidity_sol,
+    });
+
+    log_sniper_candidate(
+        supabase,
+        mint,
+        name,
+        symbol,
+        pool_address,
+        creator_wallet,
+        initial_liquidity_sol,
+        "creator_rebuy_strict_2x_shadow_passed",
+        Some("shadow_only_live_exit_remains_1p5x"),
+        Some("creator_rebuy_strict_2x_shadow"),
+        bc_entry.score,
+        &strict_features,
+    )
+    .await
 }
 
 async fn log_narrative_cluster_phase2_shadow_candidate(

@@ -2203,6 +2203,7 @@ async fn monitor_position(
                 sub_reason: signal.sub_reason.clone(),
             };
 
+            let sol_spent_for_signal = remaining_sol_spent;
             if exit_tx.send(exit_signal).await.is_err() {
                 warn!(mint = %position.mint, "Monitoring → exit channel closed");
                 break;
@@ -2252,21 +2253,19 @@ async fn monitor_position(
                                         warn!(
                                             mint = %position.mint,
                                             failures = consecutive_exit_failures,
-                                            "🛑 Max consecutive exit failures reached — abandoning position"
+                                            "🛑 Max consecutive exit failures reached — keeping position open for retry"
                                         );
-                                        is_full_exit = true;
-                                        got_confirmation = true;
-                                        break;
+                                    } else {
+                                        warn!(
+                                            mint = %position.mint,
+                                            reason = %r.reason,
+                                            failures = consecutive_exit_failures,
+                                            "❌ Exit failed — restoring tokens for retry"
+                                        );
                                     }
-                                    warn!(
-                                        mint = %position.mint,
-                                        reason = %r.reason,
-                                        failures = consecutive_exit_failures,
-                                        "❌ Exit failed — restoring tokens for retry"
-                                    );
                                     // Restore token amounts so trigger can re-fire
                                     remaining_token_amount = tokens_for_signal;
-                                    remaining_sol_spent /= 1.0 - sold_pct;
+                                    remaining_sol_spent = sol_spent_for_signal;
                                     // Reset TP flag if it was a partial that failed
                                     match r.reason {
                                         types::ExitReason::TakeProfit1 => {
@@ -2293,7 +2292,7 @@ async fn monitor_position(
                     _ = &mut wait_timeout => {
                         warn!(mint = %position.mint, "⏰ Timed out waiting for exit confirmation — restoring for retry");
                         remaining_token_amount = tokens_for_signal;
-                        remaining_sol_spent /= 1.0 - sold_pct;
+                        remaining_sol_spent = sol_spent_for_signal;
                         // Reset TP flag on timeout too
                         match signal_reason_clone {
                             types::ExitReason::TakeProfit1 => {
