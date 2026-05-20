@@ -715,6 +715,22 @@ pub struct FiltersConfig {
     pub creator_rebuy_moonbag_canary_support_min_creator_net_sol: f64,
     #[serde(default = "default_creator_rebuy_moonbag_canary_max_daily_trades")]
     pub creator_rebuy_moonbag_canary_max_daily_trades: u32,
+    /// Live canary promoted from the May 20 larger-sample rejected-token sim.
+    /// It rescues creator-rebuy tokens only when the BC structure is broad
+    /// enough, not creator-dominated: many unique buyers, bounded volume,
+    /// bounded initial liquidity, and at least 60s of curve history.
+    #[serde(default)]
+    pub creator_rebuy_structural_rescue_enabled: bool,
+    #[serde(default = "default_creator_rebuy_structural_rescue_min_unique_buyers")]
+    pub creator_rebuy_structural_rescue_min_unique_buyers: usize,
+    #[serde(default = "default_creator_rebuy_structural_rescue_max_total_volume_sol")]
+    pub creator_rebuy_structural_rescue_max_total_volume_sol: f64,
+    #[serde(default = "default_creator_rebuy_structural_rescue_min_initial_liquidity_sol")]
+    pub creator_rebuy_structural_rescue_min_initial_liquidity_sol: f64,
+    #[serde(default = "default_creator_rebuy_structural_rescue_max_initial_liquidity_sol")]
+    pub creator_rebuy_structural_rescue_max_initial_liquidity_sol: f64,
+    #[serde(default = "default_creator_rebuy_structural_rescue_min_token_age_secs")]
+    pub creator_rebuy_structural_rescue_min_token_age_secs: f64,
     /// Live safety guard for serial same-label creator relaunches. These can
     /// show strong creator rebuy/whale flow while acting like exit liquidity.
     #[serde(default = "default_true")]
@@ -974,6 +990,21 @@ fn default_creator_rebuy_moonbag_canary_support_min_creator_net_sol() -> f64 {
 }
 fn default_creator_rebuy_moonbag_canary_max_daily_trades() -> u32 {
     1
+}
+fn default_creator_rebuy_structural_rescue_min_unique_buyers() -> usize {
+    40
+}
+fn default_creator_rebuy_structural_rescue_max_total_volume_sol() -> f64 {
+    400.0
+}
+fn default_creator_rebuy_structural_rescue_min_initial_liquidity_sol() -> f64 {
+    5.0
+}
+fn default_creator_rebuy_structural_rescue_max_initial_liquidity_sol() -> f64 {
+    60.0
+}
+fn default_creator_rebuy_structural_rescue_min_token_age_secs() -> f64 {
+    60.0
 }
 fn default_creator_rebuy_serial_clone_min_creator_prior_mints() -> usize {
     20

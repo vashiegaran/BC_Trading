@@ -8,6 +8,7 @@ use crate::logger::SupabaseClient;
 
 const CREATOR_REBUY_LIVE_TEST_ENTRY_TIER: &str = "creator_rebuy_live_test_fast_track";
 const CREATOR_REBUY_MOONBAG_CANARY_ENTRY_TIER: &str = "creator_rebuy_moonbag_canary";
+const CREATOR_REBUY_STRUCTURAL_RESCUE_ENTRY_TIER: &str = "creator_rebuy_structural_rescue";
 const NARRATIVE_CLUSTER_LIVE_CANARY_ENTRY_TIER: &str = "narrative_cluster_live_canary";
 
 /// In-memory trading state that replaces Supabase reads on the critical buy path.
@@ -114,6 +115,7 @@ impl TradingState {
                 .map(|entry_tier| {
                     entry_tier == CREATOR_REBUY_LIVE_TEST_ENTRY_TIER
                         || entry_tier == CREATOR_REBUY_MOONBAG_CANARY_ENTRY_TIER
+                        || entry_tier == CREATOR_REBUY_STRUCTURAL_RESCUE_ENTRY_TIER
                 })
                 .unwrap_or(false);
             if is_creator_rebuy_live_test {

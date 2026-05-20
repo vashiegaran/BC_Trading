@@ -35,6 +35,7 @@ const SNIPER_CHANNEL_CAPACITY: usize = 100;
 const CREATOR_REBUY_SHADOW_ENTRY_TIER: &str = "creator_rebuy_shadow_fast_track";
 const CREATOR_REBUY_LIVE_TEST_ENTRY_TIER: &str = "creator_rebuy_live_test_fast_track";
 const CREATOR_REBUY_MOONBAG_CANARY_ENTRY_TIER: &str = "creator_rebuy_moonbag_canary";
+const CREATOR_REBUY_STRUCTURAL_RESCUE_ENTRY_TIER: &str = "creator_rebuy_structural_rescue";
 const NARRATIVE_CLUSTER_LIVE_CANARY_ENTRY_TIER: &str = "narrative_cluster_live_canary";
 const SYSTEM_PROGRAM_ID: &str = "11111111111111111111111111111111";
 
@@ -269,8 +270,7 @@ fn creator_rebuy_live_test_rejection_reason(
 
     if filters_cfg.creator_rebuy_live_test_max_creator_buy_share_pct > 0.0 {
         if let Some(creator_buy_share_pct) = bc_entry.creator_buy_share_pct {
-            if creator_buy_share_pct
-                > filters_cfg.creator_rebuy_live_test_max_creator_buy_share_pct
+            if creator_buy_share_pct > filters_cfg.creator_rebuy_live_test_max_creator_buy_share_pct
             {
                 return Some(format!(
                     "creator_buy_share_pct_{:.1}_above_live_test_max_{:.1}",
@@ -474,6 +474,72 @@ fn creator_rebuy_moonbag_canary_rejection_reason(
             >= filters_cfg.creator_rebuy_moonbag_canary_support_min_creator_net_sol;
     if !has_support {
         return Some("creator_rebuy_moonbag_missing_whale_bsr_or_creator_support".to_string());
+    }
+
+    None
+}
+
+fn creator_rebuy_structural_rescue_rejection_reason(
+    token: &GraduatedToken,
+    bc_entry: &BcScoreEntry,
+    filters_cfg: &FiltersConfig,
+    initial_liquidity_sol: f64,
+) -> Option<String> {
+    if !filters_cfg.creator_rebuy_structural_rescue_enabled {
+        return Some("creator_rebuy_structural_rescue_disabled".to_string());
+    }
+
+    if filters_cfg.creator_rebuy_live_test_require_valid_identity {
+        if token.name.trim().is_empty() || token.symbol.trim().is_empty() {
+            return Some("creator_rebuy_structural_missing_token_identity".to_string());
+        }
+        if token.creator_wallet.to_string() == SYSTEM_PROGRAM_ID {
+            return Some("creator_rebuy_structural_creator_wallet_system_program".to_string());
+        }
+    }
+
+    if bc_entry.unique_buyers < filters_cfg.creator_rebuy_structural_rescue_min_unique_buyers {
+        return Some(format!(
+            "unique_buyers_{}_below_structural_min_{}",
+            bc_entry.unique_buyers, filters_cfg.creator_rebuy_structural_rescue_min_unique_buyers
+        ));
+    }
+
+    let max_volume = filters_cfg.creator_rebuy_structural_rescue_max_total_volume_sol;
+    if max_volume > 0.0 && bc_entry.total_volume_sol > max_volume {
+        return Some(format!(
+            "total_volume_sol_{:.1}_above_structural_max_{:.1}",
+            bc_entry.total_volume_sol, max_volume
+        ));
+    }
+
+    let min_liq = filters_cfg.creator_rebuy_structural_rescue_min_initial_liquidity_sol;
+    if min_liq > 0.0 {
+        if initial_liquidity_sol <= 0.0 {
+            return Some("initial_liquidity_sol_unknown_for_structural_rescue".to_string());
+        }
+        if initial_liquidity_sol < min_liq {
+            return Some(format!(
+                "initial_liquidity_sol_{:.1}_below_structural_min_{:.1}",
+                initial_liquidity_sol, min_liq
+            ));
+        }
+    }
+
+    let max_liq = filters_cfg.creator_rebuy_structural_rescue_max_initial_liquidity_sol;
+    if max_liq > 0.0 && initial_liquidity_sol > max_liq {
+        return Some(format!(
+            "initial_liquidity_sol_{:.1}_above_structural_max_{:.1}",
+            initial_liquidity_sol, max_liq
+        ));
+    }
+
+    let min_age_secs = filters_cfg.creator_rebuy_structural_rescue_min_token_age_secs;
+    if min_age_secs > 0.0 && token.time_to_graduate_seconds < min_age_secs {
+        return Some(format!(
+            "token_age_secs_{:.1}_below_structural_min_{:.1}",
+            token.time_to_graduate_seconds, min_age_secs
+        ));
     }
 
     None
@@ -691,10 +757,32 @@ pub fn start(
                     };
                     let creator_rebuy_moonbag_canary_profile_qualifies =
                         creator_rebuy_moonbag_canary_profile_rejection_reason.is_none();
+                    let creator_rebuy_structural_rescue_rejection_reason = if reason
+                        == "creator_rebuy_detected"
+                    {
+                        bc_entry
+                            .as_ref()
+                            .map(|entry| {
+                                creator_rebuy_structural_rescue_rejection_reason(
+                                    &token,
+                                    entry,
+                                    &cfg.strategy.filters,
+                                    initial_liquidity_sol,
+                                )
+                            })
+                            .unwrap_or_else(|| {
+                                Some("creator_rebuy_structural_rescue_missing_bc_entry".to_string())
+                            })
+                    } else {
+                        Some("creator_rebuy_structural_rescue_not_creator_rebuy".to_string())
+                    };
+                    let creator_rebuy_structural_rescue_qualifies =
+                        creator_rebuy_structural_rescue_rejection_reason.is_none();
 
                     if creator_rebuy_shadow_qualifies
                         || creator_rebuy_live_test_profile_qualifies
                         || creator_rebuy_moonbag_canary_profile_qualifies
+                        || creator_rebuy_structural_rescue_qualifies
                     {
                         let bc_entry = bc_entry
                             .clone()
@@ -747,12 +835,28 @@ pub fn start(
                         };
                         let moonbag_canary_qualifies =
                             shadow_filter.passed && moonbag_canary_rejection_reason.is_none();
-                        let live_forwarded = live_test_qualifies || moonbag_canary_qualifies;
+                        let structural_rescue_rejection_reason = if shadow_filter.passed {
+                            creator_rebuy_structural_rescue_rejection_reason.clone()
+                        } else {
+                            Some(
+                                shadow_filter
+                                    .rejection_reason
+                                    .clone()
+                                    .unwrap_or_else(|| "fast_track_safety_unknown".to_string()),
+                            )
+                        };
+                        let structural_rescue_qualifies =
+                            shadow_filter.passed && structural_rescue_rejection_reason.is_none();
+                        let live_forwarded = live_test_qualifies
+                            || moonbag_canary_qualifies
+                            || structural_rescue_qualifies;
 
                         let shadow_action = if live_test_qualifies {
                             "creator_rebuy_live_test_passed"
                         } else if moonbag_canary_qualifies {
                             "creator_rebuy_moonbag_canary_passed"
+                        } else if structural_rescue_qualifies {
+                            "creator_rebuy_structural_rescue_passed"
                         } else if creator_rebuy_shadow_qualifies && shadow_filter.passed {
                             "creator_rebuy_shadow_passed"
                         } else if creator_rebuy_shadow_qualifies {
@@ -777,6 +881,8 @@ pub fn start(
                             Some("creator_rebuy_live_test")
                         } else if moonbag_canary_qualifies {
                             Some("creator_rebuy_moonbag_canary")
+                        } else if structural_rescue_qualifies {
+                            Some("creator_rebuy_structural_rescue")
                         } else if creator_rebuy_shadow_qualifies && shadow_filter.passed {
                             Some("creator_rebuy_shadow")
                         } else if !creator_rebuy_shadow_qualifies {
@@ -788,6 +894,8 @@ pub fn start(
                             CREATOR_REBUY_LIVE_TEST_ENTRY_TIER
                         } else if moonbag_canary_qualifies {
                             CREATOR_REBUY_MOONBAG_CANARY_ENTRY_TIER
+                        } else if structural_rescue_qualifies {
+                            CREATOR_REBUY_STRUCTURAL_RESCUE_ENTRY_TIER
                         } else if creator_rebuy_shadow_qualifies {
                             CREATOR_REBUY_SHADOW_ENTRY_TIER
                         } else {
@@ -798,7 +906,7 @@ pub fn start(
                             "entry_tier": entry_tier,
                             "creator_rebuy_shadow_enabled": cfg.strategy.filters.creator_rebuy_shadow_enabled,
                             "shadow_mode": !live_test_qualifies && creator_rebuy_shadow_qualifies,
-                            "live_forwarded": live_test_qualifies,
+                            "live_forwarded": live_forwarded,
                             "blocked_live_reason": reason,
                             "shadow_min_score": cfg.strategy.filters.creator_rebuy_shadow_min_score,
                             "creator_rebuy_live_test_enabled": cfg.strategy.filters.creator_rebuy_live_test_enabled,
@@ -820,6 +928,14 @@ pub fn start(
                             "creator_rebuy_moonbag_canary_support_min_buy_sell_ratio": cfg.strategy.filters.creator_rebuy_moonbag_canary_support_min_buy_sell_ratio,
                             "creator_rebuy_moonbag_canary_support_min_creator_net_sol": cfg.strategy.filters.creator_rebuy_moonbag_canary_support_min_creator_net_sol,
                             "creator_rebuy_moonbag_canary_max_daily_trades": cfg.strategy.filters.creator_rebuy_moonbag_canary_max_daily_trades,
+                            "creator_rebuy_structural_rescue_enabled": cfg.strategy.filters.creator_rebuy_structural_rescue_enabled,
+                            "creator_rebuy_structural_rescue_passed": structural_rescue_qualifies,
+                            "creator_rebuy_structural_rescue_rejection_reason": structural_rescue_rejection_reason.as_deref(),
+                            "creator_rebuy_structural_rescue_min_unique_buyers": cfg.strategy.filters.creator_rebuy_structural_rescue_min_unique_buyers,
+                            "creator_rebuy_structural_rescue_max_total_volume_sol": cfg.strategy.filters.creator_rebuy_structural_rescue_max_total_volume_sol,
+                            "creator_rebuy_structural_rescue_min_initial_liquidity_sol": cfg.strategy.filters.creator_rebuy_structural_rescue_min_initial_liquidity_sol,
+                            "creator_rebuy_structural_rescue_max_initial_liquidity_sol": cfg.strategy.filters.creator_rebuy_structural_rescue_max_initial_liquidity_sol,
+                            "creator_rebuy_structural_rescue_min_token_age_secs": cfg.strategy.filters.creator_rebuy_structural_rescue_min_token_age_secs,
                             "creator_rebuy_live_test_min_score": cfg.strategy.filters.creator_rebuy_live_test_min_score,
                             "creator_rebuy_live_test_min_buy_pressure_pct": cfg.strategy.filters.creator_rebuy_live_test_min_buy_pressure_pct,
                             "creator_rebuy_live_test_min_buy_sell_ratio": cfg.strategy.filters.creator_rebuy_live_test_min_buy_sell_ratio,
@@ -896,6 +1012,9 @@ pub fn start(
                                 bc_score = format!("{:.1}", bc_entry.score),
                                 buy_pressure = format!("{:.1}", token.buy_pressure_pct),
                                 buy_sell_ratio = format!("{:.2}", bc_entry.buy_sell_ratio),
+                                unique_buyers = bc_entry.unique_buyers,
+                                total_volume_sol = format!("{:.1}", bc_entry.total_volume_sol),
+                                token_age_secs = format!("{:.1}", token.time_to_graduate_seconds),
                                 entry_tier = entry_tier,
                                 elapsed_ms = shadow_elapsed.as_millis() as u64,
                                 "🚦 CREATOR-REBUY CANARY PASS — forwarding capped creator-rebuy profile to filter engine"

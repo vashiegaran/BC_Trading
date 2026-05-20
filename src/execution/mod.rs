@@ -34,6 +34,7 @@ use wallet::BotWallet;
 const CHANNEL_CAPACITY: usize = 50;
 const CREATOR_REBUY_LIVE_TEST_ENTRY_TIER: &str = "creator_rebuy_live_test_fast_track";
 const CREATOR_REBUY_MOONBAG_CANARY_ENTRY_TIER: &str = "creator_rebuy_moonbag_canary";
+const CREATOR_REBUY_STRUCTURAL_RESCUE_ENTRY_TIER: &str = "creator_rebuy_structural_rescue";
 const NARRATIVE_CLUSTER_LIVE_CANARY_ENTRY_TIER: &str = "narrative_cluster_live_canary";
 
 /// Minimum liquidity floor for dynamic sizing scale (SOL).
@@ -73,6 +74,7 @@ fn is_creator_rebuy_live_test(token: &FilteredToken) -> bool {
 
     entry_tier == CREATOR_REBUY_LIVE_TEST_ENTRY_TIER
         || entry_tier == CREATOR_REBUY_MOONBAG_CANARY_ENTRY_TIER
+        || entry_tier == CREATOR_REBUY_STRUCTURAL_RESCUE_ENTRY_TIER
 }
 
 fn is_creator_rebuy_moonbag_canary(token: &FilteredToken) -> bool {
@@ -122,8 +124,7 @@ fn creator_rebuy_serial_clone_guard_reason(
     if creator_prior_mints >= filters.creator_rebuy_serial_clone_min_creator_prior_mints as u64
         && same_label_prior_mints
             >= filters.creator_rebuy_serial_clone_min_same_label_prior_mints as u64
-        && seconds_since_last_mint
-            <= filters.creator_rebuy_serial_clone_max_seconds_since_last_mint
+        && seconds_since_last_mint <= filters.creator_rebuy_serial_clone_max_seconds_since_last_mint
     {
         return Some(format!(
             "creator_rebuy_serial_clone_guard_creator_prior_{}_same_label_{}_last_mint_{}s",

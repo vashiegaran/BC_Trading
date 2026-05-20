@@ -9,6 +9,18 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.9.18 — Creator-Rebuy Structural Rescue (2026-05-20)
+
+**strategy_version**: `v18.9.18-creator-rebuy-structural-rescue`
+
+Keeps the broad `reject_creator_rebuy = true` safety gate, but adds a narrow live rescue profile for creator-rebuy tokens that match the larger-sample May 20 simulation: at least `40` unique buyers, total BC volume at or below `400 SOL`, initial liquidity between `5` and `60 SOL`, and token age at least `60s`. The 7-day pre-entry simulation selected 45 rejected tokens and all 45 reached the current hard `1.5x` full exit; blindly buying rejected tokens remained deeply negative.
+
+The lane reuses the existing creator-rebuy canary safety path: Fast-Track mint/freeze/GoPlus checks, serial-clone guard, one creator-rebuy open-position cap, `0.2 SOL` sizing, global exposure cap, UTC daily loss stop, and post-buy deferred verification all remain active.
+
+Rollback: set `creator_rebuy_structural_rescue_enabled = false` and restore `strategy_version = "v18.9.17-safe-50pct-creator-share-guard"` in [config.toml](config.toml), then restart PM2.
+
+---
+
 ## v18.9.17 — Safe 50% + Creator Share Guard (2026-05-19)
 
 **strategy_version**: `v18.9.17-safe-50pct-creator-share-guard`
