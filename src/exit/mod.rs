@@ -133,8 +133,13 @@ pub fn start(
                 let mut resolved = false;
                 for retry in 1..=4 {
                     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                    if let Some(balance) =
-                        fetch_exit_token_balance(&rpc, &wallet.pubkey(), &signal.mint).await
+                    if let Some(balance) = fetch_exit_token_balance_any(
+                        &rpc,
+                        &backup_rpc,
+                        &wallet.pubkey(),
+                        &signal.mint,
+                    )
+                    .await
                     {
                         if balance > 0.0 {
                             info!(
@@ -608,7 +613,7 @@ async fn execute_real_exit(
         crate::execution::jupiter::SOL_MINT,
         "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
     ];
-    let balance_fut = fetch_exit_token_balance(rpc, &wallet_pk, &signal.mint);
+    let balance_fut = fetch_exit_token_balance_any(rpc, backup_rpc, &wallet_pk, &signal.mint);
     let sol_fut = rpc.get_balance(&wallet_pk);
     // getRecentPrioritizationFees is standard Solana RPC — use Chainstack primary.
     let fee_fut = crate::execution::helius_sender::get_priority_fee_estimate(
@@ -1148,39 +1153,51 @@ async fn execute_real_exit(
         let mut confirmed = false;
 
         while confirm_start.elapsed() < timeout {
-            match rpc.get_signature_statuses(&[tx_sig]).await {
-                Ok(statuses) => {
-                    if let Some(Some(status)) = statuses.value.first() {
-                        if status.err.is_none() {
-                            confirmed = true;
-                            break;
-                        } else {
-                            // On-chain failure — check if slippage, then retry with fresh quote
-                            let err_str = format!("{:?}", status.err);
-                            if is_slippage_error(&err_str) {
-                                warn!(
-                                    mint = %signal.mint,
-                                    attempt,
-                                    error = %err_str,
-                                    "⏳ Exit tx confirmed with slippage error on-chain — re-quoting",
-                                );
-                                last_exit_err =
-                                    Some(anyhow::anyhow!("Exit tx on-chain slippage: {}", err_str));
-                                if attempt < EXIT_RETRIES {
-                                    tokio::time::sleep(std::time::Duration::from_millis(
-                                        retry_delay_ms.max(100),
-                                    ))
-                                    .await;
-                                }
-                                continue 'retry;
+            for (rpc_name, rpc_client) in [("primary", rpc), ("backup", backup_rpc)] {
+                match rpc_client.get_signature_statuses(&[tx_sig]).await {
+                    Ok(statuses) => {
+                        if let Some(Some(status)) = statuses.value.first() {
+                            if status.err.is_none() {
+                                debug!(mint = %signal.mint, sig = %tx_sig, rpc = rpc_name, "Exit confirmation observed");
+                                confirmed = true;
+                                break;
                             } else {
-                                error!(mint = %signal.mint, "Exit tx confirmed with non-retryable error: {:?}", status.err);
-                                anyhow::bail!("Exit tx confirmed with error: {:?}", status.err);
+                                // On-chain failure — check if slippage, then retry with fresh quote
+                                let err_str = format!("{:?}", status.err);
+                                if is_slippage_error(&err_str) {
+                                    warn!(
+                                        mint = %signal.mint,
+                                        attempt,
+                                        rpc = rpc_name,
+                                        error = %err_str,
+                                        "⏳ Exit tx confirmed with slippage error on-chain — re-quoting",
+                                    );
+                                    last_exit_err = Some(anyhow::anyhow!(
+                                        "Exit tx on-chain slippage: {}",
+                                        err_str
+                                    ));
+                                    if attempt < EXIT_RETRIES {
+                                        tokio::time::sleep(std::time::Duration::from_millis(
+                                            retry_delay_ms.max(100),
+                                        ))
+                                        .await;
+                                    }
+                                    continue 'retry;
+                                } else {
+                                    error!(mint = %signal.mint, rpc = rpc_name, "Exit tx confirmed with non-retryable error: {:?}", status.err);
+                                    anyhow::bail!("Exit tx confirmed with error: {:?}", status.err);
+                                }
                             }
                         }
                     }
+                    Err(e) => {
+                        debug!(mint = %signal.mint, sig = %tx_sig, rpc = rpc_name, "Exit confirmation poll error: {}", e)
+                    }
                 }
-                Err(e) => debug!("Exit confirmation poll error: {}", e),
+            }
+
+            if confirmed {
+                break;
             }
             tokio::time::sleep(poll).await;
         }
@@ -1269,7 +1286,7 @@ async fn execute_real_exit(
     } else if let Some(balance) = tx_post_tokens {
         balance
     } else {
-        match fetch_exit_token_balance(rpc, &wallet.pubkey(), &signal.mint).await {
+        match fetch_exit_token_balance_any(rpc, backup_rpc, &wallet.pubkey(), &signal.mint).await {
             Some(balance) => balance,
             None => {
                 let calc = effective_token_amount - final_tokens_sold as f64;
@@ -1291,7 +1308,9 @@ async fn execute_real_exit(
         let retry_delays_ms: [u64; 3] = [2000, 3000, 5000];
         for (i, delay_ms) in retry_delays_ms.iter().enumerate() {
             tokio::time::sleep(std::time::Duration::from_millis(*delay_ms)).await;
-            match fetch_exit_token_balance(rpc, &wallet.pubkey(), &signal.mint).await {
+            match fetch_exit_token_balance_any(rpc, backup_rpc, &wallet.pubkey(), &signal.mint)
+                .await
+            {
                 Some(fresh) if fresh < remaining_tokens => {
                     debug!(
                         mint = %signal.mint,
@@ -2023,6 +2042,19 @@ async fn fetch_exit_token_balance(rpc: &RpcClient, wallet: &Pubkey, mint_str: &s
     } else {
         None
     }
+}
+
+async fn fetch_exit_token_balance_any(
+    rpc: &RpcClient,
+    backup_rpc: &RpcClient,
+    wallet: &Pubkey,
+    mint_str: &str,
+) -> Option<f64> {
+    if let Some(balance) = fetch_exit_token_balance(rpc, wallet, mint_str).await {
+        return Some(balance);
+    }
+
+    fetch_exit_token_balance(backup_rpc, wallet, mint_str).await
 }
 
 async fn fetch_confirmed_exit_outcome(

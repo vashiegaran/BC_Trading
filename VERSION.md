@@ -9,6 +9,16 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.9.22 — RPC Settlement Failover (2026-05-20)
+
+**strategy_version**: `v18.9.22-rpc-settlement-failover`
+
+Fixes the live execution failure where buys finalized on-chain but never became tracked positions because the primary RPC did not report confirmation or token-account balance within the old 25s window. Buy settlement now polls both primary and backup RPCs for signature status and token balance, and the confirmation timeout is extended to 75s. Exit confirmation and exit token-balance reads now use the same primary-plus-backup failover so a lagging Chainstack read path does not cause missed or duplicated sell attempts.
+
+No entry filters or creator-rebuy gates are changed in this version.
+
+---
+
 ## v18.9.21 — Structural UB30 Cash Builder (2026-05-20)
 
 **strategy_version**: `v18.9.21-structural-ub30-cash-builder`

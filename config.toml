@@ -9,7 +9,7 @@
 #   filterable in analytics vs the broken v16.1 binary that was running
 #   from never-committed source. Detection: pumpfun_ws. Fast-track:
 #   2-source (on_chain_mint + goplus) so GoPlus runs PRE-buy.
-strategy_version = "v18.9.21-structural-ub30-cash-builder"
+strategy_version = "v18.9.22-rpc-settlement-failover"
 
 # ============================================================
 # DETECTION
@@ -444,7 +444,7 @@ slippage_bps = 1000
 max_open_positions = 2
 
 # Transaction confirmation timeout in seconds
-tx_confirm_timeout_secs = 25
+tx_confirm_timeout_secs = 75
 
 # Transaction confirmation poll interval in milliseconds
 tx_confirm_poll_ms = 200

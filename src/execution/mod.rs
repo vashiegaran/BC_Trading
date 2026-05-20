@@ -1705,6 +1705,7 @@ async fn execute_real_trade(
             std::time::Duration::from_millis(cfg.strategy.execution.tx_confirm_poll_ms);
         match wait_for_buy_settlement_or_balance(
             rpc,
+            backup_rpc,
             &wallet.pubkey(),
             &mint_str,
             tx_sig,
@@ -2217,6 +2218,7 @@ async fn submit_via_rpc(
 
 async fn wait_for_buy_settlement_or_balance(
     rpc: &RpcClient,
+    backup_rpc: &RpcClient,
     wallet: &Pubkey,
     mint_str: &str,
     tx_sig: solana_sdk::signature::Signature,
@@ -2234,35 +2236,42 @@ async fn wait_for_buy_settlement_or_balance(
     };
 
     while confirm_start.elapsed() < timeout {
-        match rpc.get_signature_statuses(&[tx_sig]).await {
-            Ok(statuses) => {
-                if let Some(Some(status)) = statuses.value.first() {
-                    if status.err.is_none() {
-                        return BuySettlement::Confirmed;
+        for (rpc_name, rpc_client) in [("primary", rpc), ("backup", backup_rpc)] {
+            match rpc_client.get_signature_statuses(&[tx_sig]).await {
+                Ok(statuses) => {
+                    if let Some(Some(status)) = statuses.value.first() {
+                        if status.err.is_none() {
+                            debug!(sig = %tx_sig, rpc = rpc_name, "Buy confirmation observed");
+                            return BuySettlement::Confirmed;
+                        }
+                        return BuySettlement::Failed(format!("{:?}", status.err));
                     }
-                    return BuySettlement::Failed(format!("{:?}", status.err));
                 }
-            }
-            Err(e) => {
-                debug!(sig = %tx_sig, "Confirmation poll error: {}", e);
+                Err(e) => {
+                    debug!(sig = %tx_sig, rpc = rpc_name, "Confirmation poll error: {}", e);
+                }
             }
         }
 
         if confirm_start.elapsed() >= next_balance_check {
-            match fetch_token_balance(rpc, wallet, mint_str).await {
-                Some(balance) if balance >= min_expected_balance => {
-                    return BuySettlement::BalanceObserved(balance);
+            for (rpc_name, rpc_client) in [("primary", rpc), ("backup", backup_rpc)] {
+                match fetch_token_balance(rpc_client, wallet, mint_str).await {
+                    Some(balance) if balance >= min_expected_balance => {
+                        debug!(mint = %mint_str, sig = %tx_sig, rpc = rpc_name, balance, "Buy token balance observed");
+                        return BuySettlement::BalanceObserved(balance);
+                    }
+                    Some(balance) => {
+                        debug!(
+                            mint = %mint_str,
+                            sig = %tx_sig,
+                            rpc = rpc_name,
+                            balance,
+                            min_expected_balance,
+                            "Ignoring small pre-confirm token balance while waiting for buy settlement"
+                        );
+                    }
+                    None => {}
                 }
-                Some(balance) => {
-                    debug!(
-                        mint = %mint_str,
-                        sig = %tx_sig,
-                        balance,
-                        min_expected_balance,
-                        "Ignoring small pre-confirm token balance while waiting for buy settlement"
-                    );
-                }
-                None => {}
             }
             next_balance_check = next_balance_check + balance_check_interval;
         }
@@ -2273,9 +2282,12 @@ async fn wait_for_buy_settlement_or_balance(
     // One final delayed balance check catches sender/RPC responses that time out
     // just before the transaction lands in the wallet.
     tokio::time::sleep(std::time::Duration::from_millis(750)).await;
-    if let Some(balance) = fetch_token_balance(rpc, wallet, mint_str).await {
-        if balance >= min_expected_balance {
-            return BuySettlement::BalanceObserved(balance);
+    for (rpc_name, rpc_client) in [("primary", rpc), ("backup", backup_rpc)] {
+        if let Some(balance) = fetch_token_balance(rpc_client, wallet, mint_str).await {
+            if balance >= min_expected_balance {
+                debug!(mint = %mint_str, sig = %tx_sig, rpc = rpc_name, balance, "Final buy token balance observed");
+                return BuySettlement::BalanceObserved(balance);
+            }
         }
     }
 
