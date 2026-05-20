@@ -1285,6 +1285,19 @@ pub struct ExitConfig {
     /// If price < entry * this after momentum_kill_secs, exit.
     #[serde(default = "default_momentum_kill_min_multiplier")]
     pub momentum_kill_min_multiplier: f64,
+    /// First-minute weak-close exit: enabled after timing study showed most
+    /// clean 1.5x winners move quickly while weak closes below entry often fail.
+    #[serde(default)]
+    pub first_minute_weak_exit_enabled: bool,
+    /// Seconds after entry before the first-minute weak-close rule can fire.
+    #[serde(default = "default_first_minute_weak_exit_secs")]
+    pub first_minute_weak_exit_secs: u64,
+    /// Exit if current multiplier is below this threshold at the weak-exit check.
+    #[serde(default = "default_first_minute_weak_exit_max_close_multiplier")]
+    pub first_minute_weak_exit_max_close_multiplier: f64,
+    /// Exit only if the position never reached this peak multiplier first.
+    #[serde(default = "default_first_minute_weak_exit_max_peak_multiplier")]
+    pub first_minute_weak_exit_max_peak_multiplier: f64,
 }
 
 fn default_never_profitable_stop_loss_pct() -> f64 {
@@ -1295,6 +1308,15 @@ fn default_never_profitable_grace_secs() -> u64 {
 }
 fn default_momentum_kill_min_multiplier() -> f64 {
     1.3
+}
+fn default_first_minute_weak_exit_secs() -> u64 {
+    60
+}
+fn default_first_minute_weak_exit_max_close_multiplier() -> f64 {
+    0.95
+}
+fn default_first_minute_weak_exit_max_peak_multiplier() -> f64 {
+    1.15
 }
 fn default_trailing_stop_post_tp1_pct() -> f64 {
     15.0

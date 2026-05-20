@@ -160,6 +160,31 @@ pub fn check_triggers(
         });
     }
 
+    // 1a. First-minute weak-close exit: the May 20 timing study showed clean
+    // 1.5x winners usually move by 30-60s, while tokens still below entry after
+    // a weak first minute are mostly losers. Keep this narrower than the 90s
+    // momentum kill so we do not discard slow-but-alive runners too broadly.
+    if exit_cfg.first_minute_weak_exit_enabled
+        && !pos.runner_grace_active
+        && !pos.tp1_triggered
+        && pos.elapsed_seconds >= exit_cfg.first_minute_weak_exit_secs.max(60)
+        && peak_multiplier < exit_cfg.first_minute_weak_exit_max_peak_multiplier
+        && price_multiplier < exit_cfg.first_minute_weak_exit_max_close_multiplier
+    {
+        return Some(ExitSignal {
+            position_id: pos.position_id,
+            mint: pos.mint.clone(),
+            pct_to_sell: 100,
+            reason: ExitReason::MomentumKill,
+            current_price: pos.current_price,
+            entry_price_usd: pos.entry_price_usd,
+            sol_spent: pos.sol_spent,
+            token_amount: pos.token_amount,
+            is_paper_trade: pos.is_paper_trade,
+            sub_reason: Some("first_minute_weak_close".to_string()),
+        });
+    }
+
     // 1b. MomentumKill: if held past gate time and hasn't reached min multiplier,
     //     exit early — token isn't gaining traction and will likely bleed out.
     //     Catches ~85% of dip_death positions that never reach TP1.
@@ -365,6 +390,10 @@ mod tests {
             low_liq_stop_loss_pct: 0.0,
             momentum_kill_secs: 0,
             momentum_kill_min_multiplier: 1.3,
+            first_minute_weak_exit_enabled: false,
+            first_minute_weak_exit_secs: 60,
+            first_minute_weak_exit_max_close_multiplier: 0.95,
+            first_minute_weak_exit_max_peak_multiplier: 1.15,
         }
     }
 
@@ -426,6 +455,45 @@ mod tests {
         let sig = signal.unwrap();
         assert_eq!(sig.reason, ExitReason::MomentumKill);
         assert_eq!(sig.pct_to_sell, 100);
+    }
+
+    #[test]
+    fn test_first_minute_weak_close_exits_below_entry_without_traction() {
+        let mut cfg = default_exit_config();
+        cfg.first_minute_weak_exit_enabled = true;
+        cfg.first_minute_weak_exit_secs = 60;
+        cfg.first_minute_weak_exit_max_close_multiplier = 0.95;
+        cfg.first_minute_weak_exit_max_peak_multiplier = 1.15;
+
+        let mut pos = base_position();
+        pos.elapsed_seconds = 60;
+        pos.current_price = 0.00094;
+        pos.peak_price = 0.00110;
+
+        let signal = check_triggers(&pos, &cfg, false).expect("weak close should exit");
+        assert_eq!(signal.reason, ExitReason::MomentumKill);
+        assert_eq!(signal.sub_reason.as_deref(), Some("first_minute_weak_close"));
+        assert_eq!(signal.pct_to_sell, 100);
+    }
+
+    #[test]
+    fn test_first_minute_weak_close_spares_tokens_that_showed_traction() {
+        let mut cfg = default_exit_config();
+        cfg.first_minute_weak_exit_enabled = true;
+        cfg.first_minute_weak_exit_secs = 60;
+        cfg.first_minute_weak_exit_max_close_multiplier = 0.95;
+        cfg.first_minute_weak_exit_max_peak_multiplier = 1.15;
+
+        let mut pos = base_position();
+        pos.elapsed_seconds = 60;
+        pos.current_price = 0.00094;
+        pos.peak_price = 0.00116;
+
+        let signal = check_triggers(&pos, &cfg, false);
+        assert!(
+            signal.is_none(),
+            "prior 1.15x traction should bypass weak-close exit"
+        );
     }
 
     #[test]

@@ -9,6 +9,18 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.9.23 — RPC Failover + First-Minute Weak-Close Exit (2026-05-20)
+
+**strategy_version**: `v18.9.23-rpc-failover-weak-close`
+
+Keeps the `v18.9.22` primary-plus-backup RPC settlement/exit confirmation failover and adds a configurable early weak-close exit for the hard `1.5x` cash-builder objective. The May 20 timing study showed median time to `1.5x` was about `60s`, while failed tokens averaged a first-minute close around `0.87-0.89x`; the safest tested rule exits at `60s` only when the position never reached `1.15x` and is still below `0.95x`.
+
+Token-deduped 7d scoring cut roughly `40%` of `<1.5x` losers with about `6%` false exits among future `>=1.5x` winners, and about `88%` of fired exits were losers. The existing `90s / 1.3x` momentum kill remains as the broader second-stage safety net, and hard protections such as stop-loss, dev dump, liquidity removal, post-buy verification, and RPC settlement failover remain unchanged.
+
+Rollback: restore `strategy_version = "v18.9.22-rpc-settlement-failover"` and set `first_minute_weak_exit_enabled = false` in [config.toml](config.toml), then restart PM2.
+
+---
+
 ## v18.9.22 — RPC Settlement Failover (2026-05-20)
 
 **strategy_version**: `v18.9.22-rpc-settlement-failover`
