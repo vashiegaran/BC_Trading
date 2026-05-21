@@ -1285,6 +1285,16 @@ pub struct ExitConfig {
     /// If price < entry * this after momentum_kill_secs, exit.
     #[serde(default = "default_momentum_kill_min_multiplier")]
     pub momentum_kill_min_multiplier: f64,
+    /// First-minute catastrophic fade exit: hard pre-TP1 rug guard for tokens
+    /// that close far below entry after the first minute.
+    #[serde(default)]
+    pub first_minute_catastrophic_fade_enabled: bool,
+    /// Seconds after entry before the catastrophic fade rule can fire.
+    #[serde(default = "default_first_minute_catastrophic_fade_secs")]
+    pub first_minute_catastrophic_fade_secs: u64,
+    /// Exit if current multiplier is at or below this threshold at the check.
+    #[serde(default = "default_first_minute_catastrophic_fade_max_close_multiplier")]
+    pub first_minute_catastrophic_fade_max_close_multiplier: f64,
     /// First-minute weak-close exit: enabled after timing study showed most
     /// clean 1.5x winners move quickly while weak closes below entry often fail.
     #[serde(default)]
@@ -1308,6 +1318,12 @@ fn default_never_profitable_grace_secs() -> u64 {
 }
 fn default_momentum_kill_min_multiplier() -> f64 {
     1.3
+}
+fn default_first_minute_catastrophic_fade_secs() -> u64 {
+    60
+}
+fn default_first_minute_catastrophic_fade_max_close_multiplier() -> f64 {
+    0.75
 }
 fn default_first_minute_weak_exit_secs() -> u64 {
     60

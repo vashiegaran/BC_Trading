@@ -9,6 +9,18 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.9.24 — Catastrophic Fade Guard (2026-05-21)
+
+**strategy_version**: `v18.9.24-catastrophic-fade-guard`
+
+Keeps `v18.9.23` RPC failover and first-minute weak-close behavior, then adds a harder pre-TP1 rug guard: after `60s`, exit 100% if the live position is at or below `0.75x` entry. This is separate from weak-close because it does not require the token to have stayed below `1.15x`; it also catches spike-and-dump shapes that briefly show traction before collapsing.
+
+May 21 replay from `2026-05-20 19:00 MYT` plus 7d confirmation found `first-minute close <= 0.75x` was the cleanest rug separator: target sample caught `6/6` dump losers with `0/14` good-token misses, and 7d replay caught `112/112` dump losers with `8/395` future `>=1.5x` winners affected.
+
+Rollback: restore `strategy_version = "v18.9.23-rpc-failover-weak-close"` and set `first_minute_catastrophic_fade_enabled = false` in [config.toml](config.toml), then restart PM2.
+
+---
+
 ## v18.9.23 — RPC Failover + First-Minute Weak-Close Exit (2026-05-20)
 
 **strategy_version**: `v18.9.23-rpc-failover-weak-close`

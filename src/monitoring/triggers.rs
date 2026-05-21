@@ -36,11 +36,13 @@ pub struct PositionState {
 ///
 /// **Evaluation order** (first match wins):
 ///   1. StopLoss
-///   2. TakeProfit3  (requires TP1 + TP2 already triggered)
-///   3. TakeProfit2  (requires TP1 already triggered)
-///   4. TakeProfit1
-///   5. TimeStop
-///   6. VolumeDrop   (not implemented — requires volume data)
+///   2. First-minute catastrophic fade / weak-close guards
+///   3. MomentumKill
+///   4. TrailingStop
+///   5. TakeProfit3  (requires TP1 + TP2 already triggered)
+///   6. TakeProfit2  (requires TP1 already triggered)
+///   7. TakeProfit1
+///   8. VolumeDrop   (not implemented — requires volume data)
 pub fn check_triggers(
     pos: &PositionState,
     exit_cfg: &ExitConfig,
@@ -160,7 +162,30 @@ pub fn check_triggers(
         });
     }
 
-    // 1a. First-minute weak-close exit: the May 20 timing study showed clean
+    // 1a. First-minute catastrophic fade exit: May 21 rug replay showed a
+    // close at or below 0.75x after 60s is the cleanest post-entry rug
+    // separator. Unlike weak-close, this intentionally does not require a low
+    // peak, so it catches spike-and-dump fades before the 90s momentum gate.
+    if exit_cfg.first_minute_catastrophic_fade_enabled
+        && !pos.tp1_triggered
+        && pos.elapsed_seconds >= exit_cfg.first_minute_catastrophic_fade_secs.max(60)
+        && price_multiplier <= exit_cfg.first_minute_catastrophic_fade_max_close_multiplier
+    {
+        return Some(ExitSignal {
+            position_id: pos.position_id,
+            mint: pos.mint.clone(),
+            pct_to_sell: 100,
+            reason: ExitReason::MomentumKill,
+            current_price: pos.current_price,
+            entry_price_usd: pos.entry_price_usd,
+            sol_spent: pos.sol_spent,
+            token_amount: pos.token_amount,
+            is_paper_trade: pos.is_paper_trade,
+            sub_reason: Some("first_minute_catastrophic_fade".to_string()),
+        });
+    }
+
+    // 1b. First-minute weak-close exit: the May 20 timing study showed clean
     // 1.5x winners usually move by 30-60s, while tokens still below entry after
     // a weak first minute are mostly losers. Keep this narrower than the 90s
     // momentum kill so we do not discard slow-but-alive runners too broadly.
@@ -185,7 +210,7 @@ pub fn check_triggers(
         });
     }
 
-    // 1b. MomentumKill: if held past gate time and hasn't reached min multiplier,
+    // 1c. MomentumKill: if held past gate time and hasn't reached min multiplier,
     //     exit early — token isn't gaining traction and will likely bleed out.
     //     Catches ~85% of dip_death positions that never reach TP1.
     //
@@ -390,6 +415,9 @@ mod tests {
             low_liq_stop_loss_pct: 0.0,
             momentum_kill_secs: 0,
             momentum_kill_min_multiplier: 1.3,
+            first_minute_catastrophic_fade_enabled: false,
+            first_minute_catastrophic_fade_secs: 60,
+            first_minute_catastrophic_fade_max_close_multiplier: 0.75,
             first_minute_weak_exit_enabled: false,
             first_minute_weak_exit_secs: 60,
             first_minute_weak_exit_max_close_multiplier: 0.95,
@@ -494,6 +522,43 @@ mod tests {
             signal.is_none(),
             "prior 1.15x traction should bypass weak-close exit"
         );
+    }
+
+    #[test]
+    fn test_first_minute_catastrophic_fade_exits_even_after_traction() {
+        let mut cfg = default_exit_config();
+        cfg.first_minute_catastrophic_fade_enabled = true;
+        cfg.first_minute_catastrophic_fade_secs = 60;
+        cfg.first_minute_catastrophic_fade_max_close_multiplier = 0.75;
+
+        let mut pos = base_position();
+        pos.elapsed_seconds = 60;
+        pos.current_price = 0.00075;
+        pos.peak_price = 0.00160;
+
+        let signal = check_triggers(&pos, &cfg, false).expect("catastrophic fade should exit");
+        assert_eq!(signal.reason, ExitReason::MomentumKill);
+        assert_eq!(
+            signal.sub_reason.as_deref(),
+            Some("first_minute_catastrophic_fade")
+        );
+        assert_eq!(signal.pct_to_sell, 100);
+    }
+
+    #[test]
+    fn test_first_minute_catastrophic_fade_waits_for_floor_time() {
+        let mut cfg = default_exit_config();
+        cfg.first_minute_catastrophic_fade_enabled = true;
+        cfg.first_minute_catastrophic_fade_secs = 30;
+        cfg.first_minute_catastrophic_fade_max_close_multiplier = 0.75;
+
+        let mut pos = base_position();
+        pos.elapsed_seconds = 59;
+        pos.current_price = 0.00075;
+        pos.peak_price = 0.00160;
+
+        let signal = check_triggers(&pos, &cfg, true);
+        assert!(signal.is_none(), "catastrophic fade should wait at least 60s");
     }
 
     #[test]
