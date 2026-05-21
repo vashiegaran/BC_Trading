@@ -9,6 +9,20 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## v18.9.25 — Liquidity 70 Structural Rescue (2026-05-21)
+
+**strategy_version**: `v18.9.25-liq70-structural-rescue`
+
+Keeps `v18.9.24` catastrophic fade protection and widens only the creator-rebuy structural rescue liquidity cap from `60 SOL` to `70 SOL`; unique buyers stay at `30`, volume stays capped at `400 SOL`, and token age stays `>=60s`. This is the narrow relaxation from the May 21 post-guard replay, not a broad creator-rebuy unblock.
+
+Simulation with `0.2 SOL` size, hard `1.5x` TP, and the new `60s <=0.75x` catastrophic fade guard showed the current `UB>=30/liquidity<=60` lane at `44` trades / `93.2%` hit / `+3.50 SOL` over 7d and `76` trades / `90.8%` hit / `+5.50 SOL` over 14d. Raising the liquidity cap to `70 SOL` improved total PnL to `+5.06 SOL` over 7d and `+6.95 SOL` over 14d, adding `33` incremental 7d trades for `+1.56 SOL` and `59` incremental 14d trades for `+1.45 SOL`.
+
+Do not raise this cap to `80 SOL` from this evidence: targeted replay showed `UB>=30/liquidity<=80` had negative incremental PnL versus the current lane. Broad creator-rebuy and non-creator rejected-token buying remain deeply negative even with the fade guard.
+
+Rollback: restore `strategy_version = "v18.9.24-catastrophic-fade-guard"` and `creator_rebuy_structural_rescue_max_initial_liquidity_sol = 60.0` in [config.toml](config.toml), then restart PM2.
+
+---
+
 ## v18.9.24 — Catastrophic Fade Guard (2026-05-21)
 
 **strategy_version**: `v18.9.24-catastrophic-fade-guard`

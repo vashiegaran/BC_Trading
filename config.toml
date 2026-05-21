@@ -9,7 +9,7 @@
 #   filterable in analytics vs the broken v16.1 binary that was running
 #   from never-committed source. Detection: pumpfun_ws. Fast-track:
 #   2-source (on_chain_mint + goplus) so GoPlus runs PRE-buy.
-strategy_version = "v18.9.24-catastrophic-fade-guard"
+strategy_version = "v18.9.25-liq70-structural-rescue"
 
 # ============================================================
 # DETECTION
@@ -298,13 +298,14 @@ creator_rebuy_moonbag_canary_max_daily_trades = 0
 # Larger-sample creator-rebuy structural rescue: promoted from May 20 rejected
 # token simulation. This keeps reject_creator_rebuy=true, but rescues only
 # broad-participation creator-rebuy profiles. v18.9.21 lowers the unique-buyer
-# floor from 40 to 30 while keeping the 5-60 SOL liquidity cap; 7d replay stayed
-# clean at 41/41 >=1.5x and 37/41 >=2x under the hard 1.5x cash-builder exit.
+# floor from 40 to 30. v18.9.25 raises the liquidity cap 60 -> 70 SOL after
+# replaying the new catastrophic fade guard: 7d incremental +33 trades / +1.56
+# SOL, while 80 SOL turned incremental PnL negative.
 creator_rebuy_structural_rescue_enabled = true
 creator_rebuy_structural_rescue_min_unique_buyers = 30
 creator_rebuy_structural_rescue_max_total_volume_sol = 400.0
 creator_rebuy_structural_rescue_min_initial_liquidity_sol = 5.0
-creator_rebuy_structural_rescue_max_initial_liquidity_sol = 60.0
+creator_rebuy_structural_rescue_max_initial_liquidity_sol = 70.0
 creator_rebuy_structural_rescue_min_token_age_secs = 60.0
 creator_rebuy_strict_2x_shadow_enabled = true
 creator_rebuy_strict_2x_shadow_min_total_volume_sol = 200.0
