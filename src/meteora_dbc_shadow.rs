@@ -27,6 +27,8 @@ const DEX_TOKEN_URL_PREFIX: &str = "https://api.dexscreener.com/latest/dex/token
 const USER_AGENT: &str = "BC-Trading-Meteora-DBC-Shadow-Rust/1.0";
 const TABLE_RETRY_SECONDS: u64 = 300;
 const MIN_INTERVAL_SECONDS: u64 = 30;
+const METEORA_DBC_SIGNAL_RULE_VERSION: &str =
+    "meteora_dbc_numeric_tier_a_v1_score80_bp98_bsr100_h1buys1000_mc70k110k";
 
 /// Start the background Meteora DBC shadow collector if enabled in config.
 pub fn start(cfg: Arc<AppConfig>, supabase: Arc<SupabaseClient>) {
@@ -670,6 +672,7 @@ async fn update_shadow_row(supabase: &SupabaseClient, payload: Value) -> Result<
                 .json(&Value::Object(patch)),
         )
         .await?;
+        record_shadow_signal_if_eligible(supabase, &payload).await;
         return Ok("patched");
     }
 
@@ -691,7 +694,144 @@ async fn update_shadow_row(supabase: &SupabaseClient, payload: Value) -> Result<
             .json(&Value::Object(insert)),
     )
     .await?;
+    record_shadow_signal_if_eligible(supabase, &payload).await;
     Ok("inserted")
+}
+
+async fn record_shadow_signal_if_eligible(supabase: &SupabaseClient, payload: &Value) {
+    if payload.get("would_trade_shadow").and_then(Value::as_bool) != Some(true) {
+        return;
+    }
+
+    if let Err(e) = insert_meteora_signal_event(supabase, payload).await {
+        warn!(
+            rule_version = METEORA_DBC_SIGNAL_RULE_VERSION,
+            "meteora_dbc_shadow: failed to record shadow signal event: {:#}", e
+        );
+    }
+}
+
+async fn insert_meteora_signal_event(supabase: &SupabaseClient, payload: &Value) -> Result<()> {
+    let mint = payload
+        .get("mint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("payload missing mint"))?;
+    let encoded_mint = percent_encode(mint);
+    let encoded_rule = percent_encode(METEORA_DBC_SIGNAL_RULE_VERSION);
+    let select_url = format!(
+        "{}/meteora_dbc_signal_events?select=id&mint=eq.{}&rule_version=eq.{}&limit=1",
+        supabase.base_url, encoded_mint, encoded_rule
+    );
+
+    let existing: Vec<Value> = supabase
+        .client
+        .get(&select_url)
+        .send()
+        .await
+        .context("Supabase signal-event select failed")?
+        .error_for_status()
+        .context("Supabase signal-event select returned non-success")?
+        .json()
+        .await
+        .context("Supabase signal-event select JSON parse failed")?;
+    if !existing.is_empty() {
+        return Ok(());
+    }
+
+    let mut event = Map::new();
+    event.insert("mint".to_string(), payload_value(payload, "mint"));
+    event.insert("symbol".to_string(), payload_value(payload, "symbol"));
+    event.insert("name".to_string(), payload_value(payload, "name"));
+    event.insert(
+        "rule_version".to_string(),
+        json!(METEORA_DBC_SIGNAL_RULE_VERSION),
+    );
+    event.insert("fired_at".to_string(), json!(now_iso()));
+    event.insert(
+        "meteora_dbc_score".to_string(),
+        payload_value(payload, "meteora_dbc_score"),
+    );
+    event.insert(
+        "market_cap_usd".to_string(),
+        payload_value(payload, "market_cap_usd"),
+    );
+    event.insert("price_usd".to_string(), payload_value(payload, "price_usd"));
+    event.insert(
+        "liquidity_usd".to_string(),
+        payload_value(payload, "liquidity_usd"),
+    );
+    event.insert(
+        "volume_h1_usd".to_string(),
+        payload_value(payload, "volume_h1_usd"),
+    );
+    event.insert(
+        "txns_h1_buys".to_string(),
+        payload_value(payload, "txns_h1_buys"),
+    );
+    event.insert(
+        "txns_h1_sells".to_string(),
+        payload_value(payload, "txns_h1_sells"),
+    );
+    event.insert(
+        "buy_pressure_h1_pct".to_string(),
+        payload_value(payload, "buy_pressure_h1_pct"),
+    );
+    event.insert(
+        "buy_sell_ratio_h1".to_string(),
+        payload_value(payload, "buy_sell_ratio_h1"),
+    );
+    event.insert(
+        "price_change_h1_pct".to_string(),
+        payload_value(payload, "price_change_h1_pct"),
+    );
+    event.insert(
+        "dbc_pair_address".to_string(),
+        payload_value(payload, "dbc_pair_address"),
+    );
+    event.insert(
+        "dbc_pair_url".to_string(),
+        payload_value(payload, "dbc_pair_url"),
+    );
+    event.insert(
+        "meteora_pair_address".to_string(),
+        payload_value(payload, "meteora_pair_address"),
+    );
+    event.insert(
+        "meteora_pair_url".to_string(),
+        payload_value(payload, "meteora_pair_url"),
+    );
+    event.insert(
+        "score_reasons".to_string(),
+        payload_value(payload, "score_reasons"),
+    );
+    event.insert(
+        "score_penalties".to_string(),
+        payload_value(payload, "score_penalties"),
+    );
+    event.insert("entry_snapshot".to_string(), payload.clone());
+
+    let insert_url = format!(
+        "{}/meteora_dbc_signal_events?on_conflict=mint,rule_version",
+        supabase.base_url
+    );
+    send_supabase_write(
+        supabase
+            .client
+            .post(&insert_url)
+            .header("Prefer", "resolution=ignore-duplicates,return=minimal")
+            .json(&Value::Object(event)),
+    )
+    .await?;
+    info!(
+        mint = %mint,
+        rule_version = METEORA_DBC_SIGNAL_RULE_VERSION,
+        "meteora_dbc_shadow: immutable shadow signal event recorded"
+    );
+    Ok(())
+}
+
+fn payload_value(payload: &Value, key: &str) -> Value {
+    payload.get(key).cloned().unwrap_or(Value::Null)
 }
 
 async fn send_supabase_write(builder: reqwest::RequestBuilder) -> Result<()> {

@@ -9,6 +9,16 @@ strategy_version = "v14.1-fasttrack-only"
 
 ---
 
+## Shadow-only: Meteora DBC Numeric Tier A Events (2026-05-22)
+
+No `strategy_version` bump; this does not affect live entries, exits, sizing, or risk controls.
+
+Narrows the observe-only Meteora DBC `would_trade_shadow` profile toward the May 21 90%-precision candidate: score `>=80`, H1 buy pressure `>=98%`, H1 buy/sell ratio `>=100`, H1 buys `>=1000`, and market cap `$70k-$110k`; theme is no longer required. Adds [migrations/040_meteora_dbc_signal_events.sql](migrations/040_meteora_dbc_signal_events.sql), an immutable shadow event table that records the exact payload when a mint first passes the narrowed canary so forward validation is based on pass-time snapshots rather than the mutable per-mint row.
+
+Rollback: restore the Meteora DBC values in [config.toml](config.toml) to `min_score=65`, `require_theme=true`, `min_buy_sell_ratio=50`, and `min_h1_buys=200`. The event table can remain in Supabase unused.
+
+---
+
 ## v18.9.25 — Liquidity 70 Structural Rescue (2026-05-21)
 
 **strategy_version**: `v18.9.25-liq70-structural-rescue`
